@@ -1,0 +1,13 @@
+[package]
+name = "bao-experiment"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bao = "0.12.1"
+blake3 = "1.3.3"
+hex = "0.4.3"
+proptest = "1.0.0"
+rand = "0.8.5"
