@@ -5,168 +5,8 @@ use std::io::{self, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
-
-fn blocks(leafs: usize) -> usize {
-    leafs * 2 - 1
-}
-
-fn leafs(blocks: usize) -> usize {
-    (blocks + 1) / 2
-}
-
-/// Root offset given a number of leaves.
-fn root(leafs: usize) -> usize {
-    assert!(leafs > 0);
-    leafs.next_power_of_two() - 1
-}
-
-/// Level for an offset. 0 is for leaves, 1 is for the first level of branches, etc.
-fn level(offset: usize) -> u32 {
-    (!offset).trailing_zeros()
-}
-
-/// Span for an offset. 1 is for leaves, 2 is for the first level of branches, etc.
-fn span(offset: usize) -> usize {
-    1 << level(offset)
-}
-
-fn left_child(offset: usize) -> Option<usize> {
-    let span = span(offset);
-    if span == 1 {
-        None
-    } else {
-        Some(offset - span / 2)
-    }
-}
-
-fn right_child(offset: usize) -> Option<usize> {
-    let span = span(offset);
-    if span == 1 {
-        None
-    } else {
-        Some(offset + span / 2)
-    }
-}
-
-fn children(offset: usize) -> Option<(usize, usize)> {
-    let span = span(offset);
-    if span == 1 {
-        None
-    } else {
-        Some((offset - span / 2, offset + span / 2))
-    }
-}
-
-fn is_left_sibling(offset: usize) -> bool {
-    let span = span(offset) * 2;
-    (offset & span) == 0
-}
-
-fn parent(offset: usize) -> usize {
-    let span = span(offset);
-    // if is_left_sibling(offset) {
-    if (offset & (span * 2)) == 0 {
-        offset + span
-    } else {
-        offset - span
-    }
-}
-
-fn sibling(offset: usize) -> usize {
-    if is_left_sibling(offset) {
-        offset + span(offset) * 2
-    } else {
-        offset - span(offset) * 2
-    }
-}
-
-type BranchNode = [u8; 64];
-
-fn empty_hash() -> blake3::Hash {
-    blake3::Hash::from([0u8; 32])
-}
-
-struct SparseOutboard {
-    /// even offsets are leaf hashes, odd offsets are branch hashes
-    tree: Vec<blake3::Hash>,
-    /// occupancy bitmap for the tree
-    bitmap: Vec<bool>,
-    /// total length of the data
-    len: u64,
-}
-
-impl SparseOutboard {
-    fn new() -> Self {
-        Self {
-            tree: Vec::new(),
-            bitmap: Vec::new(),
-            len: 0,
-        }
-    }
-
-    fn leafs(&self) -> usize {
-        leafs(self.tree.len())
-    }
-
-    fn from_data(data: &[u8]) -> Self {
-        let len = data.len() as u64;
-        let blocks = blocks(data.len());
-        let mut tree = vec![empty_hash(); blocks * 2 - 1];
-        let mut bitmap = vec![false; blocks * 2 - 1];
-        for (offset, hash) in leaf_hashes_iter(data) {
-            tree[offset * 2] = hash;
-            bitmap[offset * 2] = true;
-        }
-        let mut res = Self { tree, bitmap, len };
-        res.rehash();
-        res
-    }
-
-    fn get_hash(&self, offset: usize) -> Option<&blake3::Hash> {
-        if offset < self.bitmap.len() {
-            if self.bitmap[offset] {
-                Some(&self.tree[offset])
-            } else {
-                None
-            }
-        } else if let Some(left_child) = left_child(offset) {
-            self.get_hash(left_child)
-        } else {
-            None
-        }
-    }
-
-    fn rehash(&mut self) {
-        self.rehash0(root(self.leafs()), true);
-    }
-
-    fn rehash0(&mut self, offset: usize, is_root: bool) {
-        assert!(self.bitmap.len() == self.tree.len());
-        if offset < self.bitmap.len() {
-            if !self.bitmap[offset] {
-                if let Some((l, r)) = children(offset) {
-                    self.rehash0(l, false);
-                    self.rehash0(r, false);
-                    if let (Some(left_child), Some(right_child)) =
-                        (self.get_hash(l), self.get_hash(r))
-                    {
-                        let res = blake3::guts::parent_cv(left_child, right_child, is_root);
-                        self.bitmap[offset] = true;
-                        self.tree[offset] = res;
-                    }
-                } else {
-                    // would have to rehash from data
-                }
-            } else {
-                // nothing to do
-            }
-        } else {
-            if let Some(left_child) = left_child(offset) {
-                self.rehash0(left_child, false);
-            }
-        }
-    }
-}
+mod sparse_outboard;
+use sparse_outboard::SparseOutboard;
 
 struct Inner {
     buffer: VecDeque<u8>,
@@ -353,6 +193,7 @@ fn print_outboard(data: &[u8]) {
     println!("outboard: {}", hex::encode(outboard.as_slice()));
     println!("ob_hash:  {}", hex::encode(hash.as_bytes()));
     println!("blake3_h: {}", hex::encode(blake3::hash(&data).as_bytes()));
+    println!("sparse_o: {}", hex::encode(SparseOutboard::new(&data).hash().unwrap().as_bytes()));
     if data.len() <= 1024 {
         println!(
             "manual: {}",
@@ -399,7 +240,6 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::{max, min};
 
     use super::*;
     use proptest::prelude::*;
@@ -410,111 +250,6 @@ mod tests {
             let hash = blake3::hash(&data);
             let hash2 = blake3_own(&data);
             assert_eq!(hash, hash2);
-        }
-
-        #[test]
-        fn children_parent(i in any::<usize>()) {
-            if let Some((l, r)) = children(i) {
-                assert_eq!(parent(l), i);
-                assert_eq!(parent(r), i);
-            }
-        }
-
-        /// Checks that left_child/right_child are consistent with children
-        #[test]
-        fn children_consistent(i in any::<usize>()) {
-            let lc = left_child(i);
-            let rc = right_child(i);
-            let c = children(i);
-            let lc1 = c.map(|(l, _)| l);
-            let rc1 = c.map(|(_, r)| r);
-            assert_eq!(lc, lc1);
-            assert_eq!(rc, rc1);
-        }
-
-        #[test]
-        fn sibling_sibling(i in any::<usize>()) {
-            let s = sibling(i);
-            let distance = max(s, i) - min(s, i);
-            // sibling is at a distance of 2*span
-            assert_eq!(distance, span(i) * 2);
-            // sibling of sibling is value itself
-            assert_eq!(sibling(s), i);
-        }
-    }
-
-    #[test]
-    fn test_left() {
-        for i in 0..20 {
-            println!("assert_eq!(left_child({}), {:?})", i, left_child(i));
-        }
-        for i in 0..20 {
-            println!("assert_eq!(is_left({}), {})", i, is_left_sibling(i));
-        }
-        for i in 0..20 {
-            println!("assert_eq!(parent({}), {})", i, parent(i));
-        }
-        for i in 0..20 {
-            println!("assert_eq!(sibling({}), {})", i, sibling(i));
-        }
-        assert_eq!(left_child(3), Some(1));
-        assert_eq!(left_child(1), Some(0));
-        assert_eq!(left_child(0), None);
-    }
-
-    #[test]
-    fn test_span() {
-        for i in 0..10 {
-            println!("assert_eq!(span({}), {})", i, span(i))
-        }
-    }
-
-    #[test]
-    fn test_level() {
-        for i in 0..10 {
-            println!("assert_eq!(level({}), {})", i, level(i))
-        }
-        assert_eq!(level(0), 0);
-        assert_eq!(level(1), 1);
-        assert_eq!(level(2), 0);
-        assert_eq!(level(3), 2);
-    }
-
-    #[test]
-    fn test_root() {
-        assert_eq!(root(1), 0);
-        assert_eq!(root(2), 1);
-        assert_eq!(root(3), 3);
-        assert_eq!(root(4), 3);
-        assert_eq!(root(5), 7);
-        assert_eq!(root(6), 7);
-        assert_eq!(root(7), 7);
-        assert_eq!(root(8), 7);
-        assert_eq!(root(9), 15);
-        assert_eq!(root(10), 15);
-        assert_eq!(root(11), 15);
-        assert_eq!(root(12), 15);
-        assert_eq!(root(13), 15);
-        assert_eq!(root(14), 15);
-        assert_eq!(root(15), 15);
-        assert_eq!(root(16), 15);
-        assert_eq!(root(17), 31);
-        assert_eq!(root(18), 31);
-        assert_eq!(root(19), 31);
-        assert_eq!(root(20), 31);
-        assert_eq!(root(21), 31);
-        assert_eq!(root(22), 31);
-        assert_eq!(root(23), 31);
-        assert_eq!(root(24), 31);
-        assert_eq!(root(25), 31);
-        assert_eq!(root(26), 31);
-        assert_eq!(root(27), 31);
-        assert_eq!(root(28), 31);
-        assert_eq!(root(29), 31);
-        assert_eq!(root(30), 31);
-        assert_eq!(root(31), 31);
-        for i in 1..32 {
-            println!("assert_eq!(root({}),{});", i, root(i))
         }
     }
 }
