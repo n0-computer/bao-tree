@@ -293,9 +293,8 @@ impl SparseOutboard {
             self.slice0(l, data, offset_range, target)?;
             self.slice0(r, data, offset_range, target)?;
         } else {
-            let start = index(offset) * 1024;
-            let end = (start + 1024).min(self.len);
-            let slice = &data[start..end];
+            let leaf_byte_range = self.leaf_byte_range(offset);
+            let slice = &data[leaf_byte_range];
             target.extend_from_slice(slice);
         }
         Some(())
@@ -303,12 +302,14 @@ impl SparseOutboard {
 
     pub fn add_from_slice(&mut self, data: &mut [u8], byte_range: Range<usize>, slice: &[u8]) -> anyhow::Result<()> {
         assert!(data.len() == self.len);
-        assert!(slice.len() >= 8);
+        anyhow::ensure!(slice.len() >= 8, "slice too short");
         let len = u64::from_le_bytes(slice[0..8].try_into().unwrap()) as usize;
-        assert_eq!(len, self.len);
+        anyhow::ensure!(len == self.len, "wrong length");
         let mut remaining = &slice[8..];
         let offset_range = offset_range(byte_range);
-        self.add_from_slice_0(root(self.leafs()), data, &offset_range, &mut remaining, true)
+        self.add_from_slice_0(root(self.leafs()), data, &offset_range, &mut remaining, true)?;
+        anyhow::ensure!(remaining.is_empty(), "slice too long");
+        Ok(())
     }
 
     fn add_from_slice_0(&mut self, offset: usize, data: &mut [u8], offset_range: &Range<usize>, slice: &mut &[u8], is_root: bool) -> anyhow::Result<()> {
@@ -329,9 +330,14 @@ impl SparseOutboard {
             self.add_from_slice_0(l, data, offset_range, slice, false)?;
             self.add_from_slice_0(r, data, offset_range, slice, false)?;
         } else {
-            let byte_range = self.leaf_byte_range(offset);
-            let slice = &slice[0..(byte_range.end - byte_range.start)];
-            data[byte_range].copy_from_slice(slice);
+            let leaf_byte_range = self.leaf_byte_range(offset);
+            let len = leaf_byte_range.end - leaf_byte_range.start;
+            anyhow::ensure!(slice.len() >= len, "slice too short");
+            let leaf_slice = &slice[0..len];
+            *slice = &slice[len..];
+            let expected_hash = leaf_hash(index(offset) as u64, leaf_slice, is_root);
+            self.validate(offset, expected_hash)?;
+            data[leaf_byte_range].copy_from_slice(leaf_slice);
         }
         Ok(())
     }
@@ -354,8 +360,10 @@ impl SparseOutboard {
     fn set_or_validate(&mut self, offset: usize, hash: blake3::Hash) -> anyhow::Result<()> {
         anyhow::ensure!(offset < self.tree.len());
         if self.bitmap[offset] {
+            println!("validating hash at offset {} level {}", offset, level(offset));
             anyhow::ensure!(self.tree[offset] == hash, "hash mismatch");
         } else {
+            println!("storing hash at offset {} level {}", offset, level(offset));
             self.bitmap[offset] = true;
             self.tree[offset] = hash;
         }
@@ -366,6 +374,7 @@ impl SparseOutboard {
     fn validate(&mut self, offset: usize, hash: blake3::Hash) -> anyhow::Result<()> {
         anyhow::ensure!(offset < self.tree.len());
         anyhow::ensure!(self.bitmap[offset], "hash not set");
+        println!("validating hash at offset {} level {}", offset, level(offset));
         anyhow::ensure!(self.tree[offset] == hash, "hash mismatch");
         Ok(())
     }
@@ -393,6 +402,16 @@ impl SparseOutboard {
         let mut res = Self { tree, bitmap, len };
         res.rehash(None);
         res
+    }
+
+    fn clear(&mut self) {
+        for i in 0..self.bitmap.len() {
+            if i != root(self.leafs()) {
+                self.bitmap[i] = false;
+             
+                self.tree[i] = empty_hash();
+            }
+        }
     }
 
     fn get_hash(&self, offset: usize) -> Option<&blake3::Hash> {
@@ -492,10 +511,24 @@ mod tests {
         let so = SparseOutboard::new(&data);
         let slice2 = so.slice(&data, start..start + len).unwrap();
         if slice1 != slice2 {
-            println!("{} {}", slice1.len() - 8 - 64, slice2.len() - 8 - 64);
+            println!("{} {}", slice1.len(), slice2.len());
             println!("{}\n{}", hex::encode(&slice1), hex::encode(&slice2));
         }
         assert_eq!(slice1, slice2);
+    }
+
+    fn add_from_slice_impl(size: usize, start: usize, len: usize) {
+        let mut data = (0..size).map(|i| (i / 1024) as u8).collect::<Vec<_>>();
+        let (outboard, _hash) = bao::encode::outboard(&data);
+        let mut extractor = SliceExtractor::new_outboard(Cursor::new(&data), Cursor::new(&outboard), start as u64, len as u64);
+        let mut slice1 = Vec::new();
+        extractor.read_to_end(&mut slice1).unwrap();
+        let mut so = SparseOutboard::new(&data);
+        so.add_from_slice(&mut data, start..start + len, &slice1).unwrap();
+        so.clear();
+        so.add_from_slice(&mut data, start..start + len, &slice1).unwrap();
+        slice1[8] ^= 1;
+        assert!(so.add_from_slice(&mut data, start..start + len, &slice1).is_err());
     }
 
     proptest! {
@@ -530,6 +563,11 @@ mod tests {
         #[test]
         fn compare_slice((size, start, len) in size_start_len()) {
             compare_slice_impl(size, start, len)
+        }
+
+        #[test]
+        fn add_from_slice((size, start, len) in size_start_len()) {
+            add_from_slice_impl(size, start, len)
         }
 
         #[test]
