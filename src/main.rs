@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::task::Poll;
 mod sparse_outboard;
 use sparse_outboard::SparseOutboard;
+mod tree;
 
 struct Inner {
     buffer: VecDeque<u8>,
@@ -100,38 +101,10 @@ impl Write for IoBuffer {
     }
 }
 
-struct BaoEncoder {
-    encoder: blake3::guts::ChunkState,
-    tree: Vec<blake3::Hash>,
-    total_len: u64,
-}
-
-impl BaoEncoder {
-    fn new() -> Self {
-        Self {
-            encoder: blake3::guts::ChunkState::new(0),
-            tree: Vec::new(),
-            total_len: 0,
-        }
-    }
-
-    fn write(&mut self, data: &[u8]) {
-        self.encoder.update(data);
-        self.total_len += data.len() as u64;
-    }
-}
-
 fn hash_leaf(offset: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     let mut hasher = blake3::guts::ChunkState::new(offset);
     hasher.update(data);
     hasher.finalize(is_root)
-}
-
-fn leaf_hashes_iter(data: &[u8]) -> impl Iterator<Item = (usize, blake3::Hash)> + '_ {
-    let is_root = data.len() <= 1024;
-    data.chunks(1024)
-        .enumerate()
-        .map(move |(i, data)| (i, hash_leaf(i as u64, data, is_root)))
 }
 
 fn leaf_hashes(data: &[u8]) -> Vec<blake3::Hash> {
@@ -144,19 +117,6 @@ fn leaf_hashes(data: &[u8]) -> Vec<blake3::Hash> {
     } else {
         vec![hash_leaf(0, &[], is_root)]
     }
-}
-
-fn create_outboard(data: &[u8]) -> Vec<u8> {
-    let mut outboard = Vec::new();
-    outboard.extend_from_slice(&(data.len() as u64).to_be_bytes());
-    let mut hashes = leaf_hashes(data);
-    // while hashes.len() > 1 {
-    //     for hash in &hashes {
-    //         outboard.extend_from_slice(hash.as_bytes());
-    //     }
-    //     hashes = condense(&hashes);
-    // }
-    outboard
 }
 
 fn condense(hashes: &[blake3::Hash]) -> Vec<blake3::Hash> {
@@ -183,7 +143,6 @@ fn blake3_own(data: &[u8]) -> blake3::Hash {
     hashes[0]
 }
 
-use bao::encode;
 use tokio::io::AsyncRead;
 
 fn print_outboard(data: &[u8]) {
@@ -193,7 +152,10 @@ fn print_outboard(data: &[u8]) {
     println!("outboard: {}", hex::encode(outboard.as_slice()));
     println!("ob_hash:  {}", hex::encode(hash.as_bytes()));
     println!("blake3_h: {}", hex::encode(blake3::hash(&data).as_bytes()));
-    println!("sparse_o: {}", hex::encode(SparseOutboard::new(&data).hash().unwrap().as_bytes()));
+    println!(
+        "sparse_o: {}",
+        hex::encode(SparseOutboard::new(&data).hash().unwrap().as_bytes())
+    );
     if data.len() <= 1024 {
         println!(
             "manual: {}",
