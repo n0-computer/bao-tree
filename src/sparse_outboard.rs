@@ -1,4 +1,7 @@
-use std::ops::Range;
+use std::{ops::Range, io::Read};
+
+#[repr(transparent)]
+struct Offset(usize);
 
 fn leaf_hash(offset: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     let mut hasher = blake3::guts::ChunkState::new(offset);
@@ -300,29 +303,30 @@ impl SparseOutboard {
         Some(())
     }
 
-    pub fn add_from_slice(&mut self, data: &mut [u8], byte_range: Range<usize>, slice: &[u8]) -> anyhow::Result<()> {
+    pub fn add_from_slice(&mut self, data: &mut [u8], byte_range: Range<usize>, slice: &mut impl Read) -> anyhow::Result<()> {
         assert!(data.len() == self.len);
-        anyhow::ensure!(slice.len() >= 8, "slice too short");
-        let len = u64::from_le_bytes(slice[0..8].try_into().unwrap()) as usize;
+        let mut buf = [0u8; 8];
+        slice.read_exact(&mut buf)?;
+        let len = u64::from_le_bytes(buf) as usize;
         anyhow::ensure!(len == self.len, "wrong length");
-        let mut remaining = &slice[8..];
         let offset_range = offset_range(byte_range);
-        self.add_from_slice_0(root(self.leafs()), data, &offset_range, &mut remaining, true)?;
-        anyhow::ensure!(remaining.is_empty(), "slice too long");
+        self.add_from_slice_0(root(self.leafs()), data, &offset_range, slice, true)?;
         Ok(())
     }
 
-    fn add_from_slice_0(&mut self, offset: usize, data: &mut [u8], offset_range: &Range<usize>, slice: &mut &[u8], is_root: bool) -> anyhow::Result<()> {
+    fn add_from_slice_0(&mut self, offset: usize, data: &mut [u8], offset_range: &Range<usize>, slice: &mut impl Read, is_root: bool) -> anyhow::Result<()> {
         let range = range(offset);
         // if the range of this node is entirely outside the slice, we can skip it
         if range.end <= offset_range.start || range.start >= offset_range.end {
             return Ok(());
         }
         if let Some((l, r)) = descendants(offset, self.tree.len()) {
-            anyhow::ensure!(slice.len() >= 64, "slice too short");
-            let left_child = load_hash(&slice[0..32]);
-            let right_child = load_hash(&slice[32..64]);
-            *slice = &slice[64..];
+            let mut lh = [0u8; 32];
+            let mut rh = [0u8; 32];
+            slice.read_exact(&mut lh)?;
+            slice.read_exact(&mut rh)?;
+            let left_child = lh.into();
+            let right_child = rh.into();
             let expected_hash = blake3::guts::parent_cv(&left_child, &right_child, is_root);
             self.validate(offset, expected_hash)?;
             self.set_or_validate(l, left_child)?;
@@ -332,12 +336,12 @@ impl SparseOutboard {
         } else {
             let leaf_byte_range = self.leaf_byte_range(offset);
             let len = leaf_byte_range.end - leaf_byte_range.start;
-            anyhow::ensure!(slice.len() >= len, "slice too short");
-            let leaf_slice = &slice[0..len];
-            *slice = &slice[len..];
-            let expected_hash = leaf_hash(index(offset) as u64, leaf_slice, is_root);
+            anyhow::ensure!(len <= 1024, "leaf too big");
+            let mut leaf_slice = [0u8; 1024];
+            slice.read_exact(&mut leaf_slice[0..len])?;
+            let expected_hash = leaf_hash(index(offset) as u64, &leaf_slice[..len], is_root);
             self.validate(offset, expected_hash)?;
-            data[leaf_byte_range].copy_from_slice(leaf_slice);
+            data[leaf_byte_range].copy_from_slice(&leaf_slice[..len]);
         }
         Ok(())
     }
@@ -524,11 +528,11 @@ mod tests {
         let mut slice1 = Vec::new();
         extractor.read_to_end(&mut slice1).unwrap();
         let mut so = SparseOutboard::new(&data);
-        so.add_from_slice(&mut data, start..start + len, &slice1).unwrap();
+        so.add_from_slice(&mut data, start..start + len, &mut Cursor::new(&slice1)).unwrap();
         so.clear();
-        so.add_from_slice(&mut data, start..start + len, &slice1).unwrap();
+        so.add_from_slice(&mut data, start..start + len, &mut Cursor::new(&slice1)).unwrap();
         slice1[8] ^= 1;
-        assert!(so.add_from_slice(&mut data, start..start + len, &slice1).is_err());
+        assert!(so.add_from_slice(&mut data, start..start + len, &mut Cursor::new(&slice1)).is_err());
     }
 
     proptest! {
