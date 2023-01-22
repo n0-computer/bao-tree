@@ -1,20 +1,180 @@
-use std::ops::Range;
+use std::ops::{Add, Div, Mul, Range, Sub};
 
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Offset(pub usize);
+macro_rules! index_newtype {
+    (
+        $(#[$outer:meta])*
+        pub struct $name:ident(pub $wrapped:ty);
+    ) => {
+        $(#[$outer])*
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(pub $wrapped);
 
-impl PartialEq<usize> for Offset {
-    fn eq(&self, other: &usize) -> bool {
-        self.0 == *other
+
+        impl Mul<$wrapped> for $name {
+            type Output = $name;
+
+            fn mul(self, rhs: $wrapped) -> Self::Output {
+                $name(self.0 * rhs)
+            }
+        }
+
+        impl Div<$wrapped> for $name {
+            type Output = $name;
+
+            fn div(self, rhs: $wrapped) -> Self::Output {
+                $name(self.0 / rhs)
+            }
+        }
+
+        impl Sub<$wrapped> for $name {
+            type Output = $name;
+
+            fn sub(self, rhs: $wrapped) -> Self::Output {
+                $name(self.0 - rhs)
+            }
+        }
+
+        impl Sub<$name> for $name {
+            type Output = $name;
+
+            fn sub(self, rhs: $name) -> Self::Output {
+                $name(self.0 - rhs.0)
+            }
+        }
+
+        impl Add<$wrapped> for $name {
+            type Output = $name;
+
+            fn add(self, rhs: $wrapped) -> Self::Output {
+                $name(self.0 + rhs)
+            }
+        }
+
+        impl Add<$name> for $name {
+            type Output = $name;
+
+            fn add(self, rhs: $name) -> Self::Output {
+                $name(self.0 + rhs.0)
+            }
+        }
+
+        impl PartialEq<$wrapped> for $name {
+            fn eq(&self, other: &$wrapped) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<$name> for $wrapped {
+            fn eq(&self, other: &$name) -> bool {
+                *self == other.0
+            }
+        }
+
+        impl PartialOrd<$wrapped> for $name {
+            fn partial_cmp(&self, other: &$wrapped) -> Option<std::cmp::Ordering> {
+                self.0.partial_cmp(other)
+            }
+        }
     }
 }
 
-impl PartialOrd<usize> for Offset {
-    fn partial_cmp(&self, other: &usize) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(other)
-    }
+index_newtype! {
+    /// Offset in the tree.
+    pub struct Offset(pub usize);
 }
+
+index_newtype! {
+    /// offset of a <=1024 byte chunk in a blake3 hash.
+    pub struct Chunk(pub usize);
+}
+
+index_newtype! {
+    /// offset of a block with its own hash.
+    pub struct Block(pub usize);
+}
+
+index_newtype! {
+    /// A byte offset in a file.
+    pub struct ByteOffset(pub usize);
+}
+
+macro_rules! index {
+    ($name: ident, $wrapped: ident) => {
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(pub $wrapped);
+
+        impl Mul<$wrapped> for $name {
+            type Output = $name;
+
+            fn mul(self, rhs: $wrapped) -> Self::Output {
+                $name(self.0 * rhs)
+            }
+        }
+
+        impl Div<$wrapped> for $name {
+            type Output = $name;
+
+            fn div(self, rhs: $wrapped) -> Self::Output {
+                $name(self.0 / rhs)
+            }
+        }
+
+        impl Sub<$wrapped> for $name {
+            type Output = $name;
+
+            fn sub(self, rhs: $wrapped) -> Self::Output {
+                $name(self.0 - rhs)
+            }
+        }
+
+        impl Sub<$name> for $name {
+            type Output = $name;
+
+            fn sub(self, rhs: $name) -> Self::Output {
+                $name(self.0 - rhs.0)
+            }
+        }
+
+        impl Add<$wrapped> for $name {
+            type Output = $name;
+
+            fn add(self, rhs: $wrapped) -> Self::Output {
+                $name(self.0 + rhs)
+            }
+        }
+
+        impl Add<$name> for $name {
+            type Output = $name;
+
+            fn add(self, rhs: $name) -> Self::Output {
+                $name(self.0 + rhs.0)
+            }
+        }
+
+        impl PartialEq<$wrapped> for $name {
+            fn eq(&self, other: &$wrapped) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<$name> for $wrapped {
+            fn eq(&self, other: &$name) -> bool {
+                *self == other.0
+            }
+        }
+
+        impl PartialOrd<$wrapped> for $name {
+            fn partial_cmp(&self, other: &$wrapped) -> Option<std::cmp::Ordering> {
+                self.0.partial_cmp(other)
+            }
+        }
+    };
+}
+
+// index!(Offset, usize);
+// index!(Chunk, u64);
 
 pub fn leafs(blocks: Offset) -> usize {
     (blocks.0 + 1) / 2
@@ -88,7 +248,7 @@ pub fn children(offset: Offset) -> Option<(Offset, Offset)> {
     if span.0 == 1 {
         None
     } else {
-        Some((Offset(offset.0 - span.0 / 2), Offset(offset.0 + span.0 / 2)))
+        Some((offset - span / 2, offset + span / 2))
     }
 }
 
@@ -126,8 +286,9 @@ fn parent0(offset: usize) -> usize {
     }
 }
 
-pub fn index(offset: Offset) -> usize {
-    offset.0 / 2
+/// Get the chunk index for an offset
+pub fn index(offset: Offset) -> Chunk {
+    Chunk(offset.0 / 2)
 }
 
 pub fn range(offset: Offset) -> Range<Offset> {
