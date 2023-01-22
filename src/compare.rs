@@ -1,10 +1,3 @@
-use tree::BLAKE3_CHUNK_SIZE;
-mod sync_store;
-mod tree;
-
-#[cfg(test)]
-mod tests;
-
 fn hash_leaf(offset: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     let mut hasher = blake3::guts::ChunkState::new(offset);
     hasher.update(data);
@@ -47,10 +40,9 @@ fn blake3_own(data: &[u8]) -> blake3::Hash {
     hashes[0]
 }
 
-use tokio::io::AsyncRead;
-
-use crate::sync_store::{BlakeFile, VecSyncStore};
-use crate::tree::BlockLevel;
+use crate::sync_store::VecSyncStore;
+use crate::tree::{BlockLevel, BLAKE3_CHUNK_SIZE};
+use crate::BlakeFile;
 
 fn print_outboard(data: &[u8]) {
     println!("len:   {}", data.len());
@@ -107,7 +99,8 @@ fn print_outboard(data: &[u8]) {
     }
 }
 
-fn main() {
+#[test]
+fn compare_bao() {
     for i in (0..(4096)).step_by(64) {
         let data = (0..i).map(|_| (i / 701) as u8).collect::<Vec<_>>();
         print_outboard(&data);

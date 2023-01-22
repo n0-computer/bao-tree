@@ -14,7 +14,7 @@ fn fmt_outboard(outboard: &[u8]) -> String {
     res
 }
 
-fn size_start_len() -> impl Strategy<Value = (Bytes, Bytes, Bytes)> {
+fn size_start_len() -> impl Strategy<Value = (ByteNum, ByteNum, ByteNum)> {
     (0u64..32768)
         .prop_flat_map(|size| {
             let start = 0u64..size;
@@ -22,14 +22,14 @@ fn size_start_len() -> impl Strategy<Value = (Bytes, Bytes, Bytes)> {
             (Just(size), start, len)
         })
         .prop_map(|(size, start, len)| {
-            let size = Bytes(size);
-            let start = Bytes(start);
-            let len = Bytes(len);
+            let size = ByteNum(size);
+            let start = ByteNum(start);
+            let len = ByteNum(len);
             (size, start, len)
         })
 }
 
-fn compare_slice_iter_impl(size: Bytes, start: Bytes, len: Bytes) {
+fn compare_slice_iter_impl(size: ByteNum, start: ByteNum, len: ByteNum) {
     // generate data, different value for each chunk so the hashes are intersting
     let data = (0..size.0)
         .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
@@ -62,7 +62,7 @@ fn compare_slice_iter_impl(size: Bytes, start: Bytes, len: Bytes) {
     assert_eq!(slice1, slice2);
 }
 
-fn add_from_slice_impl(size: Bytes, start: Bytes, len: Bytes) {
+fn add_from_slice_impl(size: ByteNum, start: ByteNum, len: ByteNum) {
     // generate data, different value for each chunk so the hashes are intersting
     let data = (0..size.0)
         .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
@@ -159,7 +159,7 @@ proptest! {
     #[test]
     fn compare_hash_block_recursive(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
         let hash = blake3::hash(&data);
-        let hash2 = hash_block(Blocks(0), &data, BlockLevel(10), true);
+        let hash2 = hash_block(BlockNum(0), &data, BlockLevel(10), true);
         assert_eq!(hash, hash2);
     }
 }
@@ -171,7 +171,7 @@ fn compare_hash_0() {
 
 #[test]
 fn compare_slice_iter_0() {
-    compare_slice_iter_impl(Bytes(1025), Bytes(182), Bytes(843));
+    compare_slice_iter_impl(ByteNum(1025), ByteNum(182), ByteNum(843));
 }
 
 #[test]

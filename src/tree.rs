@@ -98,37 +98,37 @@ index_newtype! {
     /// A number of nodes in the tree
     ///
     /// When used as an index, even numbers correspond to leaf nodes, odd numbers to branch nodes.
-    pub struct Nodes(pub u64);
+    pub struct NodeNum(pub u64);
 }
 
 index_newtype! {
     /// A number of <=1024 byte blake3 chunks
-    pub struct Chunks(pub u64);
+    pub struct ChunkNum(pub u64);
 }
 
 pub(crate) const BLAKE3_CHUNK_SIZE: u64 = 1024;
 
-impl Chunks {
-    fn to_bytes(self) -> Bytes {
-        Bytes(self.0 * BLAKE3_CHUNK_SIZE)
+impl ChunkNum {
+    fn to_bytes(self) -> ByteNum {
+        ByteNum(self.0 * BLAKE3_CHUNK_SIZE)
     }
 }
 
 index_newtype! {
     /// a number of leaf blocks with its own hash
-    pub struct Blocks(pub u64);
+    pub struct BlockNum(pub u64);
 }
 
-impl Blocks {
-    pub fn to_bytes(self, block_level: BlockLevel) -> Bytes {
+impl BlockNum {
+    pub fn to_bytes(self, block_level: BlockLevel) -> ByteNum {
         let block_size = block_size(block_level);
-        Bytes(self.0 * block_size.0)
+        ByteNum(self.0 * block_size.0)
     }
 }
 
 index_newtype! {
     /// A number of bytes
-    pub struct Bytes(pub u64);
+    pub struct ByteNum(pub u64);
 }
 
 /// A block level. 0 means that a block corresponds to a blake3 chunk,
@@ -142,25 +142,21 @@ pub struct BlockLevel(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TreeLevel(pub u32);
 
-pub fn bo_range_to_usize(range: Range<Bytes>) -> Range<usize> {
-    range.start.to_usize()..range.end.to_usize()
-}
-
-pub fn block_size(block_level: BlockLevel) -> Bytes {
-    Bytes(block_size0(block_level.0))
+pub fn block_size(block_level: BlockLevel) -> ByteNum {
+    ByteNum(block_size0(block_level.0))
 }
 
 fn block_size0(block_level: u32) -> u64 {
     BLAKE3_CHUNK_SIZE << block_level
 }
 
-pub fn leafs(blocks: Nodes) -> Blocks {
-    Blocks((blocks.0 + 1) / 2)
+pub fn leafs(blocks: NodeNum) -> BlockNum {
+    BlockNum((blocks.0 + 1) / 2)
 }
 
 /// Root offset given a number of leaves.
-pub fn root(leafs: Blocks) -> Nodes {
-    Nodes(root0(leafs.0))
+pub fn root(leafs: BlockNum) -> NodeNum {
+    NodeNum(root0(leafs.0))
 }
 
 fn root0(leafs: u64) -> u64 {
@@ -168,7 +164,7 @@ fn root0(leafs: u64) -> u64 {
 }
 
 /// Level for an offset. 0 is for leaves, 1 is for the first level of branches, etc.
-pub fn level(offset: Nodes) -> TreeLevel {
+pub fn level(offset: NodeNum) -> TreeLevel {
     TreeLevel(level0(offset.0))
 }
 
@@ -176,8 +172,8 @@ fn level0(offset: u64) -> u32 {
     (!offset).trailing_zeros()
 }
 
-pub fn blocks(len: Bytes, block_level: BlockLevel) -> Blocks {
-    Blocks(blocks0(len.0, block_level.0))
+pub fn blocks(len: ByteNum, block_level: BlockLevel) -> BlockNum {
+    BlockNum(blocks0(len.0, block_level.0))
 }
 
 fn blocks0(len: u64, block_level: u32) -> u64 {
@@ -185,8 +181,8 @@ fn blocks0(len: u64, block_level: u32) -> u64 {
     len / block_size + if len % block_size == 0 { 0 } else { 1 }
 }
 
-pub fn full_blocks(len: Bytes, block_level: BlockLevel) -> Blocks {
-    Blocks(full_blocks0(len.0, block_level.0))
+pub fn full_blocks(len: ByteNum, block_level: BlockLevel) -> BlockNum {
+    BlockNum(full_blocks0(len.0, block_level.0))
 }
 
 fn full_blocks0(len: u64, block_level: u32) -> u64 {
@@ -194,8 +190,8 @@ fn full_blocks0(len: u64, block_level: u32) -> u64 {
     len / block_size
 }
 
-pub fn num_hashes(blocks: Blocks) -> Nodes {
-    Nodes(num_hashes0(blocks.0))
+pub fn num_hashes(blocks: BlockNum) -> NodeNum {
+    NodeNum(num_hashes0(blocks.0))
 }
 
 fn num_hashes0(blocks: u64) -> u64 {
@@ -207,16 +203,16 @@ fn num_hashes0(blocks: u64) -> u64 {
 }
 
 /// Span for an offset. 1 is for leaves, 2 is for the first level of branches, etc.
-pub fn span(offset: Nodes) -> Nodes {
-    Nodes(span0(offset.0))
+pub fn span(offset: NodeNum) -> NodeNum {
+    NodeNum(span0(offset.0))
 }
 
 fn span0(offset: u64) -> u64 {
     1 << (!offset).trailing_zeros()
 }
 
-pub fn left_child(offset: Nodes) -> Option<Nodes> {
-    left_child0(offset.0).map(Nodes)
+pub fn left_child(offset: NodeNum) -> Option<NodeNum> {
+    left_child0(offset.0).map(NodeNum)
 }
 
 fn left_child0(offset: u64) -> Option<u64> {
@@ -228,8 +224,8 @@ fn left_child0(offset: u64) -> Option<u64> {
     }
 }
 
-pub fn right_child(offset: Nodes) -> Option<Nodes> {
-    right_child0(offset.0).map(Nodes)
+pub fn right_child(offset: NodeNum) -> Option<NodeNum> {
+    right_child0(offset.0).map(NodeNum)
 }
 
 fn right_child0(offset: u64) -> Option<u64> {
@@ -242,7 +238,7 @@ fn right_child0(offset: u64) -> Option<u64> {
 }
 
 /// Get a valid right descendant for an offset
-pub fn right_descendant(offset: Nodes, len: Nodes) -> Option<Nodes> {
+pub fn right_descendant(offset: NodeNum, len: NodeNum) -> Option<NodeNum> {
     let mut offset = right_child(offset)?;
     while offset >= len {
         offset = left_child(offset)?;
@@ -251,7 +247,7 @@ pub fn right_descendant(offset: Nodes, len: Nodes) -> Option<Nodes> {
 }
 
 /// both children are at one level below the parent, but it is not guaranteed that they exist
-pub fn children(offset: Nodes) -> Option<(Nodes, Nodes)> {
+pub fn children(offset: NodeNum) -> Option<(NodeNum, NodeNum)> {
     let span = span(offset);
     if span.0 == 1 {
         None
@@ -261,7 +257,7 @@ pub fn children(offset: Nodes) -> Option<(Nodes, Nodes)> {
 }
 
 /// both children are at one level below the parent, but it is not guaranteed that they exist
-pub fn descendants(offset: Nodes, len: Nodes) -> Option<(Nodes, Nodes)> {
+pub fn descendants(offset: NodeNum, len: NodeNum) -> Option<(NodeNum, NodeNum)> {
     let lc = left_child(offset);
     let rc = right_descendant(offset, len);
     if let (Some(l), Some(r)) = (lc, rc) {
@@ -271,7 +267,7 @@ pub fn descendants(offset: Nodes, len: Nodes) -> Option<(Nodes, Nodes)> {
     }
 }
 
-pub fn is_left_sibling(offset: Nodes) -> bool {
+pub fn is_left_sibling(offset: NodeNum) -> bool {
     is_left_sibling0(offset.0)
 }
 
@@ -280,8 +276,8 @@ fn is_left_sibling0(offset: u64) -> bool {
     (offset & span) == 0
 }
 
-pub fn parent(offset: Nodes) -> Nodes {
-    Nodes(parent0(offset.0))
+pub fn parent(offset: NodeNum) -> NodeNum {
+    NodeNum(parent0(offset.0))
 }
 
 fn parent0(offset: u64) -> u64 {
@@ -295,13 +291,13 @@ fn parent0(offset: u64) -> u64 {
 }
 
 /// Get the chunk index for an offset
-pub fn index(offset: Nodes) -> Blocks {
-    Blocks(offset.0 / 2)
+pub fn index(offset: NodeNum) -> BlockNum {
+    BlockNum(offset.0 / 2)
 }
 
-pub fn range(offset: Nodes) -> Range<Nodes> {
+pub fn range(offset: NodeNum) -> Range<NodeNum> {
     let r = range0(offset.0);
-    Nodes(r.start)..Nodes(r.end)
+    NodeNum(r.start)..NodeNum(r.end)
 }
 
 fn range0(offset: u64) -> Range<u64> {
@@ -309,8 +305,8 @@ fn range0(offset: u64) -> Range<u64> {
     offset + 1 - span..offset + span
 }
 
-pub fn sibling(offset: Nodes) -> Nodes {
-    Nodes(sibling0(offset.0))
+pub fn sibling(offset: NodeNum) -> NodeNum {
+    NodeNum(sibling0(offset.0))
 }
 
 fn sibling0(offset: u64) -> u64 {
@@ -322,19 +318,19 @@ fn sibling0(offset: u64) -> u64 {
 }
 
 /// Given a range of bytes, returns a range of nodes that cover that range.
-pub fn node_range(byte_range: Range<Bytes>, block_level: BlockLevel) -> Range<Nodes> {
+pub fn node_range(byte_range: Range<ByteNum>, block_level: BlockLevel) -> Range<NodeNum> {
     let block_size = block_size(block_level).0;
     let start_block = byte_range.start.0 / block_size;
     let end_block = (byte_range.end.0 + block_size - 1) / block_size;
     let start_offset = start_block * 2;
     let end_offset = end_block * 2;
-    Nodes(start_offset)..Nodes(end_offset)
+    NodeNum(start_offset)..NodeNum(end_offset)
 }
 
 /// Hash a blake3 chunk.
 ///
 /// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
-pub fn hash_chunk(chunk: Chunks, data: &[u8], is_root: bool) -> blake3::Hash {
+pub fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
     debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
     let mut hasher = blake3::guts::ChunkState::new(chunk.0);
     hasher.update(data);
@@ -346,7 +342,7 @@ pub fn hash_chunk(chunk: Chunks, data: &[u8], is_root: bool) -> blake3::Hash {
 /// `block` is the block index, `data` is the block data, `is_root` is true if this is the only block,
 /// and `block_level` indicates how many chunks make up a block. Chunks = 2^level.
 pub fn hash_block(
-    block: Blocks,
+    block: BlockNum,
     data: &[u8],
     block_level: BlockLevel,
     is_root: bool,
@@ -354,7 +350,7 @@ pub fn hash_block(
     // ensure that the data is not too big
     debug_assert!(data.len() <= blake3::guts::CHUNK_LEN << block_level.0);
     // compute the cunk number for the first chunk in this block
-    let chunk0 = Chunks(block.0 << block_level.0);
+    let chunk0 = ChunkNum(block.0 << block_level.0);
     // simple recursive hash.
     // Note that this should really call in to blake3 hash_all_at_once, but
     // that is not exposed in the public API and also does not allow providing
@@ -363,7 +359,7 @@ pub fn hash_block(
 }
 
 /// Recursive helper for hash_block.
-fn hash_block0(chunk0: Chunks, data: &[u8], block_level: u32, is_root: bool) -> blake3::Hash {
+fn hash_block0(chunk0: ChunkNum, data: &[u8], block_level: u32, is_root: bool) -> blake3::Hash {
     if block_level == 0 {
         // we have just a single chunk
         hash_chunk(chunk0, data, is_root)
@@ -396,13 +392,13 @@ fn hash_block0(chunk0: Chunks, data: &[u8], block_level: u32, is_root: bool) -> 
 pub fn block_hashes_iter(
     data: &[u8],
     block_level: BlockLevel,
-) -> impl Iterator<Item = (Blocks, blake3::Hash)> + '_ {
+) -> impl Iterator<Item = (BlockNum, blake3::Hash)> + '_ {
     let block_size = block_size(block_level);
     let is_root = data.len() <= block_size.to_usize();
     data.chunks(block_size.to_usize())
         .enumerate()
         .map(move |(i, data)| {
-            let block = Blocks(i as u64);
+            let block = BlockNum(i as u64);
             (block, hash_block(block, data, block_level, is_root))
         })
 }
@@ -417,7 +413,7 @@ pub fn zero_hash() -> blake3::Hash {
 
 /// root hash for an empty slice, independent of block level
 pub fn empty_root_hash() -> blake3::Hash {
-    hash_chunk(Chunks(0), &[], true)
+    hash_chunk(ChunkNum(0), &[], true)
 }
 
 #[cfg(test)]
@@ -428,19 +424,19 @@ mod tests {
 
     use super::*;
 
-    impl Arbitrary for Nodes {
+    impl Arbitrary for NodeNum {
         type Parameters = ();
-        type Strategy = BoxedStrategy<Nodes>;
+        type Strategy = BoxedStrategy<NodeNum>;
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<u64>().prop_map(Nodes).boxed()
+            any::<u64>().prop_map(NodeNum).boxed()
         }
     }
 
     proptest! {
 
         #[test]
-        fn children_parent(i in any::<Nodes>()) {
+        fn children_parent(i in any::<NodeNum>()) {
             if let Some((l, r)) = children(i) {
                 assert_eq!(parent(l), i);
                 assert_eq!(parent(r), i);
@@ -449,7 +445,7 @@ mod tests {
 
         /// Checks that left_child/right_child are consistent with children
         #[test]
-        fn children_consistent(i in any::<Nodes>()) {
+        fn children_consistent(i in any::<NodeNum>()) {
             let lc = left_child(i);
             let rc = right_child(i);
             let c = children(i);
@@ -460,7 +456,7 @@ mod tests {
         }
 
         #[test]
-        fn sibling_sibling(i in any::<Nodes>()) {
+        fn sibling_sibling(i in any::<NodeNum>()) {
             let s = sibling(i);
             let distance = max(s, i) - min(s, i);
             // sibling is at a distance of 2*span
@@ -470,7 +466,7 @@ mod tests {
         }
 
         #[test]
-        fn compare_descendants(i in any::<Nodes>(), len in any::<Nodes>()) {
+        fn compare_descendants(i in any::<NodeNum>(), len in any::<NodeNum>()) {
             let d = descendants(i, len);
             let lc = left_child(i);
             let rc = right_descendant(i, len);
@@ -489,7 +485,7 @@ mod tests {
             println!(
                 "valid_right_child({}, 9), {:?}",
                 i,
-                right_descendant(Nodes(i), Nodes(9))
+                right_descendant(NodeNum(i), NodeNum(9))
             );
         }
     }
@@ -497,16 +493,24 @@ mod tests {
     #[test]
     fn test_left() {
         for i in 0..20 {
-            println!("assert_eq!(left_child({}), {:?})", i, left_child(Nodes(i)));
+            println!(
+                "assert_eq!(left_child({}), {:?})",
+                i,
+                left_child(NodeNum(i))
+            );
         }
         for i in 0..20 {
-            println!("assert_eq!(is_left({}), {})", i, is_left_sibling(Nodes(i)));
+            println!(
+                "assert_eq!(is_left({}), {})",
+                i,
+                is_left_sibling(NodeNum(i))
+            );
         }
         for i in 0..20 {
-            println!("assert_eq!(parent({}), {:?})", i, parent(Nodes(i)));
+            println!("assert_eq!(parent({}), {:?})", i, parent(NodeNum(i)));
         }
         for i in 0..20 {
-            println!("assert_eq!(sibling({}), {:?})", i, sibling(Nodes(i)));
+            println!("assert_eq!(sibling({}), {:?})", i, sibling(NodeNum(i)));
         }
         assert_eq!(left_child0(3), Some(1));
         assert_eq!(left_child0(1), Some(0));

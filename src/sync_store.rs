@@ -4,7 +4,7 @@ use std::{
     ops::Range,
 };
 
-use crate::tree::*;
+use crate::{tree::*, BlakeFile};
 
 /// Interface for a synchronous store
 ///
@@ -16,30 +16,34 @@ pub trait SyncStore: Sized {
     type IoError: std::fmt::Debug;
 
     /// length of the stored data
-    fn data_len(&self) -> Bytes;
+    fn data_len(&self) -> ByteNum;
 
     /// block level
     fn block_level(&self) -> BlockLevel;
 
     /// length of the tree in nodes
-    fn tree_len(&self) -> Nodes;
+    fn tree_len(&self) -> NodeNum;
 
     /// get a hash from the merkle tree, with existence check
     ///
     /// will panic if the offset is out of bounds
-    fn get_hash(&self, offset: Nodes) -> Result<Option<blake3::Hash>, Self::IoError>;
+    fn get_hash(&self, offset: NodeNum) -> Result<Option<blake3::Hash>, Self::IoError>;
 
     /// set or clear a hash in the merkle tree
     ///
     /// will panic if the offset is out of bounds
-    fn set_hash(&mut self, offset: Nodes, hash: Option<blake3::Hash>) -> Result<(), Self::IoError>;
+    fn set_hash(
+        &mut self,
+        offset: NodeNum,
+        hash: Option<blake3::Hash>,
+    ) -> Result<(), Self::IoError>;
 
     /// get a block of data
     ///
     /// this will be the block size for all blocks except the last one, which may be smaller
     ///
     /// will panic if the offset is out of bounds
-    fn get_block(&self, block: Blocks) -> Result<Option<&[u8]>, Self::IoError>;
+    fn get_block(&self, block: BlockNum) -> Result<Option<&[u8]>, Self::IoError>;
 
     /// set or clear a block of data
     ///
@@ -47,7 +51,7 @@ pub trait SyncStore: Sized {
     /// for which it must match the remainder of the data length
     ///
     /// will panic if the offset is out of bounds
-    fn set_block(&mut self, block: Blocks, data: Option<&[u8]>) -> Result<(), Self::IoError>;
+    fn set_block(&mut self, block: BlockNum, data: Option<&[u8]>) -> Result<(), Self::IoError>;
 
     /// new empty store with the given block level
     ///
@@ -63,24 +67,22 @@ pub trait SyncStore: Sized {
     /// are no longer correct, so it will leave the store in an inconsistent state.
     ///
     /// Use grow to grow the store and invalidate the hashes.
-    fn grow_storage(&mut self, new_len: Bytes) -> Result<(), Self::IoError>;
+    fn grow_storage(&mut self, new_len: ByteNum) -> Result<(), Self::IoError>;
 }
-
-pub struct BlakeFile<S>(S);
 
 impl<S: SyncStore> BlakeFile<S> {
     /// create a new completely initialized store from a slice of data
     pub fn new(data: &[u8], block_level: BlockLevel) -> Result<Self, S::IoError> {
         let mut res = S::empty(block_level);
-        res.grow(Bytes(data.len() as u64))?;
+        res.grow(ByteNum(data.len() as u64))?;
         for (block, data) in data.chunks(res.block_size().to_usize()).enumerate() {
-            res.set_block(Blocks(block as u64), Some(data))?;
+            res.set_block(BlockNum(block as u64), Some(data))?;
         }
         res.rehash()?;
         Ok(Self(res))
     }
 
-    pub fn byte_range(&self) -> Range<Bytes> {
+    pub fn byte_range(&self) -> Range<ByteNum> {
         self.0.byte_range()
     }
 
@@ -88,11 +90,11 @@ impl<S: SyncStore> BlakeFile<S> {
         self.0.hash()
     }
 
-    pub(crate) fn tree_len(&self) -> Nodes {
+    pub(crate) fn tree_len(&self) -> NodeNum {
         self.0.tree_len()
     }
 
-    pub(crate) fn slice_iter(&self, byte_range: Range<Bytes>) -> SliceIter<'_, S> {
+    pub(crate) fn slice_iter(&self, byte_range: Range<ByteNum>) -> SliceIter<'_, S> {
         self.0.slice_iter(byte_range)
     }
 
@@ -106,7 +108,7 @@ impl<S: SyncStore> BlakeFile<S> {
     /// - Ok(()) if the slice was successfully added
     pub fn add_from_slice(
         &mut self,
-        byte_range: Range<Bytes>,
+        byte_range: Range<ByteNum>,
         reader: &mut impl Read,
     ) -> Result<(), AddSliceError<S::IoError>> {
         let mut buf = [0u8; 8];
@@ -131,7 +133,7 @@ impl<S: SyncStore> BlakeFile<S> {
     /// the returned reader will fail with an io error if either
     /// - the slice is not available or
     /// - there is an internal io error accessing the data or the needed hashes.
-    pub fn extract_slice(&self, byte_range: Range<Bytes>) -> SliceReader<'_, S> {
+    pub fn extract_slice(&self, byte_range: Range<ByteNum>) -> SliceReader<'_, S> {
         let iter = self.0.slice_iter(byte_range);
         let buffer = vec![0u8; block_size(self.0.block_level()).to_usize()];
         SliceReader {
@@ -150,9 +152,9 @@ pub(crate) trait SyncStoreExt: SyncStore {
     /// create a new completely initialized store from a slice of data
     fn new(data: &[u8], block_level: BlockLevel) -> Result<Self, Self::IoError> {
         let mut res = Self::empty(block_level);
-        res.grow(Bytes(data.len() as u64))?;
+        res.grow(ByteNum(data.len() as u64))?;
         for (block, data) in data.chunks(res.block_size().to_usize()).enumerate() {
-            res.set_block(Blocks(block as u64), Some(data))?;
+            res.set_block(BlockNum(block as u64), Some(data))?;
         }
         res.rehash()?;
         Ok(res)
@@ -173,7 +175,7 @@ pub(crate) trait SyncStoreExt: SyncStore {
     /// - Ok(()) if the slice was successfully added
     fn add_from_slice(
         &mut self,
-        byte_range: Range<Bytes>,
+        byte_range: Range<ByteNum>,
         reader: &mut impl Read,
     ) -> Result<(), AddSliceError<Self::IoError>> {
         let mut buf = [0u8; 8];
@@ -193,7 +195,7 @@ pub(crate) trait SyncStoreExt: SyncStore {
     /// the returned reader will fail with an io error if either
     /// - the slice is not available or
     /// - there is an internal io error accessing the data or the needed hashes.
-    fn extract_slice(&self, byte_range: Range<Bytes>) -> SliceReader<'_, Self> {
+    fn extract_slice(&self, byte_range: Range<ByteNum>) -> SliceReader<'_, Self> {
         let iter = self.slice_iter(byte_range);
         let buffer = vec![0u8; block_size(self.block_level()).to_usize()];
         SliceReader {
@@ -207,38 +209,12 @@ pub(crate) trait SyncStoreExt: SyncStore {
 
 impl<T: SyncStore> SyncStoreExt for T {}
 
-#[derive(Debug)]
-pub enum TraversalError<IoError> {
-    Io(IoError),
-    Unavailable,
-}
-
-#[derive(Debug)]
-pub enum AddSliceError<IoError> {
-    /// io error when reading from the slice
-    Io(io::Error),
-    /// io error when reading from or writing to the local store
-    LocalIo(IoError),
-    /// slice length does not match the expected length
-    WrongLength(u64),
-    /// hash validation failed
-    Validation(ValidateError<IoError>),
-}
-
-#[derive(Debug)]
-pub enum ValidateError<IoError> {
-    /// io error when reading from or writing to the local store
-    Io(IoError),
-    HashMismatch(Nodes),
-    MissingHash(Nodes),
-}
-
 /// A bunch of useful methods for syncstores
 pub(crate) trait SyncStoreUtil: SyncStore {
     /// set or validate a node in the tree, with bounds check
     fn set_or_validate(
         &mut self,
-        offset: Nodes,
+        offset: NodeNum,
         hash: blake3::Hash,
     ) -> Result<(), ValidateError<Self::IoError>> {
         match self.get_hash(offset).map_err(ValidateError::Io)? {
@@ -254,7 +230,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
     /// validate a node in the tree, with bounds check
     fn validate(
         &self,
-        offset: Nodes,
+        offset: NodeNum,
         hash: blake3::Hash,
     ) -> Result<(), ValidateError<Self::IoError>> {
         match self.get_hash(offset).map_err(ValidateError::Io)? {
@@ -265,7 +241,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
     }
 
     /// byte range for a given offset
-    fn leaf_byte_range(&self, index: Blocks) -> Range<Bytes> {
+    fn leaf_byte_range(&self, index: BlockNum) -> Range<ByteNum> {
         let start = index.to_bytes(self.block_level());
         let end = (index + 1)
             .to_bytes(self.block_level())
@@ -273,33 +249,33 @@ pub(crate) trait SyncStoreUtil: SyncStore {
         start..end
     }
 
-    fn block_size(&self) -> Bytes {
+    fn block_size(&self) -> ByteNum {
         block_size(self.block_level())
     }
 
-    fn block_count(&self) -> Blocks {
+    fn block_count(&self) -> BlockNum {
         blocks(self.data_len(), self.block_level())
     }
 
     /// number of leaf hashes in our tree
     ///
     /// will return 1 for empty data, since even empty data has a root hash
-    fn leafs(&self) -> Blocks {
+    fn leafs(&self) -> BlockNum {
         leafs(self.tree_len())
     }
 
     /// offset of the root hash
-    fn root(&self) -> Nodes {
+    fn root(&self) -> NodeNum {
         root(self.leafs())
     }
 
     /// the byte range the store covers
-    fn byte_range(&self) -> Range<Bytes> {
-        Bytes(0)..self.data_len()
+    fn byte_range(&self) -> Range<ByteNum> {
+        ByteNum(0)..self.data_len()
     }
 
     /// grow the store to the given length and update the hashes
-    fn grow(&mut self, new_len: Bytes) -> Result<(), Self::IoError> {
+    fn grow(&mut self, new_len: ByteNum) -> Result<(), Self::IoError> {
         if new_len < self.data_len() {
             panic!("shrink not allowed");
         }
@@ -312,7 +288,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
         // clear all non leaf hashes
         // todo: this is way too much. we should only clear the hashes that are affected by the new data
         for i in (1..self.tree_len().0).step_by(2) {
-            self.set_hash(Nodes(i), None)?;
+            self.set_hash(NodeNum(i), None)?;
         }
         self.grow_storage(new_len)?;
         Ok(())
@@ -321,9 +297,9 @@ pub(crate) trait SyncStoreUtil: SyncStore {
     /// todo: precisely invalidate the hashes that are affected by the new data
     ///
     /// to be called from grow
-    fn invalidate0(&mut self, offset: Nodes) -> Result<(), Self::IoError> {
+    fn invalidate0(&mut self, offset: NodeNum) -> Result<(), Self::IoError> {
         let full_blocks = full_blocks(self.data_len(), self.block_level());
-        let len = Nodes(full_blocks.0 * 2);
+        let len = NodeNum(full_blocks.0 * 2);
         let mut offset = offset;
         loop {
             let range = range(offset);
@@ -345,7 +321,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
     /// returns TraversalError::Io if there is an IO error
     /// returns Ok(outboard) if the outboard was successfully produced
     fn outboard(&self) -> Result<Vec<u8>, TraversalError<Self::IoError>> {
-        let outboard_len = Bytes((self.leafs().0 - 1) * 64) + 8;
+        let outboard_len = ByteNum((self.leafs().0 - 1) * 64) + 8;
         let mut res = Vec::with_capacity(outboard_len.to_usize());
         // write the header - total length of the data
         res.extend_from_slice(&self.data_len().0.to_le_bytes());
@@ -356,7 +332,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
 
     fn outboard0(
         &self,
-        offset: Nodes,
+        offset: NodeNum,
         target: &mut Vec<u8>,
     ) -> Result<(), TraversalError<Self::IoError>> {
         if let Some((l, r)) = descendants(offset, self.tree_len()) {
@@ -382,7 +358,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
     /// returns TraversalError::Io if there is an IO error
     /// returns Ok(encoded) if the outboard was successfully produced
     fn encode(&self) -> Result<Vec<u8>, TraversalError<Self::IoError>> {
-        let encoded_len = Bytes((self.leafs().0 - 1) * 64) + self.data_len() + 8;
+        let encoded_len = ByteNum((self.leafs().0 - 1) * 64) + self.data_len() + 8;
         let mut res = Vec::with_capacity(encoded_len.to_usize());
         // write the header - total length of the data
         res.extend_from_slice(&self.data_len().0.to_le_bytes());
@@ -393,7 +369,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
 
     fn encode0(
         &self,
-        offset: Nodes,
+        offset: NodeNum,
         target: &mut Vec<u8>,
     ) -> Result<(), TraversalError<Self::IoError>> {
         if let Some((l, r)) = descendants(offset, self.tree_len()) {
@@ -425,7 +401,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
         self.rehash0(self.root(), true)
     }
 
-    fn rehash0(&mut self, offset: Nodes, is_root: bool) -> Result<(), Self::IoError> {
+    fn rehash0(&mut self, offset: NodeNum, is_root: bool) -> Result<(), Self::IoError> {
         assert!(offset < self.tree_len());
         if self.get_hash(offset)?.is_none() {
             if let Some((l, r)) = descendants(offset, self.tree_len()) {
@@ -460,7 +436,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
     }
 
     /// return an iterator that produces a verifiable encoding of the data in the given range
-    fn slice_iter(&self, byte_range: Range<Bytes>) -> SliceIter<'_, Self> {
+    fn slice_iter(&self, byte_range: Range<ByteNum>) -> SliceIter<'_, Self> {
         let offset_range = node_range(byte_range, self.block_level());
         SliceIter {
             store: self,
@@ -472,8 +448,8 @@ pub(crate) trait SyncStoreUtil: SyncStore {
 
     fn add_from_slice_0(
         &mut self,
-        offset: Nodes,
-        offset_range: &Range<Nodes>,
+        offset: NodeNum,
+        offset_range: &Range<NodeNum>,
         reader: &mut impl Read,
         buffer: &mut [u8],
         is_root: bool,
@@ -527,7 +503,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
     fn clear(&mut self) -> Result<(), Self::IoError> {
         for i in 0..self.tree_len().0 {
             if self.root() != i {
-                self.set_hash(Nodes(i), None)?;
+                self.set_hash(NodeNum(i), None)?;
             }
         }
         Ok(())
@@ -540,9 +516,9 @@ pub struct SliceIter<'a, S: SyncStore> {
     /// the store
     store: &'a S,
     /// the range of offsets to visit
-    offset_range: Range<Nodes>,
+    offset_range: Range<NodeNum>,
     /// stack of offsets to visit
-    stack: Vec<Nodes>,
+    stack: Vec<NodeNum>,
     /// if Some, this is something to emit immediately
     emit: Option<SliceIterItem<'a>>,
 }
@@ -646,6 +622,33 @@ impl<'a, S: SyncStore> Read for SliceReader<'a, S> {
     }
 }
 
+#[derive(Debug)]
+pub enum TraversalError<IoError> {
+    Io(IoError),
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub enum AddSliceError<IoError> {
+    /// io error when reading from the slice
+    Io(io::Error),
+    /// io error when reading from or writing to the local store
+    LocalIo(IoError),
+    /// slice length does not match the expected length
+    WrongLength(u64),
+    /// hash validation failed
+    Validation(ValidateError<IoError>),
+}
+
+#[derive(Debug)]
+pub enum ValidateError<IoError> {
+    /// io error when reading from or writing to the local store
+    Io(IoError),
+    HashMismatch(NodeNum),
+    MissingHash(NodeNum),
+}
+
+#[derive(Debug)]
 enum TraversalResult<T> {
     IoError(T),
     Unavailable,
@@ -733,7 +736,7 @@ pub struct VecSyncStore {
 }
 
 impl VecSyncStore {
-    fn leaf_byte_range_usize(&self, index: Blocks) -> Range<usize> {
+    fn leaf_byte_range_usize(&self, index: BlockNum) -> Range<usize> {
         let range = self.leaf_byte_range(index);
         range.start.to_usize()..range.end.to_usize()
     }
@@ -741,10 +744,10 @@ impl VecSyncStore {
 
 impl SyncStore for VecSyncStore {
     type IoError = std::convert::Infallible;
-    fn tree_len(&self) -> Nodes {
-        Nodes(self.tree.len() as u64)
+    fn tree_len(&self) -> NodeNum {
+        NodeNum(self.tree.len() as u64)
     }
-    fn get_hash(&self, offset: Nodes) -> Result<Option<blake3::Hash>, Self::IoError> {
+    fn get_hash(&self, offset: NodeNum) -> Result<Option<blake3::Hash>, Self::IoError> {
         let offset = offset.to_usize();
         if offset >= self.tree.len() {
             panic!()
@@ -755,7 +758,11 @@ impl SyncStore for VecSyncStore {
             None
         })
     }
-    fn set_hash(&mut self, offset: Nodes, hash: Option<blake3::Hash>) -> Result<(), Self::IoError> {
+    fn set_hash(
+        &mut self,
+        offset: NodeNum,
+        hash: Option<blake3::Hash>,
+    ) -> Result<(), Self::IoError> {
         let offset = offset.to_usize();
         if offset >= self.tree.len() {
             panic!()
@@ -769,13 +776,13 @@ impl SyncStore for VecSyncStore {
         }
         Ok(())
     }
-    fn data_len(&self) -> Bytes {
-        Bytes(self.data.len() as u64)
+    fn data_len(&self) -> ByteNum {
+        ByteNum(self.data.len() as u64)
     }
     fn block_level(&self) -> BlockLevel {
         self.block_level
     }
-    fn get_block(&self, block: Blocks) -> Result<Option<&[u8]>, Self::IoError> {
+    fn get_block(&self, block: BlockNum) -> Result<Option<&[u8]>, Self::IoError> {
         if block > self.block_count() {
             panic!();
         }
@@ -787,7 +794,7 @@ impl SyncStore for VecSyncStore {
             None
         })
     }
-    fn set_block(&mut self, block: Blocks, data: Option<&[u8]>) -> Result<(), Self::IoError> {
+    fn set_block(&mut self, block: BlockNum, data: Option<&[u8]>) -> Result<(), Self::IoError> {
         if block > self.block_count() {
             panic!();
         }
@@ -812,7 +819,7 @@ impl SyncStore for VecSyncStore {
             data_bitmap: Vec::new(),
         }
     }
-    fn grow_storage(&mut self, new_len: Bytes) -> Result<(), Self::IoError> {
+    fn grow_storage(&mut self, new_len: ByteNum) -> Result<(), Self::IoError> {
         if new_len < self.data_len() {
             panic!();
         }
