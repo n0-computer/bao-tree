@@ -154,7 +154,7 @@ fn print_outboard(data: &[u8]) {
     println!("blake3_h: {}", hex::encode(blake3::hash(&data).as_bytes()));
     println!(
         "sparse_o: {}",
-        hex::encode(SparseOutboard::new(&data).hash().unwrap().as_bytes())
+        hex::encode(SparseOutboard::<0>::new(&data).hash().unwrap().as_bytes())
     );
     if data.len() <= 1024 {
         println!(

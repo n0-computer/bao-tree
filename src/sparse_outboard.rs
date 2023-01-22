@@ -1,5 +1,5 @@
 use crate::tree::*;
-use std::{io::Read, iter::FusedIterator, ops::Range, sync::Arc};
+use std::{io::Read, iter::FusedIterator, ops::Range};
 
 /// Hash a blake3 chunk.
 ///
@@ -14,39 +14,45 @@ fn hash_chunk(chunk: Chunks, data: &[u8], is_root: bool) -> blake3::Hash {
 /// Hash a block that is made of a power of two number of chunks.
 ///
 /// `block` is the block index, `data` is the block data, `is_root` is true if this is the only block,
-/// and `level` indicates how many chunks make up a block. Chunks = 2^level.
-fn hash_block(block: Blocks, data: &[u8], level: u32, is_root: bool) -> blake3::Hash {
+/// and `block_level` indicates how many chunks make up a block. Chunks = 2^level.
+fn hash_block(block: Blocks, data: &[u8], block_level: u32, is_root: bool) -> blake3::Hash {
     // ensure that the data is not too big
-    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN << level);
+    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN << block_level);
     // compute the cunk number for the first chunk in this block
-    let chunk0 = Chunks(block.0 << level);
+    let chunk0 = Chunks(block.0 << block_level);
     // simple recursive hash.
     // Note that this should really call in to blake3 hash_all_at_once, but
     // that is not exposed in the public API and also does not allow providing
     // the chunk.
-    hash_block_recursive(chunk0, data, level, is_root)
+    hash_block_recursive(chunk0, data, block_level, is_root)
 }
 
 /// Recursive helper for hash_block.
-fn hash_block_recursive(chunk0: Chunks, data: &[u8], level: u32, is_root: bool) -> blake3::Hash {
-    if level == 0 {
+fn hash_block_recursive(chunk0: Chunks, data: &[u8], block_level: u32, is_root: bool) -> blake3::Hash {
+    if block_level == 0 {
         // we have just a single chunk
         hash_chunk(chunk0, data, is_root)
     } else {
         // number of chunks at this level
-        let chunks = 1 << level;
+        let chunks = 1 << block_level;
         // size corresponding to this level. Data must not be bigger than this.
-        let size = blake3::guts::CHUNK_LEN << level;
+        let size = blake3::guts::CHUNK_LEN << block_level;
         // mid point of the data
         let mid = size / 2;
         debug_assert!(data.len() <= size);
         if data.len() <= mid {
-            hash_block_recursive(chunk0, data, level - 1, is_root)
+            // we don't subdivide, so we need to pass through the is_root flag
+            hash_block_recursive(chunk0, data, block_level - 1, is_root)
         } else {
+            // block_level is > 0 here, so this is safe
+            let child_level = block_level - 1;
+            // data is larger than mid, so this is safe
             let l = &data[..mid];
             let r = &data[mid..];
-            let l = hash_block_recursive(chunk0, l, level - 1, false);
-            let r = hash_block_recursive(chunk0 + chunks / 2, r, level - 1, false);
+            let chunkl = chunk0;
+            let chunkr = chunk0 + chunks / 2;
+            let l = hash_block_recursive(chunkl, l, child_level, false);
+            let r = hash_block_recursive(chunkr, r, child_level, false);
             blake3::guts::parent_cv(&l, &r, is_root)
         }
     }
@@ -92,7 +98,7 @@ fn zero_hash() -> blake3::Hash {
     blake3::Hash::from([0u8; 32])
 }
 
-pub struct SparseOutboard {
+pub struct SparseOutboard<const BLOCK_LEVEL: u32 = 0> {
     /// even offsets are leaf hashes, odd offsets are branch hashes
     tree: Vec<blake3::Hash>,
     /// occupancy bitmap for the tree
@@ -101,9 +107,11 @@ pub struct SparseOutboard {
     len: Bytes,
 }
 
-struct SliceIter<'a> {
+pub type StandardSparseOutboard = SparseOutboard<0>;
+
+struct SliceIter<'a, const BLOCK_LEVEL: u32 = 0> {
     /// the outboard
-    outboard: &'a SparseOutboard,
+    outboard: &'a SparseOutboard<BLOCK_LEVEL>,
     /// the data
     data: &'a [u8],
     /// the range of offsets to visit
@@ -112,24 +120,6 @@ struct SliceIter<'a> {
     stack: Vec<Nodes>,
     /// if Some, this is something to emit immediately
     emit: Option<SliceIterItem<'a>>,
-}
-
-struct TestIter {
-    data: Arc<Vec<u8>>,
-}
-
-enum TestIterItem {
-    Header(u64),
-    Hash(blake3::Hash),
-    Data(Arc<Vec<u8>>),
-}
-
-impl Iterator for TestIter {
-    type Item = TestIterItem;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        Some(TestIterItem::Data(self.data.clone()))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -200,7 +190,7 @@ impl<'a> Iterator for SliceIter<'a> {
 
 impl FusedIterator for SliceIter<'_> {}
 
-impl SparseOutboard {
+impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
     /// number of leaf hashes in our tree
     ///
     /// will return 1 for empty data, since even empty data has a root hash
@@ -277,7 +267,7 @@ impl SparseOutboard {
         Some(())
     }
 
-    pub fn slice_iter<'a>(&'a self, data: &'a [u8], byte_range: Range<Bytes>) -> SliceIter<'a> {
+    pub fn slice_iter<'a>(&'a self, data: &'a [u8], byte_range: Range<Bytes>) -> SliceIter<'a, BLOCK_LEVEL> {
         assert!(data.len() as u64 == self.len);
         let offset_range = node_range(byte_range);
         SliceIter {
@@ -580,7 +570,7 @@ mod tests {
         );
         let mut slice1 = Vec::new();
         extractor.read_to_end(&mut slice1).unwrap();
-        let so = SparseOutboard::new(&data);
+        let so = SparseOutboard::<0>::new(&data);
         let slice2 = so.slice(&data, start..start + len).unwrap();
         if slice1 != slice2 {
             println!("{} {}", slice1.len(), slice2.len());
@@ -627,7 +617,7 @@ mod tests {
         );
         let mut slice1 = Vec::new();
         extractor.read_to_end(&mut slice1).unwrap();
-        let mut so = SparseOutboard::new(&data);
+        let mut so = StandardSparseOutboard::new(&data);
         let byte_range = start..start + len;
         so.add_from_slice(&mut data, byte_range.clone(), &mut Cursor::new(&slice1))
             .unwrap();
@@ -645,14 +635,14 @@ mod tests {
         #[test]
         fn compare_hash(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             let hash = blake3::hash(&data);
-            let hash2 = *SparseOutboard::new(&data).hash().unwrap();
+            let hash2 = *StandardSparseOutboard::new(&data).hash().unwrap();
             assert_eq!(hash, hash2);
         }
 
         #[test]
         fn compare_outboard(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             let (outboard, hash) = bao::encode::outboard(&data);
-            let so = SparseOutboard::new(&data);
+            let so = StandardSparseOutboard::new(&data);
             let hash2 = *so.hash().unwrap();
             let outboard2 = so.outboard().unwrap();
             assert_eq!(hash, hash2);
@@ -662,7 +652,7 @@ mod tests {
         #[test]
         fn compare_encoded(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             let (encoded, hash) = bao::encode::encode(&data);
-            let so = SparseOutboard::new(&data);
+            let so = StandardSparseOutboard::new(&data);
             let hash2 = *so.hash().unwrap();
             let encoded2 = so.encode(&data).unwrap();
             assert_eq!(hash, hash2);
