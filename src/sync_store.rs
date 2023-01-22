@@ -40,6 +40,7 @@ pub enum TraversalError<IoError> {
     Unavailable,
 }
 
+#[derive(Debug)]
 pub enum AddSliceError<IoError> {
     /// io error when reading from the slice
     Io(std::io::Error),
@@ -51,6 +52,7 @@ pub enum AddSliceError<IoError> {
     Validation(ValidateError<IoError>),
 }
 
+#[derive(Debug)]
 pub enum ValidateError<IoError> {
     /// io error when reading from or writing to the local store
     Io(IoError),
@@ -349,6 +351,18 @@ pub(crate) trait SyncStoreUtil: SyncStore {
                 .map_err(E::Validation)?;
             self.set_block(index, Some(&buffer[..len.to_usize()]))
                 .map_err(E::LocalIo)?;
+        }
+        Ok(())
+    }
+
+    /// clear all hashes except the root
+    ///
+    /// the data is unchanged
+    fn clear(&mut self) -> Result<(), Self::IoError> {
+        for i in 0..self.tree_len().0 {
+            if self.root() != i {
+                self.set(Nodes(i), None)?;
+            }
         }
         Ok(())
     }

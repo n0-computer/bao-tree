@@ -576,6 +576,40 @@ mod tests {
             .is_err());
     }
 
+    fn add_from_slice_impl_2(size: Bytes, start: Bytes, len: Bytes) {
+        // generate data, different value for each chunk so the hashes are intersting
+        let data = (0..size.0)
+            .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
+            .collect::<Vec<_>>();
+
+        // encode a slice using bao
+        let (outboard, _hash) = bao::encode::outboard(&data);
+        let mut extractor = SliceExtractor::new_outboard(
+            Cursor::new(&data),
+            Cursor::new(&outboard),
+            start.0,
+            len.0,
+        );
+        let mut slice1 = Vec::new();
+        extractor.read_to_end(&mut slice1).unwrap();
+
+        // add from the bao slice and check that it validates
+        let mut vs = VecSyncStore::new(&data, BlockLevel(0)).unwrap();
+        let byte_range = start..start + len;
+        vs.add_from_slice(byte_range.clone(), &mut Cursor::new(&slice1))
+            .unwrap();
+        vs.clear().unwrap();
+        vs.add_from_slice(byte_range.clone(), &mut Cursor::new(&slice1))
+            .unwrap();
+        slice1[8] ^= 1;
+
+        // add from the bao slice with a single bit flipped and check that it fails to validate
+        let err = vs
+            .add_from_slice(byte_range, &mut Cursor::new(&slice1))
+            .unwrap_err();
+        assert!(matches!(err, AddSliceError::Validation(_)));
+    }
+
     fn compare_hash_impl(data: &[u8]) {
         let hash = blake3::hash(data);
         for level in 0..10 {
@@ -671,7 +705,8 @@ mod tests {
 
         #[test]
         fn add_from_slice((size, start, len) in size_start_len()) {
-            add_from_slice_impl(size, start, len)
+            add_from_slice_impl(size, start, len);
+            add_from_slice_impl_2(size, start, len);
         }
 
         #[test]
