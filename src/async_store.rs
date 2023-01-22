@@ -2,47 +2,27 @@ use async_recursion::async_recursion;
 use async_stream::stream;
 use bytes::Bytes;
 use std::{
-    io::{self, Read},
-    iter::FusedIterator,
+    io,
     ops::Range,
+    pin::Pin,
+    task::{self, Poll}, fmt,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use async_trait::async_trait;
-use futures::{future::BoxFuture, stream::FusedStream, FutureExt, Stream, TryFutureExt};
+use futures::{Stream, StreamExt};
 
-use crate::{tree::*, BlakeFile};
+use crate::{errors::*, sync_store::StoreCommon, tree::*, AsyncBlakeFile};
 
 /// Interface for a synchronous store
 ///
 /// This includs just methods that have to be implemented
 #[async_trait]
-pub trait AsyncStore: Sized + Send + Sync + 'static {
+pub trait AsyncStore: StoreCommon + Send + Sync + 'static {
     /// the type of io error when interacting with the store
     ///
     /// for an in-memory store, this is can be infallible
     type IoError: std::fmt::Debug + Send + Sync + 'static;
-
-    /// length of the stored data
-    fn data_len(&self) -> ByteNum;
-
-    /// block level
-    fn block_level(&self) -> BlockLevel;
-
-    /// length of the tree in nodes
-    fn tree_len(&self) -> NodeNum;
-
-    /// offset of the root hash
-    fn root(&self) -> NodeNum {
-        root(self.leafs())
-    }
-
-    /// number of leaf hashes in our tree
-    ///
-    /// will return 1 for empty data, since even empty data has a root hash
-    fn leafs(&self) -> BlockNum {
-        leafs(self.tree_len())
-    }
 
     /// get a hash from the merkle tree, with existence check
     ///
@@ -92,22 +72,7 @@ pub trait AsyncStore: Sized + Send + Sync + 'static {
     ///
     /// Use grow to grow the store and invalidate the hashes.
     async fn grow_storage(&mut self, new_len: ByteNum) -> Result<(), Self::IoError>;
-
-    fn block_count(&self) -> BlockNum {
-        blocks(self.data_len(), self.block_level())
-    }
-
-    /// byte range for a given offset
-    fn leaf_byte_range(&self, index: BlockNum) -> Range<ByteNum> {
-        let start = index.to_bytes(self.block_level());
-        let end = (index + 1)
-            .to_bytes(self.block_level())
-            .min(self.data_len().max(start));
-        start..end
-    }
 }
-
-pub struct AsyncBlakeFile<S>(S);
 
 impl<S: AsyncStore> AsyncBlakeFile<S> {
     pub async fn empty(block_level: BlockLevel) -> Self {
@@ -119,7 +84,7 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
     pub async fn new(data: Bytes, block_level: BlockLevel) -> Result<Self, S::IoError> {
         let mut res = Self::empty(block_level).await;
         res.grow(ByteNum(data.len() as u64)).await?;
-        for (block, chunk) in data.chunks(res.block_size().to_usize()).enumerate() {
+        for (block, chunk) in data.chunks(res.0.block_size().to_usize()).enumerate() {
             let chunk = data.slice_ref(chunk);
             res.0.set_block(BlockNum(block as u64), Some(chunk)).await?;
         }
@@ -131,14 +96,14 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
     fn slice_stream(
         &self,
         byte_range: Range<ByteNum>,
-    ) -> impl Stream<Item = Result<SliceStreamItem, TraversalResult<S::IoError>>> + '_ {
-        use SliceStreamItem as I;
-        use TraversalResult as E;
-        let offset_range = node_range(byte_range, self.block_level());
-        let mut stack = vec![self.root()];
+    ) -> impl Stream<Item = Result<SliceStreamItem, TraversalError<S::IoError>>> + '_ {
+        use SliceStreamItem::*;
+        use TraversalError::*;
+        let offset_range = node_range(byte_range, self.0.block_level());
+        let mut stack = vec![self.0.root()];
         stream! {
             // emit the header first
-            yield Ok(SliceStreamItem::Header(self.data_len().0));
+            yield Ok(Header(self.0.data_len().0));
             while let Some(offset) = stack.pop() {
                 let range = range(offset);
                 // if the range of this node is entirely outside the slice, we can skip it
@@ -150,25 +115,13 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
                     stack.push(r);
                     // l comes first, so we push it second
                     stack.push(l);
-                    let lh = self
-                        .0
-                        .get_hash(l).await
-                        .map_err(E::IoError)?
-                        .ok_or(E::Unavailable)?;
-                    let rh = self
-                        .0
-                        .get_hash(r).await
-                        .map_err(E::IoError)?
-                        .ok_or(E::Unavailable)?;
-                    yield Ok(I::Hash(lh));
-                    yield Ok(I::Hash(rh));
+                    let lh = self.0.get_hash(l).await.map_err(Io)?.ok_or(Unavailable)?;
+                    let rh = self.0.get_hash(r).await.map_err(Io)?.ok_or(Unavailable)?;
+                    yield Ok(Hash(lh));
+                    yield Ok(Hash(rh));
                 } else {
-                    let slice = self
-                         .0
-                         .get_block(index(offset)).await
-                         .map_err(E::IoError)?
-                         .ok_or(E::Unavailable)?;
-                    yield Ok(I::Data(slice));
+                    let slice = self.0.get_block(index(offset)).await.map_err(Io)?.ok_or(Unavailable)?;
+                    yield Ok(Data(slice));
                 }
             }
         }
@@ -176,18 +129,18 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
 
     /// grow the store to the given length and update the hashes
     async fn grow(&mut self, new_len: ByteNum) -> Result<(), S::IoError> {
-        if new_len < self.data_len() {
+        if new_len < self.0.data_len() {
             panic!("shrink not allowed");
         }
-        if new_len == self.data_len() {
+        if new_len == self.0.data_len() {
             return Ok(());
         }
         // clear the last leaf hash
         // todo: we only have to do this if it was not full, but we do it always for now
-        self.0.set_hash(self.tree_len() - 1, None).await?;
+        self.0.set_hash(self.0.tree_len() - 1, None).await?;
         // clear all non leaf hashes
         // todo: this is way too much. we should only clear the hashes that are affected by the new data
-        for i in (1..self.tree_len().0).step_by(2) {
+        for i in (1..self.0.tree_len().0).step_by(2) {
             self.0.set_hash(NodeNum(i), None).await?;
         }
         self.0.grow_storage(new_len).await?;
@@ -196,14 +149,14 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
 
     /// fill holes in our hashes as much as possible from either the data or lower hashes
     async fn rehash(&mut self) -> Result<(), S::IoError> {
-        self.rehash0(self.root(), true).await
+        self.rehash0(self.0.root(), true).await
     }
 
     #[async_recursion]
     async fn rehash0(&mut self, offset: NodeNum, is_root: bool) -> Result<(), S::IoError> {
-        assert!(offset < self.tree_len());
+        assert!(offset < self.0.tree_len());
         if self.0.get_hash(offset).await?.is_none() {
-            if let Some((l, r)) = descendants(offset, self.tree_len()) {
+            if let Some((l, r)) = descendants(offset, self.0.tree_len()) {
                 self.rehash0(l, false).await?;
                 self.rehash0(r, false).await?;
                 if let (Some(left_child), Some(right_child)) =
@@ -217,7 +170,7 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
                 let index = index(offset);
                 match self.0.get_block(index).await? {
                     Some(data) => {
-                        let hash = hash_block(index, &data, self.block_level(), is_root);
+                        let hash = hash_block(index, &data, self.0.block_level(), is_root);
                         self.0.set_hash(offset, Some(hash)).await?;
                     }
                     None => {
@@ -274,7 +227,7 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
         if range.end <= offset_range.start || range.start >= offset_range.end {
             return Ok(());
         }
-        if let Some((l, r)) = descendants(offset, self.tree_len()) {
+        if let Some((l, r)) = descendants(offset, self.0.tree_len()) {
             let mut lh = [0u8; 32];
             let mut rh = [0u8; 32];
             reader.read_exact(&mut lh).await.map_err(E::Io)?;
@@ -307,7 +260,7 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
             let expected_hash = hash_block(
                 index,
                 &buffer[..len.to_usize()],
-                self.block_level(),
+                self.0.block_level(),
                 is_root,
             );
             self.validate(offset, expected_hash)
@@ -321,6 +274,26 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
         Ok(())
     }
 
+    /// extract a slice of data from the store, producing a verifiable slice
+    ///
+    /// the returned reader will fail with an io error if either
+    /// - the slice is not available or
+    /// - there is an internal io error accessing the data or the needed hashes.
+    pub fn extract_slice(
+        &self,
+        byte_range: Range<ByteNum>,
+    ) -> SliceReader<impl Stream<Item = Result<SliceStreamItem, TraversalError<S::IoError>>> + '_>
+    {
+        let stream = self.slice_stream(byte_range);
+        let buffer = vec![0u8; block_size(self.0.block_level()).to_usize()];
+        SliceReader {
+            stream,
+            buffer,
+            start: 0,
+            end: 0,
+        }
+    }
+
     /// validate a node in the tree, with bounds check
     async fn validate(
         &self,
@@ -329,8 +302,8 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
     ) -> Result<(), ValidateError<S::IoError>> {
         match self.0.get_hash(offset).await.map_err(ValidateError::Io)? {
             Some(h) if h == hash => Ok(()),
-            Some(h) => Err(ValidateError::HashMismatch(offset)),
-            None => Err(ValidateError::MissingHash(offset)),
+            Some(_) => Err(ValidateError::HashMismatch(offset.0)),
+            None => Err(ValidateError::MissingHash(offset.0)),
         }
     }
 
@@ -342,7 +315,7 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
     ) -> Result<(), ValidateError<S::IoError>> {
         match self.0.get_hash(offset).await.map_err(ValidateError::Io)? {
             Some(h) if h == hash => Ok(()),
-            Some(h) => Err(ValidateError::HashMismatch(offset)),
+            Some(_) => Err(ValidateError::HashMismatch(offset.0)),
             None => {
                 self.0
                     .set_hash(offset, Some(hash))
@@ -351,37 +324,6 @@ impl<S: AsyncStore> AsyncBlakeFile<S> {
                 Ok(())
             }
         }
-    }
-
-    /// number of leaf hashes in our tree
-    ///
-    /// will return 1 for empty data, since even empty data has a root hash
-    fn leafs(&self) -> BlockNum {
-        leafs(self.tree_len())
-    }
-
-    fn root(&self) -> NodeNum {
-        root(self.leafs())
-    }
-
-    fn tree_len(&self) -> NodeNum {
-        self.0.tree_len()
-    }
-
-    fn data_len(&self) -> ByteNum {
-        self.0.data_len()
-    }
-
-    fn block_level(&self) -> BlockLevel {
-        self.0.block_level()
-    }
-
-    fn block_size(&self) -> ByteNum {
-        block_size(self.block_level())
-    }
-
-    fn block_count(&self) -> BlockNum {
-        blocks(self.data_len(), self.block_level())
     }
 }
 
@@ -429,149 +371,62 @@ impl SliceStreamItem {
     }
 }
 
-#[derive(Debug)]
-pub enum TraversalError<IoError> {
-    Io(IoError),
-    Unavailable,
+pub struct SliceReader<S> {
+    stream: S,
+    buffer: Vec<u8>,
+    start: usize,
+    end: usize,
 }
 
-#[derive(Debug)]
-enum TraversalResult<T> {
-    IoError(T),
-    Unavailable,
-    Done,
-}
-
-#[derive(Debug)]
-pub enum AddSliceError<IoError> {
-    /// io error when reading from the slice
-    Io(io::Error),
-    /// io error when reading from or writing to the local store
-    LocalIo(IoError),
-    /// slice length does not match the expected length
-    WrongLength(u64),
-    /// hash validation failed
-    Validation(ValidateError<IoError>),
-}
-
-#[derive(Debug)]
-pub enum ValidateError<IoError> {
-    /// io error when reading from or writing to the local store
-    Io(IoError),
-    HashMismatch(NodeNum),
-    MissingHash(NodeNum),
-}
-
-pub struct VecAsyncStore {
-    block_level: BlockLevel,
-    tree: Vec<blake3::Hash>,
-    tree_bitmap: Vec<bool>,
-    data: Vec<u8>,
-    data_bitmap: Vec<bool>,
-}
-
-impl VecAsyncStore {
-    fn leaf_byte_range_usize(&self, index: BlockNum) -> Range<usize> {
-        let range = self.leaf_byte_range(index);
-        range.start.to_usize()..range.end.to_usize()
-    }
-}
-
-#[async_trait]
-impl AsyncStore for VecAsyncStore {
-    type IoError = std::convert::Infallible;
-    fn tree_len(&self) -> NodeNum {
-        NodeNum(self.tree.len() as u64)
-    }
-    async fn get_hash(&self, offset: NodeNum) -> Result<Option<blake3::Hash>, Self::IoError> {
-        let offset = offset.to_usize();
-        if offset >= self.tree.len() {
-            panic!()
+impl<
+        E: fmt::Debug,
+        St: Stream<Item = Result<SliceStreamItem, TraversalResult<E>>> + Unpin,
+    > AsyncRead for SliceReader<St>
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.start >= self.end {
+            match self.stream.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(item))) => {
+                    self.start = 0;
+                    self.end = item.len();
+                    item.copy_to(&mut self.buffer[..item.len()]);
+                }
+                Poll::Ready(Some(Err(cause))) => {
+                    // produce a good error - distinguish between io errors
+                    // and data unavailability
+                    return Poll::Ready(match cause {
+                        TraversalResult::IoError(e) => Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("io error accessing the data: {:?}", e),
+                        )),
+                        TraversalResult::Unavailable => {
+                            Err(io::Error::new(io::ErrorKind::Other, "data unavailable"))
+                        }
+                        TraversalResult::Done => Ok(()),
+                    });
+                }
+                Poll::Ready(None) => {
+                    // iterator is done and buffer is empty, so signal EOF
+                    return Poll::Ready(Ok(()));
+                }
+                Poll::Pending => {
+                    // iterator is not ready, so we can't read anything
+                    return Poll::Pending;
+                }
+            }
         }
-        Ok(if self.tree_bitmap[offset] {
-            Some(self.tree[offset])
-        } else {
-            None
-        })
-    }
-    async fn set_hash(
-        &mut self,
-        offset: NodeNum,
-        hash: Option<blake3::Hash>,
-    ) -> Result<(), Self::IoError> {
-        let offset = offset.to_usize();
-        if offset >= self.tree.len() {
-            panic!()
-        }
-        if let Some(hash) = hash {
-            self.tree[offset] = hash;
-            self.tree_bitmap[offset] = true;
-        } else {
-            self.tree[offset] = zero_hash();
-            self.tree_bitmap[offset] = false;
-        }
-        Ok(())
-    }
-    fn data_len(&self) -> ByteNum {
-        ByteNum(self.data.len() as u64)
-    }
-    fn block_level(&self) -> BlockLevel {
-        self.block_level
-    }
-    async fn get_block(&self, block: BlockNum) -> Result<Option<Bytes>, Self::IoError> {
-        if block > self.block_count() {
-            panic!();
-        }
-        let offset = block.to_usize();
-        Ok(if self.data_bitmap[offset] {
-            let range = self.leaf_byte_range_usize(block);
-            Some(self.data[range].to_vec().into())
-        } else {
-            None
-        })
-    }
-    async fn set_block(
-        &mut self,
-        block: BlockNum,
-        data: Option<Bytes>,
-    ) -> Result<(), Self::IoError> {
-        if block > self.block_count() {
-            panic!();
-        }
-        let offset = block.to_usize();
-        let range = self.leaf_byte_range_usize(block);
-        if let Some(data) = data {
-            self.data_bitmap[offset] = true;
-            self.data[range].copy_from_slice(&data);
-        } else {
-            self.data_bitmap[offset] = false;
-            self.data[range].fill(0);
-        }
-        Ok(())
-    }
-    async fn empty(block_level: BlockLevel) -> Self {
-        let tree_len_usize = 1;
-        Self {
-            tree: vec![empty_root_hash(); tree_len_usize],
-            tree_bitmap: vec![true; tree_len_usize],
-            block_level,
-            data: Vec::new(),
-            data_bitmap: Vec::new(),
-        }
-    }
-    async fn grow_storage(&mut self, new_len: ByteNum) -> Result<(), Self::IoError> {
-        if new_len < self.data_len() {
-            panic!();
-        }
-        if new_len == self.data_len() {
-            return Ok(());
-        }
-        let blocks = blocks(new_len, self.block_level());
-        self.data.resize(new_len.to_usize(), 0u8);
-        self.data_bitmap.resize(blocks.to_usize(), false);
-        let new_tree_len = num_hashes(blocks);
-        self.tree.resize(new_tree_len.to_usize(), zero_hash());
-        self.tree_bitmap.resize(new_tree_len.to_usize(), false);
-        Ok(())
+        // when we get here we have data in the buffer, so n won't be 0
+        let n = buf.remaining().min(self.end - self.start);
+        // copy the data from the buffer to the output
+        // this is safe because we know the buffer is at least as big as n
+        buf.put_slice(&self.buffer[self.start..self.start + n]);
+        // advance the start pointer
+        self.start += n;
+        // return the number of read bytes
+        Poll::Ready(Ok(()))
     }
 }

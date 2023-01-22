@@ -1,18 +1,8 @@
 use super::*;
-use crate::{sync_store::*, tree::*};
+use crate::{errors::AddSliceError, sync_store::*, tree::*, vec_store::VecStore};
 use bao::encode::SliceExtractor;
 use proptest::prelude::*;
 use std::io::{Cursor, Read};
-
-fn fmt_outboard(outboard: &[u8]) -> String {
-    let mut res = String::new();
-    res += &hex::encode(&outboard[0..8]);
-    for i in (8..outboard.len()).step_by(32) {
-        res += " ";
-        res += &hex::encode(&outboard[i..i + 32]);
-    }
-    res
-}
 
 fn size_start_len() -> impl Strategy<Value = (ByteNum, ByteNum, ByteNum)> {
     (0u64..32768)
@@ -43,7 +33,7 @@ fn compare_slice_iter_impl(size: ByteNum, start: ByteNum, len: ByteNum) {
     extractor.read_to_end(&mut slice1).unwrap();
 
     // encode a slice using vec outboard and its slice_iter
-    let vs = VecSyncStore::new(&data, BlockLevel(0)).unwrap();
+    let vs = BlakeFile::<VecStore>::new(&data, BlockLevel(0)).unwrap();
 
     // use the iterator and flatten it
     let slices2 = vs.slice_iter(start..start + len).collect::<Vec<_>>();
@@ -55,7 +45,7 @@ fn compare_slice_iter_impl(size: ByteNum, start: ByteNum, len: ByteNum) {
     assert_eq!(slice1, slice2);
 
     // use the reader and use read_to_end, should be the same
-    let vs = BlakeFile::<VecSyncStore>::new(&data, BlockLevel(0)).unwrap();
+    let vs = BlakeFile::<VecStore>::new(&data, BlockLevel(0)).unwrap();
     let mut reader = vs.extract_slice(start..start + len);
     let mut slice2 = Vec::new();
     reader.read_to_end(&mut slice2).unwrap();
@@ -76,7 +66,7 @@ fn add_from_slice_impl(size: ByteNum, start: ByteNum, len: ByteNum) {
     extractor.read_to_end(&mut slice1).unwrap();
 
     // add from the bao slice and check that it validates
-    let mut vs = BlakeFile::<VecSyncStore>::new(&data, BlockLevel(0)).unwrap();
+    let mut vs = BlakeFile::<VecStore>::new(&data, BlockLevel(0)).unwrap();
     let byte_range = start..start + len;
     vs.add_from_slice(byte_range.clone(), &mut Cursor::new(&slice1))
         .unwrap();
@@ -95,7 +85,7 @@ fn add_from_slice_impl(size: ByteNum, start: ByteNum, len: ByteNum) {
 fn compare_hash_impl(data: &[u8]) {
     let hash = blake3::hash(data);
     for level in 0..10 {
-        let vs = VecSyncStore::new(data, BlockLevel(level)).unwrap();
+        let vs = BlakeFile::<VecStore>::new(data, BlockLevel(level)).unwrap();
         let hash2 = vs.hash().unwrap().unwrap();
         assert_eq!(hash, hash2);
     }
@@ -105,7 +95,7 @@ fn compare_outboard_impl(data: &[u8]) {
     let (outboard1, hash1) = bao::encode::outboard(&data);
     // compare internally
     for level in 0..3 {
-        let vs = VecSyncStore::new(&data, BlockLevel(level)).unwrap();
+        let vs = BlakeFile::<VecStore>::new(&data, BlockLevel(level)).unwrap();
         let hash2 = vs.hash().unwrap().unwrap();
         let outboard2 = vs.outboard().unwrap();
         assert_eq!(hash1, hash2);
@@ -119,7 +109,7 @@ fn compare_encoded_impl(data: &[u8]) {
     let (encoded1, hash1) = bao::encode::encode(&data);
     // compare internally
     for level in 0..3 {
-        let vs = VecSyncStore::new(&data, BlockLevel(level)).unwrap();
+        let vs = BlakeFile::<VecStore>::new(&data, BlockLevel(level)).unwrap();
         let hash2 = vs.hash().unwrap().unwrap();
         let encoded2 = vs.encode().unwrap();
         assert_eq!(hash1, hash2);
@@ -177,12 +167,12 @@ fn compare_slice_iter_0() {
 #[test]
 fn non_zero_block_level() {
     let data = [0u8; 4096];
-    let l0 = BlakeFile::<VecSyncStore>::new(&data, BlockLevel(0)).unwrap();
-    let l1 = BlakeFile::<VecSyncStore>::new(&data, BlockLevel(1)).unwrap();
-    let l2 = BlakeFile::<VecSyncStore>::new(&data, BlockLevel(2)).unwrap();
-    println!("{:?}", l0.tree_len());
-    println!("{:?}", l1.tree_len());
-    println!("{:?}", l2.tree_len());
+    let l0 = BlakeFile::<VecStore>::new(&data, BlockLevel(0)).unwrap();
+    let l1 = BlakeFile::<VecStore>::new(&data, BlockLevel(1)).unwrap();
+    let l2 = BlakeFile::<VecStore>::new(&data, BlockLevel(2)).unwrap();
+    println!("{:?}", l0.0.tree_len());
+    println!("{:?}", l1.0.tree_len());
+    println!("{:?}", l2.0.tree_len());
     println!("iter 0");
     for item in l0.slice_iter(l0.byte_range()) {
         println!("{:?}", item);

@@ -40,8 +40,8 @@ fn blake3_own(data: &[u8]) -> blake3::Hash {
     hashes[0]
 }
 
-use crate::sync_store::VecSyncStore;
 use crate::tree::{BlockLevel, BLAKE3_CHUNK_SIZE};
+use crate::vec_store::VecStore;
 use crate::BlakeFile;
 
 fn print_outboard(data: &[u8]) {
@@ -54,7 +54,7 @@ fn print_outboard(data: &[u8]) {
     println!(
         "sparse_o: {}",
         hex::encode(
-            BlakeFile::<VecSyncStore>::new(&data, BlockLevel(0))
+            BlakeFile::<VecStore>::new(&data, BlockLevel(0))
                 .unwrap()
                 .hash()
                 .unwrap()

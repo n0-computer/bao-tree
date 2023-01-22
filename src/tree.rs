@@ -142,7 +142,7 @@ pub struct BlockLevel(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TreeLevel(pub u32);
 
-pub fn block_size(block_level: BlockLevel) -> ByteNum {
+pub(crate) fn block_size(block_level: BlockLevel) -> ByteNum {
     ByteNum(block_size0(block_level.0))
 }
 
@@ -150,12 +150,12 @@ fn block_size0(block_level: u32) -> u64 {
     BLAKE3_CHUNK_SIZE << block_level
 }
 
-pub fn leafs(blocks: NodeNum) -> BlockNum {
+pub(crate) fn leafs(blocks: NodeNum) -> BlockNum {
     BlockNum((blocks.0 + 1) / 2)
 }
 
 /// Root offset given a number of leaves.
-pub fn root(leafs: BlockNum) -> NodeNum {
+pub(crate) fn root(leafs: BlockNum) -> NodeNum {
     NodeNum(root0(leafs.0))
 }
 
@@ -164,7 +164,7 @@ fn root0(leafs: u64) -> u64 {
 }
 
 /// Level for an offset. 0 is for leaves, 1 is for the first level of branches, etc.
-pub fn level(offset: NodeNum) -> TreeLevel {
+pub(crate) fn level(offset: NodeNum) -> TreeLevel {
     TreeLevel(level0(offset.0))
 }
 
@@ -172,7 +172,7 @@ fn level0(offset: u64) -> u32 {
     (!offset).trailing_zeros()
 }
 
-pub fn blocks(len: ByteNum, block_level: BlockLevel) -> BlockNum {
+pub(crate) fn blocks(len: ByteNum, block_level: BlockLevel) -> BlockNum {
     BlockNum(blocks0(len.0, block_level.0))
 }
 
@@ -181,7 +181,7 @@ fn blocks0(len: u64, block_level: u32) -> u64 {
     len / block_size + if len % block_size == 0 { 0 } else { 1 }
 }
 
-pub fn full_blocks(len: ByteNum, block_level: BlockLevel) -> BlockNum {
+pub(crate) fn full_blocks(len: ByteNum, block_level: BlockLevel) -> BlockNum {
     BlockNum(full_blocks0(len.0, block_level.0))
 }
 
@@ -190,7 +190,7 @@ fn full_blocks0(len: u64, block_level: u32) -> u64 {
     len / block_size
 }
 
-pub fn num_hashes(blocks: BlockNum) -> NodeNum {
+pub(crate) fn num_hashes(blocks: BlockNum) -> NodeNum {
     NodeNum(num_hashes0(blocks.0))
 }
 
@@ -203,7 +203,7 @@ fn num_hashes0(blocks: u64) -> u64 {
 }
 
 /// Span for an offset. 1 is for leaves, 2 is for the first level of branches, etc.
-pub fn span(offset: NodeNum) -> NodeNum {
+pub(crate) fn span(offset: NodeNum) -> NodeNum {
     NodeNum(span0(offset.0))
 }
 
@@ -211,7 +211,7 @@ fn span0(offset: u64) -> u64 {
     1 << (!offset).trailing_zeros()
 }
 
-pub fn left_child(offset: NodeNum) -> Option<NodeNum> {
+pub(crate) fn left_child(offset: NodeNum) -> Option<NodeNum> {
     left_child0(offset.0).map(NodeNum)
 }
 
@@ -224,7 +224,7 @@ fn left_child0(offset: u64) -> Option<u64> {
     }
 }
 
-pub fn right_child(offset: NodeNum) -> Option<NodeNum> {
+pub(crate) fn right_child(offset: NodeNum) -> Option<NodeNum> {
     right_child0(offset.0).map(NodeNum)
 }
 
@@ -238,7 +238,7 @@ fn right_child0(offset: u64) -> Option<u64> {
 }
 
 /// Get a valid right descendant for an offset
-pub fn right_descendant(offset: NodeNum, len: NodeNum) -> Option<NodeNum> {
+pub(crate) fn right_descendant(offset: NodeNum, len: NodeNum) -> Option<NodeNum> {
     let mut offset = right_child(offset)?;
     while offset >= len {
         offset = left_child(offset)?;
@@ -247,7 +247,7 @@ pub fn right_descendant(offset: NodeNum, len: NodeNum) -> Option<NodeNum> {
 }
 
 /// both children are at one level below the parent, but it is not guaranteed that they exist
-pub fn children(offset: NodeNum) -> Option<(NodeNum, NodeNum)> {
+pub(crate) fn children(offset: NodeNum) -> Option<(NodeNum, NodeNum)> {
     let span = span(offset);
     if span.0 == 1 {
         None
@@ -257,7 +257,7 @@ pub fn children(offset: NodeNum) -> Option<(NodeNum, NodeNum)> {
 }
 
 /// both children are at one level below the parent, but it is not guaranteed that they exist
-pub fn descendants(offset: NodeNum, len: NodeNum) -> Option<(NodeNum, NodeNum)> {
+pub(crate) fn descendants(offset: NodeNum, len: NodeNum) -> Option<(NodeNum, NodeNum)> {
     let lc = left_child(offset);
     let rc = right_descendant(offset, len);
     if let (Some(l), Some(r)) = (lc, rc) {
@@ -267,7 +267,7 @@ pub fn descendants(offset: NodeNum, len: NodeNum) -> Option<(NodeNum, NodeNum)> 
     }
 }
 
-pub fn is_left_sibling(offset: NodeNum) -> bool {
+pub(crate) fn is_left_sibling(offset: NodeNum) -> bool {
     is_left_sibling0(offset.0)
 }
 
@@ -276,7 +276,7 @@ fn is_left_sibling0(offset: u64) -> bool {
     (offset & span) == 0
 }
 
-pub fn parent(offset: NodeNum) -> NodeNum {
+pub(crate) fn parent(offset: NodeNum) -> NodeNum {
     NodeNum(parent0(offset.0))
 }
 
@@ -291,11 +291,11 @@ fn parent0(offset: u64) -> u64 {
 }
 
 /// Get the chunk index for an offset
-pub fn index(offset: NodeNum) -> BlockNum {
+pub(crate) fn index(offset: NodeNum) -> BlockNum {
     BlockNum(offset.0 / 2)
 }
 
-pub fn range(offset: NodeNum) -> Range<NodeNum> {
+pub(crate) fn range(offset: NodeNum) -> Range<NodeNum> {
     let r = range0(offset.0);
     NodeNum(r.start)..NodeNum(r.end)
 }
@@ -330,7 +330,7 @@ pub fn node_range(byte_range: Range<ByteNum>, block_level: BlockLevel) -> Range<
 /// Hash a blake3 chunk.
 ///
 /// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
-pub fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
+pub(crate) fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
     debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
     let mut hasher = blake3::guts::ChunkState::new(chunk.0);
     hasher.update(data);
@@ -341,7 +341,7 @@ pub fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
 ///
 /// `block` is the block index, `data` is the block data, `is_root` is true if this is the only block,
 /// and `block_level` indicates how many chunks make up a block. Chunks = 2^level.
-pub fn hash_block(
+pub(crate) fn hash_block(
     block: BlockNum,
     data: &[u8],
     block_level: BlockLevel,
@@ -389,7 +389,7 @@ fn hash_block0(chunk0: ChunkNum, data: &[u8], block_level: u32, is_root: bool) -
     }
 }
 
-pub fn block_hashes_iter(
+pub(crate) fn block_hashes_iter(
     data: &[u8],
     block_level: BlockLevel,
 ) -> impl Iterator<Item = (BlockNum, blake3::Hash)> + '_ {
@@ -407,12 +407,12 @@ pub fn block_hashes_iter(
 ///
 /// Could be anything, or even uninitialized.
 /// But we use all zeros so you can easily recognize it in a hex dump.
-pub fn zero_hash() -> blake3::Hash {
+pub(crate) fn zero_hash() -> blake3::Hash {
     blake3::Hash::from([0u8; 32])
 }
 
 /// root hash for an empty slice, independent of block level
-pub fn empty_root_hash() -> blake3::Hash {
+pub(crate) fn empty_root_hash() -> blake3::Hash {
     hash_chunk(ChunkNum(0), &[], true)
 }
 
