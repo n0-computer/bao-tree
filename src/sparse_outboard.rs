@@ -15,16 +15,16 @@ fn hash_chunk(chunk: Chunks, data: &[u8], is_root: bool) -> blake3::Hash {
 ///
 /// `block` is the block index, `data` is the block data, `is_root` is true if this is the only block,
 /// and `block_level` indicates how many chunks make up a block. Chunks = 2^level.
-fn hash_block(block: Blocks, data: &[u8], block_level: u32, is_root: bool) -> blake3::Hash {
+fn hash_block(block: Blocks, data: &[u8], block_level: BlockLevel, is_root: bool) -> blake3::Hash {
     // ensure that the data is not too big
-    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN << block_level);
+    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN << block_level.0);
     // compute the cunk number for the first chunk in this block
-    let chunk0 = Chunks(block.0 << block_level);
+    let chunk0 = Chunks(block.0 << block_level.0);
     // simple recursive hash.
     // Note that this should really call in to blake3 hash_all_at_once, but
     // that is not exposed in the public API and also does not allow providing
     // the chunk.
-    hash_block_recursive(chunk0, data, block_level, is_root)
+    hash_block_recursive(chunk0, data, block_level.0, is_root)
 }
 
 /// Recursive helper for hash_block.
@@ -65,7 +65,7 @@ fn hash_block_recursive(
 
 fn block_hashes_iter(
     data: &[u8],
-    block_level: u32,
+    block_level: BlockLevel,
 ) -> impl Iterator<Item = (Blocks, blake3::Hash)> + '_ {
     let block_size = block_size(block_level);
     let is_root = data.len() <= block_size.to_usize();
@@ -78,7 +78,7 @@ fn block_hashes_iter(
 }
 
 /// Given a range of bytes, returns a range of nodes that cover that range.
-fn node_range(byte_range: Range<Bytes>, block_level: u32) -> Range<Nodes> {
+fn node_range(byte_range: Range<Bytes>, block_level: BlockLevel) -> Range<Nodes> {
     let block_size = block_size(block_level).0;
     let start_page = byte_range.start.0 / block_size;
     let end_page = (byte_range.end.0 + block_size - 1) / block_size;
@@ -87,45 +87,24 @@ fn node_range(byte_range: Range<Bytes>, block_level: u32) -> Range<Nodes> {
     Nodes(start_offset)..Nodes(end_offset)
 }
 
-fn blocks(len: Bytes, block_level: u32) -> Blocks {
-    Blocks(blocks0(len.0, block_level))
-}
-
-fn blocks0(len: u64, block_level: u32) -> u64 {
-    let block_size = block_size(block_level).0;
-    len / block_size + if len % block_size == 0 { 0 } else { 1 }
-}
-
-fn num_hashes(pages: Blocks) -> Nodes {
-    Nodes(num_hashes0(pages.0))
-}
-
-fn num_hashes0(pages: u64) -> u64 {
-    if pages > 0 {
-        pages * 2 - 1
-    } else {
-        1
-    }
-}
-
 fn zero_hash() -> blake3::Hash {
     blake3::Hash::from([0u8; 32])
 }
 
-pub struct SparseOutboard<const BLOCK_LEVEL: u32 = 0> {
+pub struct SparseOutboard {
     /// even offsets are leaf hashes, odd offsets are branch hashes
     tree: Vec<blake3::Hash>,
     /// occupancy bitmap for the tree
     bitmap: Vec<bool>,
     /// total length of the data
     len: Bytes,
+    /// block level. 0 means blocks = chunks, aka bao style.
+    block_level: BlockLevel,
 }
 
-pub type StandardSparseOutboard = SparseOutboard<0>;
-
-struct SliceIter<'a, const BLOCK_LEVEL: u32 = 0> {
+struct SliceIter<'a> {
     /// the outboard
-    outboard: &'a SparseOutboard<BLOCK_LEVEL>,
+    outboard: &'a SparseOutboard,
     /// the data
     data: &'a [u8],
     /// the range of offsets to visit
@@ -165,7 +144,7 @@ impl<'a> SliceIterItem<'a> {
     }
 }
 
-impl<'a, const BLOCK_LEVEL: u32> SliceIter<'a, BLOCK_LEVEL> {
+impl<'a> SliceIter<'a> {
     fn next0(&mut self) -> Option<SliceIterItem<'a>> {
         loop {
             if let Some(emit) = self.emit.take() {
@@ -197,7 +176,7 @@ impl<'a, const BLOCK_LEVEL: u32> SliceIter<'a, BLOCK_LEVEL> {
     }
 }
 
-impl<'a, const BLOCK_LEVEL: u32> Iterator for SliceIter<'a, BLOCK_LEVEL> {
+impl<'a> Iterator for SliceIter<'a> {
     type Item = SliceIterItem<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -213,7 +192,7 @@ impl<'a, const BLOCK_LEVEL: u32> Iterator for SliceIter<'a, BLOCK_LEVEL> {
 
 impl FusedIterator for SliceIter<'_> {}
 
-impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
+impl SparseOutboard {
     /// number of leaf hashes in our tree
     ///
     /// will return 1 for empty data, since even empty data has a root hash
@@ -287,21 +266,17 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
             self.encode0(r, data, target)?;
         } else {
             let index = index(offset);
-            let start = index.to_bytes(BLOCK_LEVEL);
-            let end = (index + 1).to_bytes(BLOCK_LEVEL).min(self.len);
+            let start = index.to_bytes(self.block_level);
+            let end = (index + 1).to_bytes(self.block_level).min(self.len);
             let slice = &data[start.to_usize()..end.to_usize()];
             target.extend_from_slice(slice);
         }
         Some(())
     }
 
-    pub fn slice_iter<'a>(
-        &'a self,
-        data: &'a [u8],
-        byte_range: Range<Bytes>,
-    ) -> SliceIter<'a, BLOCK_LEVEL> {
+    pub fn slice_iter<'a>(&'a self, data: &'a [u8], byte_range: Range<Bytes>) -> SliceIter<'a> {
         assert!(data.len() as u64 == self.len);
-        let offset_range = node_range(byte_range, BLOCK_LEVEL);
+        let offset_range = node_range(byte_range, self.block_level);
         SliceIter {
             outboard: self,
             data,
@@ -314,7 +289,7 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
     /// Compute a verifiable slice of the data
     pub fn slice(&self, data: &[u8], byte_range: Range<Bytes>) -> Option<Vec<u8>> {
         assert!(data.len() as u64 == self.len);
-        let offset_range = node_range(byte_range, BLOCK_LEVEL);
+        let offset_range = node_range(byte_range, self.block_level);
         let mut res = Vec::new();
         // write the header - total length of the data
         res.extend_from_slice(&self.len.0.to_le_bytes());
@@ -360,8 +335,8 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
         reader.read_exact(&mut buf)?;
         let len = u64::from_le_bytes(buf);
         anyhow::ensure!(len == self.len, "wrong length");
-        let offset_range = node_range(byte_range, BLOCK_LEVEL);
-        let mut buffer = vec![0u8; block_size(BLOCK_LEVEL).to_usize()];
+        let offset_range = node_range(byte_range, self.block_level);
+        let mut buffer = vec![0u8; block_size(self.block_level).to_usize()];
         self.add_from_slice_0(self.root(), data, &offset_range, reader, &mut buffer, true)?;
         Ok(())
     }
@@ -375,7 +350,7 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
         buffer: &mut [u8],
         is_root: bool,
     ) -> anyhow::Result<()> {
-        let block_size = block_size(BLOCK_LEVEL);
+        let block_size = block_size(self.block_level);
         let range = range(offset);
         // if the range of this node is entirely outside the slice, we can skip it
         if range.end <= offset_range.start || range.start >= offset_range.end {
@@ -402,7 +377,7 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
             let expected_hash = hash_block(
                 index(offset),
                 &buffer[..len.to_usize()],
-                BLOCK_LEVEL,
+                self.block_level,
                 is_root,
             );
             self.validate(offset, expected_hash)?;
@@ -415,8 +390,8 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
     /// byte range for a given offset
     fn leaf_byte_range(&self, offset: Nodes) -> Range<Bytes> {
         let index = index(offset);
-        let start = index.to_bytes(BLOCK_LEVEL);
-        let end = (index + 1).to_bytes(BLOCK_LEVEL).min(self.len);
+        let start = index.to_bytes(self.block_level);
+        let end = (index + 1).to_bytes(self.block_level).min(self.len);
         start..end
     }
 
@@ -444,10 +419,10 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
     fn set_or_validate(&mut self, offset: Nodes, hash: blake3::Hash) -> anyhow::Result<()> {
         anyhow::ensure!(offset < self.tree_len());
         if self.has0(offset) {
-            println!("validating hash at {:?} level {}", offset, level(offset));
+            println!("validating hash at {:?} {:?}", offset, level(offset));
             anyhow::ensure!(self.get_hash0(offset) == &hash, "hash mismatch");
         } else {
-            println!("storing hash at {:?} level {}", offset, level(offset));
+            println!("storing hash at {:?} {:?}", offset, level(offset));
             self.set0(offset, hash);
         }
         Ok(())
@@ -457,7 +432,7 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
     fn validate(&mut self, offset: Nodes, hash: blake3::Hash) -> anyhow::Result<()> {
         anyhow::ensure!(offset < self.tree_len());
         anyhow::ensure!(self.has0(offset), "hash not set");
-        println!("validating hash at {:?} level {}", offset, level(offset));
+        println!("validating hash at {:?} {:?}", offset, level(offset));
         anyhow::ensure!(self.get_hash0(offset) == &hash, "hash mismatch");
         Ok(())
     }
@@ -466,10 +441,10 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
     ///
     /// - the data is not copied.
     /// - this also works for empty data.
-    pub fn new(data: &[u8]) -> Self {
+    pub fn new(data: &[u8], block_level: BlockLevel) -> Self {
         let len = Bytes(data.len() as u64);
         // number of blocks in our data
-        let pages = blocks(len, BLOCK_LEVEL);
+        let pages = blocks(len, block_level);
         // number of hashes (leaf and branch) for the pages
         let num_hashes = num_hashes(pages);
         let mut tree = vec![zero_hash(); num_hashes.to_usize()];
@@ -478,12 +453,17 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
             tree[0] = hash_chunk(Chunks(0), &[], true);
             bitmap[0] = true;
         } else {
-            for (offset, hash) in block_hashes_iter(data, BLOCK_LEVEL) {
+            for (offset, hash) in block_hashes_iter(data, block_level) {
                 tree[offset.to_usize() * 2] = hash;
                 bitmap[offset.to_usize() * 2] = true;
             }
         }
-        let mut res = Self { tree, bitmap, len };
+        let mut res = Self {
+            tree,
+            bitmap,
+            len,
+            block_level,
+        };
         res.rehash(None);
         res
     }
@@ -541,10 +521,10 @@ impl<const BLOCK_LEVEL: u32> SparseOutboard<BLOCK_LEVEL> {
                 } else if let Some(data) = data {
                     // rehash from data
                     let index = index(offset);
-                    let min = index.to_bytes(BLOCK_LEVEL);
-                    let max = (index + 1).to_bytes(BLOCK_LEVEL).min(self.len);
+                    let min = index.to_bytes(self.block_level);
+                    let max = (index + 1).to_bytes(self.block_level).min(self.len);
                     let slice = &data[min.to_usize()..max.to_usize()];
-                    let hash = hash_block(index, slice, BLOCK_LEVEL, is_root);
+                    let hash = hash_block(index, slice, self.block_level, is_root);
                     self.set0(offset, hash);
                 } else {
                     // we can't rehash since we don't have the data
@@ -613,7 +593,7 @@ mod tests {
         );
         let mut slice1 = Vec::new();
         extractor.read_to_end(&mut slice1).unwrap();
-        let so = SparseOutboard::<0>::new(&data);
+        let so = SparseOutboard::new(&data, BlockLevel(0));
         let slice2 = so.slice(&data, start..start + len).unwrap();
         if slice1 != slice2 {
             println!("{} {}", slice1.len(), slice2.len());
@@ -636,7 +616,7 @@ mod tests {
         );
         let mut slice1 = Vec::new();
         extractor.read_to_end(&mut slice1).unwrap();
-        let so = StandardSparseOutboard::new(&data);
+        let so = SparseOutboard::new(&data, BlockLevel(0));
         let slices2 = so.slice_iter(&data, start..start + len).collect::<Vec<_>>();
         let slice2 = slices2
             .iter()
@@ -663,7 +643,7 @@ mod tests {
         );
         let mut slice1 = Vec::new();
         extractor.read_to_end(&mut slice1).unwrap();
-        let mut so = StandardSparseOutboard::new(&data);
+        let mut so = SparseOutboard::new(&data, BlockLevel(0));
         let byte_range = start..start + len;
         so.add_from_slice(&mut data, byte_range.clone(), &mut Cursor::new(&slice1))
             .unwrap();
@@ -681,14 +661,14 @@ mod tests {
         #[test]
         fn compare_hash(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             let hash = blake3::hash(&data);
-            let hash2 = *StandardSparseOutboard::new(&data).hash().unwrap();
+            let hash2 = *SparseOutboard::new(&data, BlockLevel(0)).hash().unwrap();
             assert_eq!(hash, hash2);
         }
 
         #[test]
         fn compare_outboard(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             let (outboard, hash) = bao::encode::outboard(&data);
-            let so = StandardSparseOutboard::new(&data);
+            let so = SparseOutboard::new(&data, BlockLevel(0));
             let hash2 = *so.hash().unwrap();
             let outboard2 = so.outboard().unwrap();
             assert_eq!(hash, hash2);
@@ -698,7 +678,7 @@ mod tests {
         #[test]
         fn compare_encoded(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             let (encoded, hash) = bao::encode::encode(&data);
-            let so = StandardSparseOutboard::new(&data);
+            let so = SparseOutboard::new(&data, BlockLevel(0));
             let hash2 = *so.hash().unwrap();
             let encoded2 = so.encode(&data).unwrap();
             assert_eq!(hash, hash2);
@@ -723,7 +703,7 @@ mod tests {
         #[test]
         fn compare_hash_block_recursive(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             let hash = blake3::hash(&data);
-            let hash2 = hash_block(Blocks(0), &data, 10, true);
+            let hash2 = hash_block(Blocks(0), &data, BlockLevel(10), true);
             assert_eq!(hash, hash2);
         }
     }
@@ -736,9 +716,9 @@ mod tests {
     #[test]
     fn non_zero_block_level() {
         let data = [0u8; 4096];
-        let l0 = SparseOutboard::<0>::new(&data);
-        let l1 = SparseOutboard::<1>::new(&data);
-        let l2 = SparseOutboard::<2>::new(&data);
+        let l0 = SparseOutboard::new(&data, BlockLevel(0));
+        let l1 = SparseOutboard::new(&data, BlockLevel(1));
+        let l2 = SparseOutboard::new(&data, BlockLevel(2));
         println!("{:?}", l0.tree_len());
         println!("{:?}", l1.tree_len());
         println!("{:?}", l2.tree_len());

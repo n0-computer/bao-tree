@@ -109,9 +109,9 @@ index_newtype! {
 }
 
 impl Blocks {
-    pub fn to_bytes(self, block_level: u32) -> Bytes {
-        let block_size = block_size0(block_level);
-        Bytes(self.0 * block_size)
+    pub fn to_bytes(self, block_level: BlockLevel) -> Bytes {
+        let block_size = block_size(block_level);
+        Bytes(self.0 * block_size.0)
     }
 }
 
@@ -121,14 +121,19 @@ index_newtype! {
 }
 
 #[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockLevel(pub u32);
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TreeLevel(pub u32);
 
 pub fn bo_range_to_usize(range: Range<Bytes>) -> Range<usize> {
     range.start.to_usize()..range.end.to_usize()
 }
 
-pub fn block_size(block_level: u32) -> Bytes {
-    Bytes(block_size0(block_level))
+pub fn block_size(block_level: BlockLevel) -> Bytes {
+    Bytes(block_size0(block_level.0))
 }
 
 fn block_size0(block_level: u32) -> u64 {
@@ -149,12 +154,33 @@ fn root0(leafs: u64) -> u64 {
 }
 
 /// Level for an offset. 0 is for leaves, 1 is for the first level of branches, etc.
-pub fn level(offset: Nodes) -> u32 {
-    level0(offset.0)
+pub fn level(offset: Nodes) -> TreeLevel {
+    TreeLevel(level0(offset.0))
 }
 
 fn level0(offset: u64) -> u32 {
     (!offset).trailing_zeros()
+}
+
+pub fn blocks(len: Bytes, block_level: BlockLevel) -> Blocks {
+    Blocks(blocks0(len.0, block_level.0))
+}
+
+fn blocks0(len: u64, block_level: u32) -> u64 {
+    let block_size = block_size0(block_level);
+    len / block_size + if len % block_size == 0 { 0 } else { 1 }
+}
+
+pub fn num_hashes(pages: Blocks) -> Nodes {
+    Nodes(num_hashes0(pages.0))
+}
+
+fn num_hashes0(pages: u64) -> u64 {
+    if pages > 0 {
+        pages * 2 - 1
+    } else {
+        1
+    }
 }
 
 /// Span for an offset. 1 is for leaves, 2 is for the first level of branches, etc.
