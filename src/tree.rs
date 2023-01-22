@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_right_descendant() {
-        for i in (1..11) {
+        for i in 1..11 {
             println!(
                 "valid_right_child({}, 9), {:?}",
                 i,

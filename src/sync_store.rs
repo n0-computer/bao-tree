@@ -1,26 +1,55 @@
-use std::{io::Read, iter::FusedIterator, ops::Range};
+use std::{
+    io::{self, Read},
+    iter::FusedIterator,
+    ops::Range,
+};
 
 use crate::tree::*;
 
+/// Interface for a synchronous store
+///
+/// This includs just methods that have to be implemented
 pub trait SyncStore: Sized {
-    type IoError;
-    /// length of the tree in nodes
-    fn tree_len(&self) -> Nodes;
-    /// get a node from the tree, with existence check and bounds check
-    fn get(&self, offset: Nodes) -> Result<Option<blake3::Hash>, Self::IoError>;
-    /// set or clear a node in the tree, with bounds check
-    fn set(&mut self, offset: Nodes, hash: Option<blake3::Hash>) -> Result<(), Self::IoError>;
+    /// the type of io error when interacting with the store
+    ///
+    /// for an in-memory store, this is can be infallible
+    type IoError: std::fmt::Debug;
 
     /// length of the stored data
     fn data_len(&self) -> Bytes;
+
     /// block level
     fn block_level(&self) -> BlockLevel;
-    /// get a block of data.
+
+    /// length of the tree in nodes
+    fn tree_len(&self) -> Nodes;
+
+    /// get a node from the tree, with existence check
+    ///
+    /// will panic if the offset is out of bounds
+    fn get(&self, offset: Nodes) -> Result<Option<blake3::Hash>, Self::IoError>;
+
+    /// set or clear a node in the tree
+    ///
+    /// will panic if the offset is out of bounds
+    fn set(&mut self, offset: Nodes, hash: Option<blake3::Hash>) -> Result<(), Self::IoError>;
+
+    /// get a block of data
+    ///
+    /// will panic if the offset is out of bounds
     fn get_block(&self, block: Blocks) -> Result<Option<&[u8]>, Self::IoError>;
-    /// set a block of data
+
+    /// set or clear a block of data
+    ///
+    /// will panic if the offset is out of bounds
     fn set_block(&mut self, block: Blocks, data: Option<&[u8]>) -> Result<(), Self::IoError>;
 
-    /// new empty store with the block level
+    /// new empty store with the given block level
+    ///
+    /// the store will be initialized with the given block level, but no data.
+    /// the hash will be set to the hash of the empty slice.
+    ///
+    /// note that stores with different block levels are not compatible.
     fn empty(block_level: BlockLevel) -> Self;
 
     /// grow the store to the given length
@@ -32,7 +61,69 @@ pub trait SyncStore: Sized {
     fn grow_storage(&mut self, new_len: Bytes) -> Result<(), Self::IoError>;
 }
 
-pub trait SyncStoreExt: SyncStore {}
+/// public interface for a synchronous store
+///
+/// todo: this should really be a newtype so we can't mess with the guts of the store
+pub trait SyncStoreExt: SyncStore {
+    /// create a new completely initialized store from a slice of data
+    fn new(data: &[u8], block_level: BlockLevel) -> Result<Self, Self::IoError> {
+        let mut res = Self::empty(block_level);
+        res.grow(Bytes(data.len() as u64))?;
+        for (block, data) in data.chunks(res.block_size().to_usize()).enumerate() {
+            res.set_block(Blocks(block as u64), Some(data))?;
+        }
+        res.rehash()?;
+        Ok(res)
+    }
+
+    /// the blake3 hash of the entire data, if available
+    fn hash(&self) -> Result<Option<blake3::Hash>, Self::IoError> {
+        self.get(self.root())
+    }
+
+    /// add a slice of data to the store
+    ///
+    /// returns
+    /// - AddSliceError::WrongLength if the length of the data does not match the length of the store
+    /// - AddSliceError::Io if there is an IO error
+    /// - AddSliceError::LocalIo if there is a local IO error reading or writing the hashes or the data
+    /// - AddSliceError::Validation if the data does not match the hashes
+    /// - Ok(()) if the slice was successfully added
+    fn add_from_slice(
+        &mut self,
+        byte_range: Range<Bytes>,
+        reader: &mut impl Read,
+    ) -> Result<(), AddSliceError<Self::IoError>> {
+        let mut buf = [0u8; 8];
+        reader.read_exact(&mut buf).map_err(AddSliceError::Io)?;
+        let len = u64::from_le_bytes(buf);
+        if len != self.data_len() {
+            return Err(AddSliceError::WrongLength(len));
+        }
+        let offset_range = node_range(byte_range, self.block_level());
+        let mut buffer = vec![0u8; block_size(self.block_level()).to_usize()];
+        self.add_from_slice_0(self.root(), &offset_range, reader, &mut buffer, true)?;
+        Ok(())
+    }
+
+    /// extract a slice of data from the store, producing a verifiable slice
+    ///
+    /// the returned reader will fail with an io error if either
+    /// - the slice is not available or
+    /// - there is an internal io error accessing the data or the needed hashes.
+    fn extract_slice(&self, byte_range: Range<Bytes>) -> SliceReader<'_, Self> {
+        let iter = self.slice_iter(byte_range);
+        let buffer = vec![0u8; block_size(self.block_level()).to_usize()];
+        SliceReader {
+            iter,
+            buffer,
+            start: 0,
+            end: 0,
+        }
+    }
+}
+
+impl<T: SyncStore> SyncStoreExt for T {}
 
 #[derive(Debug)]
 pub enum TraversalError<IoError> {
@@ -43,7 +134,7 @@ pub enum TraversalError<IoError> {
 #[derive(Debug)]
 pub enum AddSliceError<IoError> {
     /// io error when reading from the slice
-    Io(std::io::Error),
+    Io(io::Error),
     /// io error when reading from or writing to the local store
     LocalIo(IoError),
     /// slice length does not match the expected length
@@ -119,11 +210,6 @@ pub(crate) trait SyncStoreUtil: SyncStore {
         root(self.leafs())
     }
 
-    /// the blake3 hash of the entire data
-    fn hash(&self) -> Result<Option<blake3::Hash>, Self::IoError> {
-        self.get(self.root())
-    }
-
     /// the byte range the store covers
     fn byte_range(&self) -> Range<Bytes> {
         Bytes(0)..self.data_len()
@@ -147,16 +233,6 @@ pub(crate) trait SyncStoreUtil: SyncStore {
         }
         self.grow_storage(new_len)?;
         Ok(())
-    }
-
-    fn new(data: &[u8], block_level: BlockLevel) -> Result<Self, Self::IoError> {
-        let mut res = Self::empty(block_level);
-        res.grow(Bytes(data.len() as u64))?;
-        for (block, data) in data.chunks(res.block_size().to_usize()).enumerate() {
-            res.set_block(Blocks(block as u64), Some(data))?;
-        }
-        res.rehash()?;
-        Ok(res)
     }
 
     /// produce a blake3 outboard for the entire data
@@ -277,6 +353,7 @@ pub(crate) trait SyncStoreUtil: SyncStore {
         Ok(())
     }
 
+    /// return an iterator that produces a verifiable encoding of the data in the given range
     fn slice_iter(&self, byte_range: Range<Bytes>) -> SliceIter<'_, Self> {
         let offset_range = node_range(byte_range, self.block_level());
         SliceIter {
@@ -285,23 +362,6 @@ pub(crate) trait SyncStoreUtil: SyncStore {
             stack: vec![self.root()],
             emit: Some(SliceIterItem::Header(self.data_len().0)),
         }
-    }
-
-    fn add_from_slice(
-        &mut self,
-        byte_range: Range<Bytes>,
-        reader: &mut impl Read,
-    ) -> Result<(), AddSliceError<Self::IoError>> {
-        let mut buf = [0u8; 8];
-        reader.read_exact(&mut buf).map_err(AddSliceError::Io)?;
-        let len = u64::from_le_bytes(buf);
-        if len != self.data_len() {
-            return Err(AddSliceError::WrongLength(len));
-        }
-        let offset_range = node_range(byte_range, self.block_level());
-        let mut buffer = vec![0u8; block_size(self.block_level()).to_usize()];
-        self.add_from_slice_0(self.root(), &offset_range, reader, &mut buffer, true)?;
-        Ok(())
     }
 
     fn add_from_slice_0(
@@ -401,11 +461,81 @@ impl<'a> std::fmt::Debug for SliceIterItem<'a> {
 }
 
 impl<'a> SliceIterItem<'a> {
-    pub fn to_vec(&self) -> Vec<u8> {
+    pub fn copy_to(&self, target: &mut [u8]) {
         match self {
-            SliceIterItem::Hash(h) => h.as_bytes().to_vec(),
-            SliceIterItem::Data(d) => d.to_vec(),
-            SliceIterItem::Header(h) => h.to_le_bytes().to_vec(),
+            SliceIterItem::Hash(h) => target.copy_from_slice(h.as_bytes()),
+            SliceIterItem::Data(d) => target.copy_from_slice(d),
+            SliceIterItem::Header(h) => target.copy_from_slice(&h.to_le_bytes()),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            SliceIterItem::Header(_) => 8,
+            SliceIterItem::Hash(_) => 32,
+            SliceIterItem::Data(d) => d.len(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn to_vec(&self) -> Vec<u8> {
+        let mut res = vec![0u8; self.len()];
+        self.copy_to(&mut res);
+        res
+    }
+}
+
+/// a reader that reads from a slice iter
+///
+/// this serves as an adapter from the types SliceIter to just a stream of bytes
+pub struct SliceReader<'a, S: SyncStore> {
+    iter: SliceIter<'a, S>,
+    buffer: Vec<u8>,
+    start: usize,
+    end: usize,
+}
+
+impl<'a, S: SyncStore> Read for SliceReader<'a, S> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.start >= self.end {
+                match self.iter.next() {
+                    Some(Ok(item)) => {
+                        self.start = 0;
+                        self.end = item.len();
+                        item.copy_to(&mut self.buffer[..self.end]);
+                    }
+                    Some(Err(cause)) => {
+                        // finish the iterator so if somebody calls read again
+                        // it will indicate termination by returning 0 bytes read
+                        self.iter.finish();
+                        // produce a good error - distinguish between io errors
+                        // and data unavailability
+                        break Err(match cause {
+                            TraversalError::Io(e) => io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("io error accessing the data: {:?}", e),
+                            ),
+                            TraversalError::Unavailable => {
+                                io::Error::new(io::ErrorKind::Other, format!("data unavailable"))
+                            }
+                        });
+                    }
+                    None => {
+                        // iterator is done and buffer is empty, so signal EOF
+                        break Ok(0);
+                    }
+                }
+            }
+            // when we get here we have data in the buffer, so n won't be 0
+            let n = buf.len().min(self.end - self.start);
+            // copy the data from the buffer to the output
+            // this is safe because we know the buffer is at least as big as n
+            buf[..n].copy_from_slice(&self.buffer[self.start..self.start + n]);
+            // advance the start pointer
+            self.start += n;
+            // return the number of read bytes
+            break Ok(n);
         }
     }
 }
@@ -418,6 +548,7 @@ enum TraversalResult<T> {
 
 impl<'a, T: SyncStore> SliceIter<'a, T> {
     fn next0(&mut self) -> Result<SliceIterItem<'a>, TraversalResult<T::IoError>> {
+        use TraversalResult as E;
         loop {
             if let Some(emit) = self.emit.take() {
                 break Ok(emit);
@@ -436,13 +567,13 @@ impl<'a, T: SyncStore> SliceIter<'a, T> {
                 let lh = self
                     .store
                     .get(l)
-                    .map_err(TraversalResult::IoError)?
-                    .ok_or(TraversalResult::Unavailable)?;
+                    .map_err(E::IoError)?
+                    .ok_or(E::Unavailable)?;
                 let rh = self
                     .store
                     .get(r)
-                    .map_err(TraversalResult::IoError)?
-                    .ok_or(TraversalResult::Unavailable)?;
+                    .map_err(E::IoError)?
+                    .ok_or(E::Unavailable)?;
                 // rh comes second, so we put it into emit
                 self.emit = Some(SliceIterItem::Hash(rh));
                 // lh comes first, so we return it immediately
@@ -451,8 +582,8 @@ impl<'a, T: SyncStore> SliceIter<'a, T> {
                 let slice = self
                     .store
                     .get_block(index(offset))
-                    .map_err(TraversalResult::IoError)?
-                    .ok_or(TraversalResult::Unavailable)?;
+                    .map_err(E::IoError)?
+                    .ok_or(E::Unavailable)?;
                 break Ok(SliceIterItem::Data(slice));
             }
         }
@@ -488,9 +619,9 @@ impl<'a, T: SyncStore> Iterator for SliceIter<'a, T> {
 impl<'a, T: SyncStore> FusedIterator for SliceIter<'a, T> {}
 
 pub struct VecSyncStore {
+    block_level: BlockLevel,
     tree: Vec<blake3::Hash>,
     tree_bitmap: Vec<bool>,
-    block_level: BlockLevel,
     data: Vec<u8>,
     data_bitmap: Vec<bool>,
 }

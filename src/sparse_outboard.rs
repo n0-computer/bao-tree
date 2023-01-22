@@ -45,6 +45,7 @@ impl<'a> std::fmt::Debug for SliceIterItem<'a> {
 }
 
 impl<'a> SliceIterItem<'a> {
+    #[cfg(test)]
     fn to_vec(&self) -> Vec<u8> {
         match self {
             SliceIterItem::Hash(h) => h.as_bytes().to_vec(),
@@ -533,13 +534,21 @@ mod tests {
         assert_eq!(slice1, slice2);
 
         // encode a slice using vec outboard and its slice_iter
-        let so = VecSyncStore::new(&data, BlockLevel(0)).unwrap();
-        let slices2 = so.slice_iter(start..start + len).collect::<Vec<_>>();
+        let vs = VecSyncStore::new(&data, BlockLevel(0)).unwrap();
+
+        // use the iterator and flatten it
+        let slices2 = vs.slice_iter(start..start + len).collect::<Vec<_>>();
         let slice2 = slices2
             .into_iter()
             .map(|x| x.unwrap().to_vec())
             .flatten()
             .collect::<Vec<_>>();
+        assert_eq!(slice1, slice2);
+
+        // use the reader and use read_to_end, should be the same
+        let mut reader = vs.extract_slice(start..start + len);
+        let mut slice2 = Vec::new();
+        reader.read_to_end(&mut slice2).unwrap();
         assert_eq!(slice1, slice2);
     }
 
