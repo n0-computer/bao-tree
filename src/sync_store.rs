@@ -88,6 +88,14 @@ impl<S: SyncStore> BlakeFile<S> {
         self.0.hash()
     }
 
+    pub(crate) fn tree_len(&self) -> Nodes {
+        self.0.tree_len()
+    }
+
+    pub(crate) fn slice_iter(&self, byte_range: Range<Bytes>) -> SliceIter<'_, S> {
+        self.0.slice_iter(byte_range)
+    }
+
     /// add a slice of data to the store
     ///
     /// returns

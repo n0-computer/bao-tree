@@ -1,108 +1,9 @@
-use bao::decode::SliceDecoder;
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::io::{self, Read, Write};
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::Poll;
 use tree::BLAKE3_CHUNK_SIZE;
-mod sparse_outboard;
 mod sync_store;
 mod tree;
 
-use sparse_outboard::SparseOutboard;
-
-struct Inner {
-    buffer: VecDeque<u8>,
-    finished: bool,
-}
-
-pub struct AsyncSliceDecoder<R> {
-    reader: R,
-    decoder: SliceDecoder<IoBuffer>,
-    buffer: IoBuffer,
-}
-
-impl<R: AsyncRead + Unpin> AsyncRead for AsyncSliceDecoder<R> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let mut tmp = [0; 4096];
-        while !self.buffer.is_finished() && self.buffer.len() < 4096 {
-            let mut rb = tokio::io::ReadBuf::new(&mut tmp);
-            match Pin::new(&mut self.reader).poll_read(cx, &mut rb) {
-                Poll::Ready(Ok(())) => {
-                    if rb.filled().is_empty() {
-                        self.buffer.finish();
-                    } else {
-                        self.buffer.write(rb.filled())?;
-                    }
-                }
-                Poll::Ready(Err(e)) => {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending => {
-                    return Poll::Pending;
-                }
-            }
-        }
-        let max = buf.remaining().min(tmp.len());
-        let n = self.decoder.read(&mut tmp[..max])?;
-        buf.put_slice(&tmp[..n]);
-        Poll::Ready(Ok(()))
-    }
-}
-
-pub struct IoBuffer(Arc<RefCell<Inner>>);
-
-impl IoBuffer {
-    pub fn with_capacity(cap: usize) -> Self {
-        Self(Arc::new(RefCell::new(Inner {
-            buffer: VecDeque::with_capacity(cap),
-            finished: false,
-        })))
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.borrow().buffer.len()
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.0.borrow().finished
-    }
-
-    pub fn finish(&self) {
-        let mut inner = self.0.borrow_mut();
-        inner.finished = true;
-    }
-}
-
-impl Read for IoBuffer {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut inner = self.0.borrow_mut();
-        let read = inner.buffer.read(buf)?;
-        if inner.buffer.is_empty() && !inner.finished {
-            return Err(io::Error::new(io::ErrorKind::Other, "not finished"));
-        }
-        Ok(read)
-    }
-}
-
-impl Write for IoBuffer {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut inner = self.0.borrow_mut();
-        if inner.finished {
-            return Err(io::Error::new(io::ErrorKind::Other, "finished"));
-        }
-        inner.buffer.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
+#[cfg(test)]
+mod tests;
 
 fn hash_leaf(offset: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     let mut hasher = blake3::guts::ChunkState::new(offset);
@@ -148,6 +49,7 @@ fn blake3_own(data: &[u8]) -> blake3::Hash {
 
 use tokio::io::AsyncRead;
 
+use crate::sync_store::{BlakeFile, VecSyncStore};
 use crate::tree::BlockLevel;
 
 fn print_outboard(data: &[u8]) {
@@ -160,8 +62,10 @@ fn print_outboard(data: &[u8]) {
     println!(
         "sparse_o: {}",
         hex::encode(
-            SparseOutboard::new(&data, BlockLevel(0))
+            BlakeFile::<VecSyncStore>::new(&data, BlockLevel(0))
+                .unwrap()
                 .hash()
+                .unwrap()
                 .unwrap()
                 .as_bytes()
         )
@@ -207,21 +111,5 @@ fn main() {
     for i in (0..(4096)).step_by(64) {
         let data = (0..i).map(|_| (i / 701) as u8).collect::<Vec<_>>();
         print_outboard(&data);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use proptest::prelude::*;
-    proptest! {
-
-        #[test]
-        fn compare_hash(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
-            let hash = blake3::hash(&data);
-            let hash2 = blake3_own(&data);
-            assert_eq!(hash, hash2);
-        }
     }
 }
