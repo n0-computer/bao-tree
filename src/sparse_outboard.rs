@@ -312,7 +312,7 @@ impl SparseOutboard {
     }
 
     /// get the hash for the given offset, with bounds check and check if we have it
-    fn get(&self, offset: Nodes) -> Option<&blake3::Hash> {
+    fn get_hash(&self, offset: Nodes) -> Option<&blake3::Hash> {
         if offset < self.tree_len() && self.has0(offset) {
             Some(self.get_hash0(offset))
         } else {
@@ -400,7 +400,7 @@ impl SparseOutboard {
     }
 
     /// Get the hash for the given offset, with bounds check and check if we have it
-    fn get_hash(&self, offset: Nodes) -> Option<&blake3::Hash> {
+    fn get(&self, offset: Nodes) -> Option<&blake3::Hash> {
         if offset < self.tree_len() {
             if self.has0(offset) {
                 Some(&self.get_hash0(offset))
@@ -546,6 +546,7 @@ mod tests {
         assert_eq!(slice1, slice2);
 
         // use the reader and use read_to_end, should be the same
+        let vs = BlakeFile::<VecSyncStore>::new(&data, BlockLevel(0)).unwrap();
         let mut reader = vs.extract_slice(start..start + len);
         let mut slice2 = Vec::new();
         reader.read_to_end(&mut slice2).unwrap();
@@ -603,7 +604,7 @@ mod tests {
         extractor.read_to_end(&mut slice1).unwrap();
 
         // add from the bao slice and check that it validates
-        let mut vs = VecSyncStore::new(&data, BlockLevel(0)).unwrap();
+        let mut vs = BlakeFile::<VecSyncStore>::new(&data, BlockLevel(0)).unwrap();
         let byte_range = start..start + len;
         vs.add_from_slice(byte_range.clone(), &mut Cursor::new(&slice1))
             .unwrap();

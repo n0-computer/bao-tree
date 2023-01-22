@@ -185,6 +185,15 @@ fn blocks0(len: u64, block_level: u32) -> u64 {
     len / block_size + if len % block_size == 0 { 0 } else { 1 }
 }
 
+pub fn full_blocks(len: Bytes, block_level: BlockLevel) -> Blocks {
+    Blocks(full_blocks0(len.0, block_level.0))
+}
+
+fn full_blocks0(len: u64, block_level: u32) -> u64 {
+    let block_size = block_size0(block_level);
+    len / block_size
+}
+
 pub fn num_hashes(blocks: Blocks) -> Nodes {
     Nodes(num_hashes0(blocks.0))
 }
@@ -312,65 +321,13 @@ fn sibling0(offset: u64) -> u64 {
     }
 }
 
-/// depth first, left to right traversal of a tree of size len
-pub fn depth_first_left_to_right(len: Nodes) -> impl Iterator<Item = Nodes> {
-    fn descend(offset: Nodes, len: Nodes, res: &mut Vec<Nodes>) {
-        if offset < len {
-            res.push(offset);
-            if let Some((left, right)) = children(offset) {
-                descend(left, len, res);
-                descend(right, len, res);
-            }
-        } else if let Some(left_child) = left_child(offset) {
-            descend(left_child, len, res)
-        }
-    }
-    // compute number of leafs (this will be 1 even for empty data)
-    let leafs = leafs(len);
-    // compute root offset
-    let root = root(leafs);
-    // result vec
-    let mut res = Vec::with_capacity(len.to_usize());
-    descend(root, len, &mut res);
-    res.into_iter()
-}
-
-/// breadth first, left to right traversal of a tree of size len
-pub fn breadth_first_left_to_right(len: Nodes) -> impl Iterator<Item = Nodes> {
-    fn descend(current: Vec<Nodes>, len: Nodes, res: &mut Vec<Nodes>) {
-        let mut next = Vec::new();
-        for offset in current {
-            if offset < len {
-                res.push(offset);
-                if let Some((left, right)) = children(offset) {
-                    next.push(left);
-                    next.push(right);
-                }
-            } else if let Some(left_child) = left_child(offset) {
-                next.push(left_child);
-            }
-        }
-        if !next.is_empty() {
-            descend(next, len, res);
-        }
-    }
-    // compute number of leafs (this will be 1 even for empty data)
-    let leafs = leafs(len);
-    // compute root offset
-    let root = root(leafs);
-    // result vec
-    let mut res = Vec::with_capacity(len.to_usize());
-    descend(vec![root], len, &mut res);
-    res.into_iter()
-}
-
 /// Given a range of bytes, returns a range of nodes that cover that range.
 pub fn node_range(byte_range: Range<Bytes>, block_level: BlockLevel) -> Range<Nodes> {
     let block_size = block_size(block_level).0;
-    let start_page = byte_range.start.0 / block_size;
-    let end_page = (byte_range.end.0 + block_size - 1) / block_size;
-    let start_offset = start_page * 2;
-    let end_offset = end_page * 2;
+    let start_block = byte_range.start.0 / block_size;
+    let end_block = (byte_range.end.0 + block_size - 1) / block_size;
+    let start_offset = start_block * 2;
+    let end_offset = end_block * 2;
     Nodes(start_offset)..Nodes(end_offset)
 }
 
@@ -572,30 +529,6 @@ mod tests {
         assert_eq!(level0(1), 1);
         assert_eq!(level0(2), 0);
         assert_eq!(level0(3), 2);
-    }
-
-    #[test]
-    fn test_dflr() {
-        fn dflr(len: u64) -> impl Iterator<Item = Nodes> {
-            depth_first_left_to_right(Nodes(len))
-        }
-        assert_eq!(dflr(1).collect::<Vec<_>>(), vec![0]);
-        assert_eq!(dflr(3).collect::<Vec<_>>(), vec![1, 0, 2]);
-        assert_eq!(dflr(5).collect::<Vec<_>>(), vec![3, 1, 0, 2, 4]);
-        assert_eq!(dflr(7).collect::<Vec<_>>(), vec![3, 1, 0, 2, 5, 4, 6]);
-        assert_eq!(dflr(9).collect::<Vec<_>>(), vec![7, 3, 1, 0, 2, 5, 4, 6, 8]);
-    }
-
-    #[test]
-    fn test_bflr() {
-        fn bflr(len: u64) -> impl Iterator<Item = Nodes> {
-            breadth_first_left_to_right(Nodes(len))
-        }
-        assert_eq!(bflr(1).collect::<Vec<_>>(), vec![0]);
-        assert_eq!(bflr(3).collect::<Vec<_>>(), vec![1, 0, 2]);
-        assert_eq!(bflr(5).collect::<Vec<_>>(), vec![3, 1, 0, 2, 4]);
-        assert_eq!(bflr(7).collect::<Vec<_>>(), vec![3, 1, 5, 0, 2, 4, 6]);
-        assert_eq!(bflr(9).collect::<Vec<_>>(), vec![7, 3, 1, 5, 0, 2, 4, 6, 8]);
     }
 
     #[test]
