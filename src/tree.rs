@@ -76,27 +76,39 @@ macro_rules! index_newtype {
                 self.0.partial_cmp(other)
             }
         }
+
+        impl $name {
+
+            /// Convert to usize or panic if it doesn't fit.
+            pub fn to_usize(self) -> usize {
+                usize::try_from(self.0).expect("usize overflow")
+            }
+        }
     }
 }
 
 index_newtype! {
-    /// Offset in the tree.
-    pub struct Offset(pub usize);
+    /// A number of nodes in the tree
+    pub struct Nodes(pub u64);
 }
 
 index_newtype! {
-    /// offset of a <=1024 byte chunk in a blake3 hash.
-    pub struct Chunk(pub usize);
+    /// A number of <=1024 byte blake3 chunks
+    pub struct Chunks(pub u64);
 }
 
 index_newtype! {
-    /// offset of a block with its own hash.
-    pub struct Block(pub usize);
+    /// a number of leaf blocks with its own hash
+    pub struct Blocks(pub u64);
 }
 
 index_newtype! {
-    /// A byte offset in a file.
-    pub struct ByteOffset(pub usize);
+    /// A number of bytes
+    pub struct Bytes(pub u64);
+}
+
+pub fn bo_range_to_usize(range: Range<Bytes>) -> Range<usize> {
+    range.start.to_usize()..range.end.to_usize()
 }
 
 macro_rules! index {
@@ -176,42 +188,42 @@ macro_rules! index {
 // index!(Offset, usize);
 // index!(Chunk, u64);
 
-pub fn leafs(blocks: Offset) -> usize {
-    (blocks.0 + 1) / 2
+pub fn leafs(blocks: Nodes) -> Blocks {
+    Blocks((blocks.0 + 1) / 2)
 }
 
 /// Root offset given a number of leaves.
-pub fn root(leafs: usize) -> Offset {
-    Offset(root0(leafs))
+pub fn root(leafs: Blocks) -> Nodes {
+    Nodes(root0(leafs.0))
 }
 
-fn root0(leafs: usize) -> usize {
+fn root0(leafs: u64) -> u64 {
     leafs.next_power_of_two() - 1
 }
 
 /// Level for an offset. 0 is for leaves, 1 is for the first level of branches, etc.
-pub fn level(offset: Offset) -> u32 {
+pub fn level(offset: Nodes) -> u32 {
     level0(offset.0)
 }
 
-fn level0(offset: usize) -> u32 {
+fn level0(offset: u64) -> u32 {
     (!offset).trailing_zeros()
 }
 
 /// Span for an offset. 1 is for leaves, 2 is for the first level of branches, etc.
-pub fn span(offset: Offset) -> Offset {
-    Offset(span0(offset.0))
+pub fn span(offset: Nodes) -> Nodes {
+    Nodes(span0(offset.0))
 }
 
-fn span0(offset: usize) -> usize {
+fn span0(offset: u64) -> u64 {
     1 << (!offset).trailing_zeros()
 }
 
-pub fn left_child(offset: Offset) -> Option<Offset> {
-    left_child0(offset.0).map(Offset)
+pub fn left_child(offset: Nodes) -> Option<Nodes> {
+    left_child0(offset.0).map(Nodes)
 }
 
-fn left_child0(offset: usize) -> Option<usize> {
+fn left_child0(offset: u64) -> Option<u64> {
     let span = span0(offset);
     if span == 1 {
         None
@@ -220,11 +232,11 @@ fn left_child0(offset: usize) -> Option<usize> {
     }
 }
 
-pub fn right_child(offset: Offset) -> Option<Offset> {
-    right_child0(offset.0).map(Offset)
+pub fn right_child(offset: Nodes) -> Option<Nodes> {
+    right_child0(offset.0).map(Nodes)
 }
 
-fn right_child0(offset: usize) -> Option<usize> {
+fn right_child0(offset: u64) -> Option<u64> {
     let span = span0(offset);
     if span == 1 {
         None
@@ -234,7 +246,7 @@ fn right_child0(offset: usize) -> Option<usize> {
 }
 
 /// Get a valid right descendant for an offset
-pub fn right_descendant(offset: Offset, len: Offset) -> Option<Offset> {
+pub fn right_descendant(offset: Nodes, len: Nodes) -> Option<Nodes> {
     let mut offset = right_child(offset)?;
     while offset >= len {
         offset = left_child(offset)?;
@@ -243,7 +255,7 @@ pub fn right_descendant(offset: Offset, len: Offset) -> Option<Offset> {
 }
 
 /// both children are at one level below the parent, but it is not guaranteed that they exist
-pub fn children(offset: Offset) -> Option<(Offset, Offset)> {
+pub fn children(offset: Nodes) -> Option<(Nodes, Nodes)> {
     let span = span(offset);
     if span.0 == 1 {
         None
@@ -253,7 +265,7 @@ pub fn children(offset: Offset) -> Option<(Offset, Offset)> {
 }
 
 /// both children are at one level below the parent, but it is not guaranteed that they exist
-pub fn descendants(offset: Offset, len: Offset) -> Option<(Offset, Offset)> {
+pub fn descendants(offset: Nodes, len: Nodes) -> Option<(Nodes, Nodes)> {
     let lc = left_child(offset);
     let rc = right_descendant(offset, len);
     if let (Some(l), Some(r)) = (lc, rc) {
@@ -263,20 +275,20 @@ pub fn descendants(offset: Offset, len: Offset) -> Option<(Offset, Offset)> {
     }
 }
 
-pub fn is_left_sibling(offset: Offset) -> bool {
+pub fn is_left_sibling(offset: Nodes) -> bool {
     is_left_sibling0(offset.0)
 }
 
-fn is_left_sibling0(offset: usize) -> bool {
+fn is_left_sibling0(offset: u64) -> bool {
     let span = span0(offset) * 2;
     (offset & span) == 0
 }
 
-pub fn parent(offset: Offset) -> Offset {
-    Offset(parent0(offset.0))
+pub fn parent(offset: Nodes) -> Nodes {
+    Nodes(parent0(offset.0))
 }
 
-fn parent0(offset: usize) -> usize {
+fn parent0(offset: u64) -> u64 {
     let span = span0(offset);
     // if is_left_sibling(offset) {
     if (offset & (span * 2)) == 0 {
@@ -287,25 +299,25 @@ fn parent0(offset: usize) -> usize {
 }
 
 /// Get the chunk index for an offset
-pub fn index(offset: Offset) -> Chunk {
-    Chunk(offset.0 / 2)
+pub fn index(offset: Nodes) -> Chunks {
+    Chunks(offset.0 / 2)
 }
 
-pub fn range(offset: Offset) -> Range<Offset> {
+pub fn range(offset: Nodes) -> Range<Nodes> {
     let r = range0(offset.0);
-    Offset(r.start)..Offset(r.end)
+    Nodes(r.start)..Nodes(r.end)
 }
 
-fn range0(offset: usize) -> Range<usize> {
+fn range0(offset: u64) -> Range<u64> {
     let span = span0(offset);
     offset + 1 - span..offset + span
 }
 
-pub fn sibling(offset: Offset) -> Offset {
-    Offset(sibling0(offset.0))
+pub fn sibling(offset: Nodes) -> Nodes {
+    Nodes(sibling0(offset.0))
 }
 
-fn sibling0(offset: usize) -> usize {
+fn sibling0(offset: u64) -> u64 {
     if is_left_sibling0(offset) {
         offset + span0(offset) * 2
     } else {
@@ -314,8 +326,8 @@ fn sibling0(offset: usize) -> usize {
 }
 
 /// depth first, left to right traversal of a tree of size len
-pub fn depth_first_left_to_right(len: Offset) -> impl Iterator<Item = Offset> {
-    fn descend(offset: Offset, len: Offset, res: &mut Vec<Offset>) {
+pub fn depth_first_left_to_right(len: Nodes) -> impl Iterator<Item = Nodes> {
+    fn descend(offset: Nodes, len: Nodes, res: &mut Vec<Nodes>) {
         if offset < len {
             res.push(offset);
             if let Some((left, right)) = children(offset) {
@@ -331,14 +343,14 @@ pub fn depth_first_left_to_right(len: Offset) -> impl Iterator<Item = Offset> {
     // compute root offset
     let root = root(leafs);
     // result vec
-    let mut res = Vec::with_capacity(len.0);
+    let mut res = Vec::with_capacity(len.to_usize());
     descend(root, len, &mut res);
     res.into_iter()
 }
 
 /// breadth first, left to right traversal of a tree of size len
-pub fn breadth_first_left_to_right(len: Offset) -> impl Iterator<Item = Offset> {
-    fn descend(current: Vec<Offset>, len: Offset, res: &mut Vec<Offset>) {
+pub fn breadth_first_left_to_right(len: Nodes) -> impl Iterator<Item = Nodes> {
+    fn descend(current: Vec<Nodes>, len: Nodes, res: &mut Vec<Nodes>) {
         let mut next = Vec::new();
         for offset in current {
             if offset < len {
@@ -360,7 +372,7 @@ pub fn breadth_first_left_to_right(len: Offset) -> impl Iterator<Item = Offset> 
     // compute root offset
     let root = root(leafs);
     // result vec
-    let mut res = Vec::with_capacity(len.0);
+    let mut res = Vec::with_capacity(len.to_usize());
     descend(vec![root], len, &mut res);
     res.into_iter()
 }
@@ -371,12 +383,12 @@ mod tests {
 
     use super::*;
 
-    impl Arbitrary for Offset {
+    impl Arbitrary for Nodes {
         type Parameters = ();
-        type Strategy = BoxedStrategy<Offset>;
+        type Strategy = BoxedStrategy<Nodes>;
 
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
-            any::<usize>().prop_map(Offset).boxed()
+            any::<u64>().prop_map(Nodes).boxed()
         }
     }
 
@@ -386,7 +398,7 @@ mod tests {
             println!(
                 "valid_right_child({}, 9), {:?}",
                 i,
-                right_descendant(Offset(i), Offset(9))
+                right_descendant(Nodes(i), Nodes(9))
             );
         }
     }
@@ -394,16 +406,16 @@ mod tests {
     #[test]
     fn test_left() {
         for i in 0..20 {
-            println!("assert_eq!(left_child({}), {:?})", i, left_child(Offset(i)));
+            println!("assert_eq!(left_child({}), {:?})", i, left_child(Nodes(i)));
         }
         for i in 0..20 {
-            println!("assert_eq!(is_left({}), {})", i, is_left_sibling(Offset(i)));
+            println!("assert_eq!(is_left({}), {})", i, is_left_sibling(Nodes(i)));
         }
         for i in 0..20 {
-            println!("assert_eq!(parent({}), {:?})", i, parent(Offset(i)));
+            println!("assert_eq!(parent({}), {:?})", i, parent(Nodes(i)));
         }
         for i in 0..20 {
-            println!("assert_eq!(sibling({}), {:?})", i, sibling(Offset(i)));
+            println!("assert_eq!(sibling({}), {:?})", i, sibling(Nodes(i)));
         }
         assert_eq!(left_child0(3), Some(1));
         assert_eq!(left_child0(1), Some(0));
@@ -430,8 +442,8 @@ mod tests {
 
     #[test]
     fn test_dflr() {
-        fn dflr(len: usize) -> impl Iterator<Item = Offset> {
-            depth_first_left_to_right(Offset(len))
+        fn dflr(len: u64) -> impl Iterator<Item = Nodes> {
+            depth_first_left_to_right(Nodes(len))
         }
         assert_eq!(dflr(1).collect::<Vec<_>>(), vec![0]);
         assert_eq!(dflr(3).collect::<Vec<_>>(), vec![1, 0, 2]);
@@ -442,8 +454,8 @@ mod tests {
 
     #[test]
     fn test_bflr() {
-        fn bflr(len: usize) -> impl Iterator<Item = Offset> {
-            breadth_first_left_to_right(Offset(len))
+        fn bflr(len: u64) -> impl Iterator<Item = Nodes> {
+            breadth_first_left_to_right(Nodes(len))
         }
         assert_eq!(bflr(1).collect::<Vec<_>>(), vec![0]);
         assert_eq!(bflr(3).collect::<Vec<_>>(), vec![1, 0, 2]);
