@@ -6,7 +6,7 @@ use std::{io::Read, iter::FusedIterator, ops::Range};
 /// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
 fn hash_chunk(chunk: Chunks, data: &[u8], is_root: bool) -> blake3::Hash {
     debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
-    let mut hasher = blake3::guts::ChunkState::new(chunk.0 as u64);
+    let mut hasher = blake3::guts::ChunkState::new(chunk.0);
     hasher.update(data);
     hasher.finalize(is_root)
 }
@@ -117,6 +117,165 @@ pub enum SliceIterItem<'a> {
     Hash(blake3::Hash),
     /// data reference
     Data(&'a [u8]),
+}
+
+trait SyncStore {
+    type IoError;
+    /// length of the tree in nodes
+    fn tree_len(&self) -> Nodes;
+    /// get a node from the tree, with existence check and bounds check
+    fn get(&self, offset: Nodes) -> Result<Option<blake3::Hash>, Self::IoError>;
+    /// set or clear a node in the tree, with bounds check
+    fn set(&mut self, offset: Nodes, hash: Option<blake3::Hash>) -> Result<(), Self::IoError>;
+
+    /// length of the stored data
+    fn data_len(&self) -> Bytes;
+    /// block level
+    fn block_level(&self) -> BlockLevel;
+    /// get a block of data.
+    fn get_block(&self, block: Blocks) -> Result<Option<&[u8]>, Self::IoError>;
+    /// set a block of data
+    fn set_block(&mut self, block: Blocks, data: Option<&[u8]>) -> Result<(), Self::IoError>;
+}
+
+/// A bunch of useful methods for syncstores
+trait SyncStoreExt: SyncStore {
+    /// set or validate a node in the tree, with bounds check
+    fn set_or_validate(
+        &mut self,
+        offset: Nodes,
+        hash: blake3::Hash,
+    ) -> Result<anyhow::Result<()>, Self::IoError> {
+        match self.get(offset)? {
+            Some(h) if h == hash => Ok(Ok(())),
+            Some(h) => Ok(Err(anyhow::anyhow!(
+                "hash mismatch at offset {}: expected {}, got {}",
+                offset.0,
+                hash,
+                h
+            ))),
+            None => {
+                self.set(offset, Some(hash))?;
+                Ok(Ok(()))
+            }
+        }
+    }
+    /// validate a node in the tree, with bounds check
+    fn validate(
+        &self,
+        offset: Nodes,
+        hash: blake3::Hash,
+    ) -> Result<anyhow::Result<()>, Self::IoError> {
+        match self.get(offset)? {
+            Some(h) if h == hash => Ok(Ok(())),
+            Some(h) => Ok(Err(anyhow::anyhow!(
+                "hash mismatch at offset {}: expected {}, got {}",
+                offset.0,
+                hash,
+                h
+            ))),
+            None => Ok(Err(anyhow::anyhow!("missing hash at offset {}", offset.0))),
+        }
+    }
+
+    /// byte range for a given offset
+    fn leaf_byte_range(&self, index: Blocks) -> Range<Bytes> {
+        let start = index.to_bytes(self.block_level());
+        let end = (index + 1)
+            .to_bytes(self.block_level())
+            .min(self.data_len().max(start));
+        start..end
+    }
+
+    fn block_size(&self) -> Bytes {
+        block_size(self.block_level())
+    }
+
+    fn block_count(&self) -> Blocks {
+        blocks(self.data_len(), self.block_level())
+    }
+}
+
+impl<T: SyncStore> SyncStoreExt for T {}
+
+struct VecSyncStore {
+    tree: Vec<blake3::Hash>,
+    tree_bitmap: Vec<bool>,
+    block_level: BlockLevel,
+    data: Vec<u8>,
+    data_bitmap: Vec<bool>,
+}
+
+impl VecSyncStore {
+    fn leaf_byte_range_usize(&self, index: Blocks) -> Range<usize> {
+        let range = self.leaf_byte_range(index);
+        range.start.to_usize()..range.end.to_usize()
+    }
+}
+
+impl SyncStore for VecSyncStore {
+    type IoError = std::convert::Infallible;
+    fn tree_len(&self) -> Nodes {
+        Nodes(self.tree.len() as u64)
+    }
+    fn get(&self, offset: Nodes) -> Result<Option<blake3::Hash>, Self::IoError> {
+        let offset = offset.to_usize();
+        if offset >= self.tree.len() {
+            panic!()
+        }
+        Ok(if self.tree_bitmap[offset] {
+            Some(self.tree[offset])
+        } else {
+            None
+        })
+    }
+    fn set(&mut self, offset: Nodes, hash: Option<blake3::Hash>) -> Result<(), Self::IoError> {
+        let offset = offset.to_usize();
+        if offset >= self.tree.len() {
+            panic!()
+        }
+        if let Some(hash) = hash {
+            self.tree[offset] = hash;
+            self.tree_bitmap[offset] = true;
+        } else {
+            self.tree[offset] = zero_hash();
+            self.tree_bitmap[offset] = false;
+        }
+        Ok(())
+    }
+    fn data_len(&self) -> Bytes {
+        Bytes(self.data.len() as u64)
+    }
+    fn block_level(&self) -> BlockLevel {
+        self.block_level
+    }
+    fn get_block(&self, block: Blocks) -> Result<Option<&[u8]>, Self::IoError> {
+        if block > self.block_count() {
+            panic!();
+        }
+        let offset = block.to_usize();
+        Ok(if self.data_bitmap[offset] {
+            let range = self.leaf_byte_range_usize(block);
+            Some(&self.data[range])
+        } else {
+            None
+        })
+    }
+    fn set_block(&mut self, block: Blocks, data: Option<&[u8]>) -> Result<(), Self::IoError> {
+        if block > self.block_count() {
+            panic!();
+        }
+        let offset = block.to_usize();
+        let range = self.leaf_byte_range_usize(block);
+        if let Some(data) = data {
+            self.data_bitmap[offset] = true;
+            self.data[range].copy_from_slice(data);
+        } else {
+            self.data_bitmap[offset] = false;
+            self.data[range].fill(0);
+        }
+        Ok(())
+    }
 }
 
 impl<'a> std::fmt::Debug for SliceIterItem<'a> {
@@ -576,8 +735,8 @@ mod tests {
     ///
     /// This can only be done at the block level 0
     fn compare_slice_impl(size: Bytes, start: Bytes, len: Bytes) {
-        let data = (0..size.to_usize())
-            .map(|i| (i as u64 / BLAKE3_CHUNK_SIZE) as u8)
+        let data = (0..size.0)
+            .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
             .collect::<Vec<_>>();
         let (outboard, _hash) = bao::encode::outboard(&data);
         let mut extractor = SliceExtractor::new_outboard(
@@ -601,7 +760,9 @@ mod tests {
     ///
     /// This can only be done at the block level 0
     fn compare_slice_iter_impl(size: Bytes, start: Bytes, len: Bytes) {
-        let data = (0..size.0).map(|i| (i / BLAKE3_CHUNK_SIZE) as u8).collect::<Vec<_>>();
+        let data = (0..size.0)
+            .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
+            .collect::<Vec<_>>();
         let (outboard, _hash) = bao::encode::outboard(&data);
         let mut extractor = SliceExtractor::new_outboard(
             Cursor::new(&data),
@@ -628,7 +789,9 @@ mod tests {
     }
 
     fn add_from_slice_impl(size: Bytes, start: Bytes, len: Bytes) {
-        let mut data = (0..size.0).map(|i| (i / BLAKE3_CHUNK_SIZE) as u8).collect::<Vec<_>>();
+        let mut data = (0..size.0)
+            .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
+            .collect::<Vec<_>>();
         let (outboard, _hash) = bao::encode::outboard(&data);
         let mut extractor = SliceExtractor::new_outboard(
             Cursor::new(&data),

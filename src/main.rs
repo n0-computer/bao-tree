@@ -1,11 +1,11 @@
 use bao::decode::SliceDecoder;
-use tree::BLAKE3_CHUNK_SIZE;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
+use tree::BLAKE3_CHUNK_SIZE;
 mod sparse_outboard;
 use sparse_outboard::SparseOutboard;
 mod tree;

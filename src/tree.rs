@@ -1,5 +1,12 @@
+//! Define a number of newtypes and operations on these newtypes
+//!
+//! Most operations are concerned with node indexes in an in order traversal of a binary tree.
 use std::ops::{Add, Div, Mul, Range, Sub};
 
+/// A newtype for a thing that can be conveniently be use as an index
+///
+/// The intention is not to make the newtype completely foolproof, but to make it
+/// convenient to use while still providing some safety by making conversions explicit.
 macro_rules! index_newtype {
     (
         $(#[$outer:meta])*
@@ -89,6 +96,8 @@ macro_rules! index_newtype {
 
 index_newtype! {
     /// A number of nodes in the tree
+    ///
+    /// When used as an index, even numbers correspond to leaf nodes, odd numbers to branch nodes.
     pub struct Nodes(pub u64);
 }
 
@@ -122,10 +131,13 @@ index_newtype! {
     pub struct Bytes(pub u64);
 }
 
+/// A block level. 0 means that a block corresponds to a blake3 chunk,
+/// otherwise the block size is 2^block_level * 1024 bytes.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockLevel(pub u32);
 
+/// A tree level. 0 is for leaves, 1 is for the first level of branches, etc.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TreeLevel(pub u32);
