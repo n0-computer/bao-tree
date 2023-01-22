@@ -97,9 +97,22 @@ index_newtype! {
     pub struct Chunks(pub u64);
 }
 
+impl Chunks {
+    fn to_bytes(self) -> Bytes {
+        Bytes(self.0 * 1024)
+    }
+}
+
 index_newtype! {
     /// a number of leaf blocks with its own hash
     pub struct Blocks(pub u64);
+}
+
+impl Blocks {
+    pub fn to_bytes(self, block_level: u32) -> Bytes {
+        let block_size = block_size0(block_level);
+        Bytes(self.0 * block_size)
+    }
 }
 
 index_newtype! {
@@ -107,86 +120,20 @@ index_newtype! {
     pub struct Bytes(pub u64);
 }
 
+#[repr(transparent)]
+pub struct BlockLevel(pub u32);
+
 pub fn bo_range_to_usize(range: Range<Bytes>) -> Range<usize> {
     range.start.to_usize()..range.end.to_usize()
 }
 
-macro_rules! index {
-    ($name: ident, $wrapped: ident) => {
-        #[repr(transparent)]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub struct $name(pub $wrapped);
-
-        impl Mul<$wrapped> for $name {
-            type Output = $name;
-
-            fn mul(self, rhs: $wrapped) -> Self::Output {
-                $name(self.0 * rhs)
-            }
-        }
-
-        impl Div<$wrapped> for $name {
-            type Output = $name;
-
-            fn div(self, rhs: $wrapped) -> Self::Output {
-                $name(self.0 / rhs)
-            }
-        }
-
-        impl Sub<$wrapped> for $name {
-            type Output = $name;
-
-            fn sub(self, rhs: $wrapped) -> Self::Output {
-                $name(self.0 - rhs)
-            }
-        }
-
-        impl Sub<$name> for $name {
-            type Output = $name;
-
-            fn sub(self, rhs: $name) -> Self::Output {
-                $name(self.0 - rhs.0)
-            }
-        }
-
-        impl Add<$wrapped> for $name {
-            type Output = $name;
-
-            fn add(self, rhs: $wrapped) -> Self::Output {
-                $name(self.0 + rhs)
-            }
-        }
-
-        impl Add<$name> for $name {
-            type Output = $name;
-
-            fn add(self, rhs: $name) -> Self::Output {
-                $name(self.0 + rhs.0)
-            }
-        }
-
-        impl PartialEq<$wrapped> for $name {
-            fn eq(&self, other: &$wrapped) -> bool {
-                self.0 == *other
-            }
-        }
-
-        impl PartialEq<$name> for $wrapped {
-            fn eq(&self, other: &$name) -> bool {
-                *self == other.0
-            }
-        }
-
-        impl PartialOrd<$wrapped> for $name {
-            fn partial_cmp(&self, other: &$wrapped) -> Option<std::cmp::Ordering> {
-                self.0.partial_cmp(other)
-            }
-        }
-    };
+pub fn block_size(block_level: u32) -> Bytes {
+    Bytes(block_size0(block_level))
 }
 
-// index!(Offset, usize);
-// index!(Chunk, u64);
+fn block_size0(block_level: u32) -> u64 {
+    1024 << block_level
+}
 
 pub fn leafs(blocks: Nodes) -> Blocks {
     Blocks((blocks.0 + 1) / 2)
@@ -299,8 +246,8 @@ fn parent0(offset: u64) -> u64 {
 }
 
 /// Get the chunk index for an offset
-pub fn index(offset: Nodes) -> Chunks {
-    Chunks(offset.0 / 2)
+pub fn index(offset: Nodes) -> Blocks {
+    Blocks(offset.0 / 2)
 }
 
 pub fn range(offset: Nodes) -> Range<Nodes> {
@@ -379,6 +326,8 @@ pub fn breadth_first_left_to_right(len: Nodes) -> impl Iterator<Item = Nodes> {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::{max, min};
+
     use proptest::prelude::*;
 
     use super::*;
@@ -390,6 +339,52 @@ mod tests {
         fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
             any::<u64>().prop_map(Nodes).boxed()
         }
+    }
+
+    proptest! {
+
+        #[test]
+        fn children_parent(i in any::<Nodes>()) {
+            if let Some((l, r)) = children(i) {
+                assert_eq!(parent(l), i);
+                assert_eq!(parent(r), i);
+            }
+        }
+
+        /// Checks that left_child/right_child are consistent with children
+        #[test]
+        fn children_consistent(i in any::<Nodes>()) {
+            let lc = left_child(i);
+            let rc = right_child(i);
+            let c = children(i);
+            let lc1 = c.map(|(l, _)| l);
+            let rc1 = c.map(|(_, r)| r);
+            assert_eq!(lc, lc1);
+            assert_eq!(rc, rc1);
+        }
+
+        #[test]
+        fn sibling_sibling(i in any::<Nodes>()) {
+            let s = sibling(i);
+            let distance = max(s, i) - min(s, i);
+            // sibling is at a distance of 2*span
+            assert_eq!(distance, span(i) * 2);
+            // sibling of sibling is value itself
+            assert_eq!(sibling(s), i);
+        }
+
+        #[test]
+        fn compare_descendants(i in any::<Nodes>(), len in any::<Nodes>()) {
+            let d = descendants(i, len);
+            let lc = left_child(i);
+            let rc = right_descendant(i, len);
+            if let (Some(lc), Some(rc)) = (lc, rc) {
+                assert_eq!(d, Some((lc, rc)));
+            } else {
+                assert_eq!(d, None);
+            }
+        }
+
     }
 
     #[test]
