@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::task::Poll;
 use tree::BLAKE3_CHUNK_SIZE;
 mod sparse_outboard;
-use sparse_outboard::SparseOutboard;
+mod sync_store;
 mod tree;
+
+use sparse_outboard::SparseOutboard;
 
 struct Inner {
     buffer: VecDeque<u8>,

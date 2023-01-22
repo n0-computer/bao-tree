@@ -185,13 +185,13 @@ fn blocks0(len: u64, block_level: u32) -> u64 {
     len / block_size + if len % block_size == 0 { 0 } else { 1 }
 }
 
-pub fn num_hashes(pages: Blocks) -> Nodes {
-    Nodes(num_hashes0(pages.0))
+pub fn num_hashes(blocks: Blocks) -> Nodes {
+    Nodes(num_hashes0(blocks.0))
 }
 
-fn num_hashes0(pages: u64) -> u64 {
-    if pages > 0 {
-        pages * 2 - 1
+fn num_hashes0(blocks: u64) -> u64 {
+    if blocks > 0 {
+        blocks * 2 - 1
     } else {
         1
     }
@@ -362,6 +362,105 @@ pub fn breadth_first_left_to_right(len: Nodes) -> impl Iterator<Item = Nodes> {
     let mut res = Vec::with_capacity(len.to_usize());
     descend(vec![root], len, &mut res);
     res.into_iter()
+}
+
+/// Given a range of bytes, returns a range of nodes that cover that range.
+pub fn node_range(byte_range: Range<Bytes>, block_level: BlockLevel) -> Range<Nodes> {
+    let block_size = block_size(block_level).0;
+    let start_page = byte_range.start.0 / block_size;
+    let end_page = (byte_range.end.0 + block_size - 1) / block_size;
+    let start_offset = start_page * 2;
+    let end_offset = end_page * 2;
+    Nodes(start_offset)..Nodes(end_offset)
+}
+
+/// Hash a blake3 chunk.
+///
+/// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
+pub fn hash_chunk(chunk: Chunks, data: &[u8], is_root: bool) -> blake3::Hash {
+    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
+    let mut hasher = blake3::guts::ChunkState::new(chunk.0);
+    hasher.update(data);
+    hasher.finalize(is_root)
+}
+
+/// Hash a block that is made of a power of two number of chunks.
+///
+/// `block` is the block index, `data` is the block data, `is_root` is true if this is the only block,
+/// and `block_level` indicates how many chunks make up a block. Chunks = 2^level.
+pub fn hash_block(
+    block: Blocks,
+    data: &[u8],
+    block_level: BlockLevel,
+    is_root: bool,
+) -> blake3::Hash {
+    // ensure that the data is not too big
+    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN << block_level.0);
+    // compute the cunk number for the first chunk in this block
+    let chunk0 = Chunks(block.0 << block_level.0);
+    // simple recursive hash.
+    // Note that this should really call in to blake3 hash_all_at_once, but
+    // that is not exposed in the public API and also does not allow providing
+    // the chunk.
+    hash_block0(chunk0, data, block_level.0, is_root)
+}
+
+/// Recursive helper for hash_block.
+fn hash_block0(chunk0: Chunks, data: &[u8], block_level: u32, is_root: bool) -> blake3::Hash {
+    if block_level == 0 {
+        // we have just a single chunk
+        hash_chunk(chunk0, data, is_root)
+    } else {
+        // number of chunks at this level
+        let chunks = 1 << block_level;
+        // size corresponding to this level. Data must not be bigger than this.
+        let size = blake3::guts::CHUNK_LEN << block_level;
+        // mid point of the data
+        let mid = size / 2;
+        debug_assert!(data.len() <= size);
+        if data.len() <= mid {
+            // we don't subdivide, so we need to pass through the is_root flag
+            hash_block0(chunk0, data, block_level - 1, is_root)
+        } else {
+            // block_level is > 0 here, so this is safe
+            let child_level = block_level - 1;
+            // data is larger than mid, so this is safe
+            let l = &data[..mid];
+            let r = &data[mid..];
+            let chunkl = chunk0;
+            let chunkr = chunk0 + chunks / 2;
+            let l = hash_block0(chunkl, l, child_level, false);
+            let r = hash_block0(chunkr, r, child_level, false);
+            blake3::guts::parent_cv(&l, &r, is_root)
+        }
+    }
+}
+
+pub fn block_hashes_iter(
+    data: &[u8],
+    block_level: BlockLevel,
+) -> impl Iterator<Item = (Blocks, blake3::Hash)> + '_ {
+    let block_size = block_size(block_level);
+    let is_root = data.len() <= block_size.to_usize();
+    data.chunks(block_size.to_usize())
+        .enumerate()
+        .map(move |(i, data)| {
+            let block = Blocks(i as u64);
+            (block, hash_block(block, data, block_level, is_root))
+        })
+}
+
+/// placeholder hash for if we don't have a hash yet
+///
+/// Could be anything, or even uninitialized.
+/// But we use all zeros so you can easily recognize it in a hex dump.
+pub fn zero_hash() -> blake3::Hash {
+    blake3::Hash::from([0u8; 32])
+}
+
+/// root hash for an empty slice, independent of block level
+pub fn empty_root_hash() -> blake3::Hash {
+    hash_chunk(Chunks(0), &[], true)
 }
 
 #[cfg(test)]

@@ -1,91 +1,6 @@
 use crate::tree::*;
 use std::{io::Read, iter::FusedIterator, ops::Range};
 
-/// Hash a blake3 chunk.
-///
-/// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
-fn hash_chunk(chunk: Chunks, data: &[u8], is_root: bool) -> blake3::Hash {
-    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
-    let mut hasher = blake3::guts::ChunkState::new(chunk.0);
-    hasher.update(data);
-    hasher.finalize(is_root)
-}
-
-/// Hash a block that is made of a power of two number of chunks.
-///
-/// `block` is the block index, `data` is the block data, `is_root` is true if this is the only block,
-/// and `block_level` indicates how many chunks make up a block. Chunks = 2^level.
-fn hash_block(block: Blocks, data: &[u8], block_level: BlockLevel, is_root: bool) -> blake3::Hash {
-    // ensure that the data is not too big
-    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN << block_level.0);
-    // compute the cunk number for the first chunk in this block
-    let chunk0 = Chunks(block.0 << block_level.0);
-    // simple recursive hash.
-    // Note that this should really call in to blake3 hash_all_at_once, but
-    // that is not exposed in the public API and also does not allow providing
-    // the chunk.
-    hash_block0(chunk0, data, block_level.0, is_root)
-}
-
-/// Recursive helper for hash_block.
-fn hash_block0(chunk0: Chunks, data: &[u8], block_level: u32, is_root: bool) -> blake3::Hash {
-    if block_level == 0 {
-        // we have just a single chunk
-        hash_chunk(chunk0, data, is_root)
-    } else {
-        // number of chunks at this level
-        let chunks = 1 << block_level;
-        // size corresponding to this level. Data must not be bigger than this.
-        let size = blake3::guts::CHUNK_LEN << block_level;
-        // mid point of the data
-        let mid = size / 2;
-        debug_assert!(data.len() <= size);
-        if data.len() <= mid {
-            // we don't subdivide, so we need to pass through the is_root flag
-            hash_block0(chunk0, data, block_level - 1, is_root)
-        } else {
-            // block_level is > 0 here, so this is safe
-            let child_level = block_level - 1;
-            // data is larger than mid, so this is safe
-            let l = &data[..mid];
-            let r = &data[mid..];
-            let chunkl = chunk0;
-            let chunkr = chunk0 + chunks / 2;
-            let l = hash_block0(chunkl, l, child_level, false);
-            let r = hash_block0(chunkr, r, child_level, false);
-            blake3::guts::parent_cv(&l, &r, is_root)
-        }
-    }
-}
-
-fn block_hashes_iter(
-    data: &[u8],
-    block_level: BlockLevel,
-) -> impl Iterator<Item = (Blocks, blake3::Hash)> + '_ {
-    let block_size = block_size(block_level);
-    let is_root = data.len() <= block_size.to_usize();
-    data.chunks(block_size.to_usize())
-        .enumerate()
-        .map(move |(i, data)| {
-            let block = Blocks(i as u64);
-            (block, hash_block(block, data, block_level, is_root))
-        })
-}
-
-/// Given a range of bytes, returns a range of nodes that cover that range.
-fn node_range(byte_range: Range<Bytes>, block_level: BlockLevel) -> Range<Nodes> {
-    let block_size = block_size(block_level).0;
-    let start_page = byte_range.start.0 / block_size;
-    let end_page = (byte_range.end.0 + block_size - 1) / block_size;
-    let start_offset = start_page * 2;
-    let end_offset = end_page * 2;
-    Nodes(start_offset)..Nodes(end_offset)
-}
-
-fn zero_hash() -> blake3::Hash {
-    blake3::Hash::from([0u8; 32])
-}
-
 pub struct SparseOutboard {
     /// even offsets are leaf hashes, odd offsets are branch hashes
     tree: Vec<blake3::Hash>,
@@ -117,165 +32,6 @@ pub enum SliceIterItem<'a> {
     Hash(blake3::Hash),
     /// data reference
     Data(&'a [u8]),
-}
-
-trait SyncStore {
-    type IoError;
-    /// length of the tree in nodes
-    fn tree_len(&self) -> Nodes;
-    /// get a node from the tree, with existence check and bounds check
-    fn get(&self, offset: Nodes) -> Result<Option<blake3::Hash>, Self::IoError>;
-    /// set or clear a node in the tree, with bounds check
-    fn set(&mut self, offset: Nodes, hash: Option<blake3::Hash>) -> Result<(), Self::IoError>;
-
-    /// length of the stored data
-    fn data_len(&self) -> Bytes;
-    /// block level
-    fn block_level(&self) -> BlockLevel;
-    /// get a block of data.
-    fn get_block(&self, block: Blocks) -> Result<Option<&[u8]>, Self::IoError>;
-    /// set a block of data
-    fn set_block(&mut self, block: Blocks, data: Option<&[u8]>) -> Result<(), Self::IoError>;
-}
-
-/// A bunch of useful methods for syncstores
-trait SyncStoreExt: SyncStore {
-    /// set or validate a node in the tree, with bounds check
-    fn set_or_validate(
-        &mut self,
-        offset: Nodes,
-        hash: blake3::Hash,
-    ) -> Result<anyhow::Result<()>, Self::IoError> {
-        match self.get(offset)? {
-            Some(h) if h == hash => Ok(Ok(())),
-            Some(h) => Ok(Err(anyhow::anyhow!(
-                "hash mismatch at offset {}: expected {}, got {}",
-                offset.0,
-                hash,
-                h
-            ))),
-            None => {
-                self.set(offset, Some(hash))?;
-                Ok(Ok(()))
-            }
-        }
-    }
-    /// validate a node in the tree, with bounds check
-    fn validate(
-        &self,
-        offset: Nodes,
-        hash: blake3::Hash,
-    ) -> Result<anyhow::Result<()>, Self::IoError> {
-        match self.get(offset)? {
-            Some(h) if h == hash => Ok(Ok(())),
-            Some(h) => Ok(Err(anyhow::anyhow!(
-                "hash mismatch at offset {}: expected {}, got {}",
-                offset.0,
-                hash,
-                h
-            ))),
-            None => Ok(Err(anyhow::anyhow!("missing hash at offset {}", offset.0))),
-        }
-    }
-
-    /// byte range for a given offset
-    fn leaf_byte_range(&self, index: Blocks) -> Range<Bytes> {
-        let start = index.to_bytes(self.block_level());
-        let end = (index + 1)
-            .to_bytes(self.block_level())
-            .min(self.data_len().max(start));
-        start..end
-    }
-
-    fn block_size(&self) -> Bytes {
-        block_size(self.block_level())
-    }
-
-    fn block_count(&self) -> Blocks {
-        blocks(self.data_len(), self.block_level())
-    }
-}
-
-impl<T: SyncStore> SyncStoreExt for T {}
-
-struct VecSyncStore {
-    tree: Vec<blake3::Hash>,
-    tree_bitmap: Vec<bool>,
-    block_level: BlockLevel,
-    data: Vec<u8>,
-    data_bitmap: Vec<bool>,
-}
-
-impl VecSyncStore {
-    fn leaf_byte_range_usize(&self, index: Blocks) -> Range<usize> {
-        let range = self.leaf_byte_range(index);
-        range.start.to_usize()..range.end.to_usize()
-    }
-}
-
-impl SyncStore for VecSyncStore {
-    type IoError = std::convert::Infallible;
-    fn tree_len(&self) -> Nodes {
-        Nodes(self.tree.len() as u64)
-    }
-    fn get(&self, offset: Nodes) -> Result<Option<blake3::Hash>, Self::IoError> {
-        let offset = offset.to_usize();
-        if offset >= self.tree.len() {
-            panic!()
-        }
-        Ok(if self.tree_bitmap[offset] {
-            Some(self.tree[offset])
-        } else {
-            None
-        })
-    }
-    fn set(&mut self, offset: Nodes, hash: Option<blake3::Hash>) -> Result<(), Self::IoError> {
-        let offset = offset.to_usize();
-        if offset >= self.tree.len() {
-            panic!()
-        }
-        if let Some(hash) = hash {
-            self.tree[offset] = hash;
-            self.tree_bitmap[offset] = true;
-        } else {
-            self.tree[offset] = zero_hash();
-            self.tree_bitmap[offset] = false;
-        }
-        Ok(())
-    }
-    fn data_len(&self) -> Bytes {
-        Bytes(self.data.len() as u64)
-    }
-    fn block_level(&self) -> BlockLevel {
-        self.block_level
-    }
-    fn get_block(&self, block: Blocks) -> Result<Option<&[u8]>, Self::IoError> {
-        if block > self.block_count() {
-            panic!();
-        }
-        let offset = block.to_usize();
-        Ok(if self.data_bitmap[offset] {
-            let range = self.leaf_byte_range_usize(block);
-            Some(&self.data[range])
-        } else {
-            None
-        })
-    }
-    fn set_block(&mut self, block: Blocks, data: Option<&[u8]>) -> Result<(), Self::IoError> {
-        if block > self.block_count() {
-            panic!();
-        }
-        let offset = block.to_usize();
-        let range = self.leaf_byte_range_usize(block);
-        if let Some(data) = data {
-            self.data_bitmap[offset] = true;
-            self.data[range].copy_from_slice(data);
-        } else {
-            self.data_bitmap[offset] = false;
-            self.data[range].fill(0);
-        }
-        Ok(())
-    }
 }
 
 impl<'a> std::fmt::Debug for SliceIterItem<'a> {
@@ -368,6 +124,12 @@ impl SparseOutboard {
         Bytes(0)..self.len
     }
 
+    /// the number of hashes in the tree
+    fn tree_len(&self) -> Nodes {
+        debug_assert!(self.tree.len() == self.bitmap.len());
+        Nodes(self.tree.len() as u64)
+    }
+
     /// produce a blake3 outboard for the entire data
     ///
     /// returns None if the required hashes are not fully available
@@ -379,12 +141,6 @@ impl SparseOutboard {
         self.outboard0(self.root(), &mut res)?;
         debug_assert_eq!(res.len() as u64, outboard_len);
         Some(res)
-    }
-
-    /// the number of hashes in the tree
-    fn tree_len(&self) -> Nodes {
-        debug_assert!(self.tree.len() == self.bitmap.len());
-        Nodes(self.tree.len() as u64)
     }
 
     fn outboard0(&self, offset: Nodes, target: &mut Vec<u8>) -> Option<()> {
@@ -604,7 +360,7 @@ impl SparseOutboard {
         let mut tree = vec![zero_hash(); num_hashes.to_usize()];
         let mut bitmap = vec![false; num_hashes.to_usize()];
         if pages == 0 {
-            tree[0] = hash_chunk(Chunks(0), &[], true);
+            tree[0] = empty_root_hash();
             bitmap[0] = true;
         } else {
             for (offset, hash) in block_hashes_iter(data, block_level) {
@@ -696,15 +452,11 @@ impl SparseOutboard {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        any::Any,
-        cmp::{max, min},
-        io::{self, Cursor, Read, Write},
-    };
-
     use super::*;
+    use crate::sync_store::*;
     use bao::encode::SliceExtractor;
     use proptest::prelude::*;
+    use std::io::{Cursor, Read};
 
     fn fmt_outboard(outboard: &[u8]) -> String {
         let mut res = String::new();
@@ -731,9 +483,6 @@ mod tests {
             })
     }
 
-    /// Compare the bao slice extractor to the sparse outboard
-    ///
-    /// This can only be done at the block level 0
     fn compare_slice_impl(size: Bytes, start: Bytes, len: Bytes) {
         let data = (0..size.0)
             .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
@@ -756,13 +505,13 @@ mod tests {
         assert_eq!(slice1, slice2);
     }
 
-    /// Compare the bao slice extractor to the sparse outboard
-    ///
-    /// This can only be done at the block level 0
     fn compare_slice_iter_impl(size: Bytes, start: Bytes, len: Bytes) {
+        // generate data, different value for each chunk so the hashes are intersting
         let data = (0..size.0)
             .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
             .collect::<Vec<_>>();
+
+        // encode a slice using bao
         let (outboard, _hash) = bao::encode::outboard(&data);
         let mut extractor = SliceExtractor::new_outboard(
             Cursor::new(&data),
@@ -772,6 +521,8 @@ mod tests {
         );
         let mut slice1 = Vec::new();
         extractor.read_to_end(&mut slice1).unwrap();
+
+        // encode a slice using sparse outboard and its slice_iter
         let so = SparseOutboard::new(&data, BlockLevel(0));
         let slices2 = so.slice_iter(&data, start..start + len).collect::<Vec<_>>();
         let slice2 = slices2
@@ -779,19 +530,26 @@ mod tests {
             .map(|x| x.to_vec())
             .flatten()
             .collect::<Vec<_>>();
-        println!("{} {}", slice1.len(), slice2.len());
-        if slice1 != slice2 {
-            println!("{:?}", slices2);
-            println!("{} {}", slice1.len(), slice2.len());
-            println!("{}\n\n{}", hex::encode(&slice1), hex::encode(&slice2));
-        }
+        assert_eq!(slice1, slice2);
+
+        // encode a slice using vec outboard and its slice_iter
+        let so = VecSyncStore::new(&data, BlockLevel(0)).unwrap();
+        let slices2 = so.slice_iter(start..start + len).collect::<Vec<_>>();
+        let slice2 = slices2
+            .into_iter()
+            .map(|x| x.unwrap().to_vec())
+            .flatten()
+            .collect::<Vec<_>>();
         assert_eq!(slice1, slice2);
     }
 
     fn add_from_slice_impl(size: Bytes, start: Bytes, len: Bytes) {
+        // generate data, different value for each chunk so the hashes are intersting
         let mut data = (0..size.0)
             .map(|i| (i / BLAKE3_CHUNK_SIZE) as u8)
             .collect::<Vec<_>>();
+
+        // encode a slice using bao
         let (outboard, _hash) = bao::encode::outboard(&data);
         let mut extractor = SliceExtractor::new_outboard(
             Cursor::new(&data),
@@ -801,6 +559,8 @@ mod tests {
         );
         let mut slice1 = Vec::new();
         extractor.read_to_end(&mut slice1).unwrap();
+
+        // add from the bao slice and check that it validates
         let mut so = SparseOutboard::new(&data, BlockLevel(0));
         let byte_range = start..start + len;
         so.add_from_slice(&mut data, byte_range.clone(), &mut Cursor::new(&slice1))
@@ -809,42 +569,94 @@ mod tests {
         so.add_from_slice(&mut data, byte_range.clone(), &mut Cursor::new(&slice1))
             .unwrap();
         slice1[8] ^= 1;
+
+        // add from the bao slice with a single bit flipped and check that it fails to validate
         assert!(so
             .add_from_slice(&mut data, byte_range, &mut Cursor::new(&slice1))
             .is_err());
     }
 
-    proptest! {
-
-        #[test]
-        fn compare_hash(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
-            let hash = blake3::hash(&data);
-            for level in 0..10 {
-                // Sparse outboard must produce the same root hash regardless of the block level
-                let so = SparseOutboard::new(&data, BlockLevel(level));
-                let hash2 = *so.hash().unwrap();
-                assert_eq!(hash, hash2);
-            }
+    fn compare_hash_impl(data: &[u8]) {
+        let hash = blake3::hash(data);
+        for level in 0..10 {
+            // Sparse outboard must produce the same root hash regardless of the block level
+            let so = SparseOutboard::new(data, BlockLevel(level));
+            let hash2 = *so.hash().unwrap();
+            assert_eq!(hash, hash2);
         }
 
-        #[test]
-        fn compare_outboard(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
-            let (outboard, hash) = bao::encode::outboard(&data);
+        for level in 0..10 {
+            let vs = VecSyncStore::new(data, BlockLevel(level)).unwrap();
+            let hash2 = vs.hash().unwrap().unwrap();
+            assert_eq!(hash, hash2);
+        }
+    }
+
+    fn compare_outboard_impl(data: &[u8]) {
+        let (outboard, hash) = bao::encode::outboard(&data);
+        // compare with bao outboard - only makes sense for block level 0
+        {
             let so = SparseOutboard::new(&data, BlockLevel(0));
             let hash2 = *so.hash().unwrap();
             let outboard2 = so.outboard().unwrap();
             assert_eq!(hash, hash2);
             assert_eq!(outboard, outboard2);
         }
+        // compare internally
+        for level in 0..3 {
+            let level = BlockLevel(level);
+            let so = SparseOutboard::new(&data, level);
+            let hash1 = *so.hash().unwrap();
+            let outboard1 = so.outboard().unwrap();
+            let vs = VecSyncStore::new(&data, level).unwrap();
+            let hash2 = vs.hash().unwrap().unwrap();
+            let outboard2 = vs.outboard().unwrap();
+            assert_eq!(hash1, hash2);
+            assert_eq!(outboard1, outboard2);
+            assert_eq!(hash, hash2);
+        }
+    }
 
-        #[test]
-        fn compare_encoded(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
-            let (encoded, hash) = bao::encode::encode(&data);
+    fn compare_encoded_impl(data: &[u8]) {
+        let (encoded, hash) = bao::encode::encode(&data);
+        // compare with bao outboard - only makes sense for block level 0
+        {
             let so = SparseOutboard::new(&data, BlockLevel(0));
             let hash2 = *so.hash().unwrap();
             let encoded2 = so.encode(&data).unwrap();
             assert_eq!(hash, hash2);
             assert_eq!(encoded, encoded2);
+        }
+        // compare internally
+        for level in 0..3 {
+            let level = BlockLevel(level);
+            let so = SparseOutboard::new(&data, level);
+            let hash1 = *so.hash().unwrap();
+            let encoded1 = so.encode(data).unwrap();
+            let vs = VecSyncStore::new(&data, level).unwrap();
+            let hash2 = vs.hash().unwrap().unwrap();
+            let encoded2 = vs.encode().unwrap();
+            assert_eq!(hash1, hash2);
+            assert_eq!(encoded1, encoded2);
+            assert_eq!(hash, hash2);
+        }
+    }
+
+    proptest! {
+
+        #[test]
+        fn compare_hash(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
+            compare_hash_impl(&data);
+        }
+
+        #[test]
+        fn compare_outboard(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
+            compare_outboard_impl(&data);
+        }
+
+        #[test]
+        fn compare_encoded(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
+            compare_encoded_impl(&data);
         }
 
         #[test]
@@ -868,6 +680,11 @@ mod tests {
             let hash2 = hash_block(Blocks(0), &data, BlockLevel(10), true);
             assert_eq!(hash, hash2);
         }
+    }
+
+    #[test]
+    fn compare_hash_0() {
+        compare_hash_impl(&[0u8; 1024]);
     }
 
     #[test]
