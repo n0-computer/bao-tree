@@ -1,4 +1,5 @@
 use bao::decode::SliceDecoder;
+use tree::BLAKE3_CHUNK_SIZE;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -108,9 +109,9 @@ fn hash_leaf(offset: u64, data: &[u8], is_root: bool) -> blake3::Hash {
 }
 
 fn leaf_hashes(data: &[u8]) -> Vec<blake3::Hash> {
-    let is_root = data.len() <= 1024;
+    let is_root = data.len() as u64 <= BLAKE3_CHUNK_SIZE;
     if !data.is_empty() {
-        data.chunks(1024)
+        data.chunks(BLAKE3_CHUNK_SIZE as usize)
             .enumerate()
             .map(|(i, data)| hash_leaf(i as u64, data, is_root))
             .collect::<Vec<_>>()

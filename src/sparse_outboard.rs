@@ -24,16 +24,11 @@ fn hash_block(block: Blocks, data: &[u8], block_level: BlockLevel, is_root: bool
     // Note that this should really call in to blake3 hash_all_at_once, but
     // that is not exposed in the public API and also does not allow providing
     // the chunk.
-    hash_block_recursive(chunk0, data, block_level.0, is_root)
+    hash_block0(chunk0, data, block_level.0, is_root)
 }
 
 /// Recursive helper for hash_block.
-fn hash_block_recursive(
-    chunk0: Chunks,
-    data: &[u8],
-    block_level: u32,
-    is_root: bool,
-) -> blake3::Hash {
+fn hash_block0(chunk0: Chunks, data: &[u8], block_level: u32, is_root: bool) -> blake3::Hash {
     if block_level == 0 {
         // we have just a single chunk
         hash_chunk(chunk0, data, is_root)
@@ -47,7 +42,7 @@ fn hash_block_recursive(
         debug_assert!(data.len() <= size);
         if data.len() <= mid {
             // we don't subdivide, so we need to pass through the is_root flag
-            hash_block_recursive(chunk0, data, block_level - 1, is_root)
+            hash_block0(chunk0, data, block_level - 1, is_root)
         } else {
             // block_level is > 0 here, so this is safe
             let child_level = block_level - 1;
@@ -56,8 +51,8 @@ fn hash_block_recursive(
             let r = &data[mid..];
             let chunkl = chunk0;
             let chunkr = chunk0 + chunks / 2;
-            let l = hash_block_recursive(chunkl, l, child_level, false);
-            let r = hash_block_recursive(chunkr, r, child_level, false);
+            let l = hash_block0(chunkl, l, child_level, false);
+            let r = hash_block0(chunkr, r, child_level, false);
             blake3::guts::parent_cv(&l, &r, is_root)
         }
     }
@@ -102,7 +97,7 @@ pub struct SparseOutboard {
     block_level: BlockLevel,
 }
 
-struct SliceIter<'a> {
+pub struct SliceIter<'a> {
     /// the outboard
     outboard: &'a SparseOutboard,
     /// the data
@@ -115,8 +110,8 @@ struct SliceIter<'a> {
     emit: Option<SliceIterItem<'a>>,
 }
 
-enum SliceIterItem<'a> {
-    /// header containing the full size
+pub enum SliceIterItem<'a> {
+    /// header containing the full size of the data from which this slice originates
     Header(u64),
     /// a hash
     Hash(blake3::Hash),
@@ -582,7 +577,7 @@ mod tests {
     /// This can only be done at the block level 0
     fn compare_slice_impl(size: Bytes, start: Bytes, len: Bytes) {
         let data = (0..size.to_usize())
-            .map(|i| (i / 1024) as u8)
+            .map(|i| (i as u64 / BLAKE3_CHUNK_SIZE) as u8)
             .collect::<Vec<_>>();
         let (outboard, _hash) = bao::encode::outboard(&data);
         let mut extractor = SliceExtractor::new_outboard(
@@ -606,7 +601,7 @@ mod tests {
     ///
     /// This can only be done at the block level 0
     fn compare_slice_iter_impl(size: Bytes, start: Bytes, len: Bytes) {
-        let data = (0..size.0).map(|i| (i / 1024) as u8).collect::<Vec<_>>();
+        let data = (0..size.0).map(|i| (i / BLAKE3_CHUNK_SIZE) as u8).collect::<Vec<_>>();
         let (outboard, _hash) = bao::encode::outboard(&data);
         let mut extractor = SliceExtractor::new_outboard(
             Cursor::new(&data),
@@ -633,7 +628,7 @@ mod tests {
     }
 
     fn add_from_slice_impl(size: Bytes, start: Bytes, len: Bytes) {
-        let mut data = (0..size.0).map(|i| (i / 1024) as u8).collect::<Vec<_>>();
+        let mut data = (0..size.0).map(|i| (i / BLAKE3_CHUNK_SIZE) as u8).collect::<Vec<_>>();
         let (outboard, _hash) = bao::encode::outboard(&data);
         let mut extractor = SliceExtractor::new_outboard(
             Cursor::new(&data),
@@ -661,8 +656,12 @@ mod tests {
         #[test]
         fn compare_hash(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             let hash = blake3::hash(&data);
-            let hash2 = *SparseOutboard::new(&data, BlockLevel(0)).hash().unwrap();
-            assert_eq!(hash, hash2);
+            for level in 0..10 {
+                // Sparse outboard must produce the same root hash regardless of the block level
+                let so = SparseOutboard::new(&data, BlockLevel(level));
+                let hash2 = *so.hash().unwrap();
+                assert_eq!(hash, hash2);
+            }
         }
 
         #[test]

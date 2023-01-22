@@ -97,9 +97,11 @@ index_newtype! {
     pub struct Chunks(pub u64);
 }
 
+pub(crate) const BLAKE3_CHUNK_SIZE: u64 = 1024;
+
 impl Chunks {
     fn to_bytes(self) -> Bytes {
-        Bytes(self.0 * 1024)
+        Bytes(self.0 * BLAKE3_CHUNK_SIZE)
     }
 }
 
@@ -137,7 +139,7 @@ pub fn block_size(block_level: BlockLevel) -> Bytes {
 }
 
 fn block_size0(block_level: u32) -> u64 {
-    1024 << block_level
+    BLAKE3_CHUNK_SIZE << block_level
 }
 
 pub fn leafs(blocks: Nodes) -> Blocks {
