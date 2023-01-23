@@ -2,10 +2,10 @@ use async_recursion::async_recursion;
 use async_stream::stream;
 use bytes::Bytes;
 use std::{
-    io,
+    fmt, io,
     ops::Range,
     pin::Pin,
-    task::{self, Poll}, fmt,
+    task::{self, Poll},
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -373,15 +373,14 @@ impl SliceStreamItem {
 
 pub struct SliceReader<S> {
     stream: S,
+    // TODO: store just the item to avoid a copy
     buffer: Vec<u8>,
     start: usize,
     end: usize,
 }
 
-impl<
-        E: fmt::Debug,
-        St: Stream<Item = Result<SliceStreamItem, TraversalResult<E>>> + Unpin,
-    > AsyncRead for SliceReader<St>
+impl<E: fmt::Debug, St: Stream<Item = Result<SliceStreamItem, TraversalResult<E>>> + Unpin>
+    AsyncRead for SliceReader<St>
 {
     fn poll_read(
         mut self: Pin<&mut Self>,

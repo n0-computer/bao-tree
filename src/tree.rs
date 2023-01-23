@@ -327,6 +327,20 @@ pub fn node_range(byte_range: Range<ByteNum>, block_level: BlockLevel) -> Range<
     NodeNum(start_offset)..NodeNum(end_offset)
 }
 
+/// byte range for a given block, given a block level and total data len
+pub fn leaf_byte_range(index: BlockNum, block_level: BlockLevel, data_len: ByteNum) -> Range<ByteNum> {
+    let start = index.to_bytes(block_level);
+    let end = (index + 1)
+        .to_bytes(block_level)
+        .min(data_len.max(start));
+    start..end
+}
+
+/// Size of a leaf, given a block level and total data len
+pub fn leaf_size(index: BlockNum, block_level: BlockLevel, data_len: ByteNum) -> ByteNum {
+    block_size(block_level).min(data_len - index.to_bytes(block_level))
+}
+
 /// Hash a blake3 chunk.
 ///
 /// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.

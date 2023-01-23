@@ -1,13 +1,15 @@
 use std::{
+    fs::File,
     io::{self, Read},
     iter::FusedIterator,
     ops::Range,
+    path::{Path, PathBuf},
 };
 
 use crate::{errors::*, tree::*, BlakeFile};
 
 /// Methods that are common to the sync and async store
-/// 
+///
 /// mostly methods concerned with the tree structure
 pub trait StoreCommon: Sized {
     /// block level
@@ -98,7 +100,7 @@ pub trait SyncStore: StoreCommon {
     /// the hash will be set to the hash of the empty slice.
     ///
     /// note that stores with different block levels are not compatible.
-    fn empty(block_level: BlockLevel) -> Self;
+    fn empty(block_level: BlockLevel) -> Result<Self, Self::IoError>;
 
     /// grow the store to the given length
     ///
@@ -110,13 +112,17 @@ pub trait SyncStore: StoreCommon {
 }
 
 impl<S: SyncStore> BlakeFile<S> {
-    pub fn empty(block_level: BlockLevel) -> Self {
-        Self(S::empty(block_level))
+    pub fn wrap(store: S) -> Self {
+        Self(store)
+    }
+
+    pub fn empty(block_level: BlockLevel) -> Result<Self, S::IoError> {
+        Ok(Self(S::empty(block_level)?))
     }
 
     /// create a new completely initialized store from a slice of data
     pub fn new(data: &[u8], block_level: BlockLevel) -> Result<Self, S::IoError> {
-        let mut res = Self::empty(block_level);
+        let mut res = Self::empty(block_level)?;
         res.grow(ByteNum(data.len() as u64))?;
         for (block, data) in data.chunks(res.0.block_size().to_usize()).enumerate() {
             res.0.set_block(BlockNum(block as u64), Some(data))?;
@@ -630,3 +636,105 @@ impl<'a, T: SyncStore> Iterator for SliceIter<'a, T> {
 }
 
 impl<'a, T: SyncStore> FusedIterator for SliceIter<'a, T> {}
+
+struct SyncFileStore<P> {
+    root: P,
+    block_level: BlockLevel,
+    tree: memmap2::MmapMut,
+    tree_bitmap: memmap2::MmapMut,
+    blocks: memmap2::MmapMut,
+    block_bitmap: memmap2::MmapMut,
+}
+
+impl<P: AsRef<Path>> SyncFileStore<P> {
+    fn leaf_byte_range_usize(&self, index: BlockNum) -> Range<usize> {
+        let range = self.leaf_byte_range(index);
+        range.start.to_usize()..range.end.to_usize()
+    }
+}
+
+impl<P: AsRef<Path>> StoreCommon for SyncFileStore<P> {
+    fn block_level(&self) -> BlockLevel {
+        self.block_level
+    }
+
+    fn data_len(&self) -> ByteNum {
+        ByteNum(self.blocks.len() as u64)
+    }
+
+    fn tree_len(&self) -> NodeNum {
+        let len = self.tree.len();
+        assert!(len % 32 == 0);
+        NodeNum(len as u64 / 32)
+    }
+}
+
+impl<P: AsRef<Path>> SyncStore for SyncFileStore<P> {
+    type IoError = io::Error;
+
+    fn get_hash(&self, offset: NodeNum) -> Result<Option<blake3::Hash>, Self::IoError> {
+        assert!(offset < self.tree_len());
+        let offset = offset.0 as usize;
+        let have = self.tree_bitmap[offset] != 0;
+        if have {
+            let base = offset * 32;
+            let hash: [u8; 32] = self.tree[base..base + 32].try_into().unwrap();
+            Ok(Some(blake3::Hash::from(hash)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn set_hash(
+        &mut self,
+        offset: NodeNum,
+        hash: Option<blake3::Hash>,
+    ) -> Result<(), Self::IoError> {
+        assert!(offset < self.tree_len());
+        let offset = offset.0 as usize;
+        let base = offset * 32;
+        if let Some(hash) = hash {
+            self.tree_bitmap[offset] = 1;
+            self.tree[base..base + 32].copy_from_slice(hash.as_bytes());
+        } else {
+            self.tree_bitmap[offset] = 0;
+            self.tree[base..base + 32].fill(0);
+        }
+        Ok(())
+    }
+
+    fn get_block(&self, block: BlockNum) -> Result<Option<&[u8]>, Self::IoError> {
+        assert!(block < self.block_count());
+        let offset = block.0 as usize;
+        let have = self.block_bitmap[offset] != 0;
+        if have {
+            let range = self.leaf_byte_range_usize(block);
+            let slice = &self.blocks[range];
+            Ok(Some(slice))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn set_block(&mut self, block: BlockNum, data: Option<&[u8]>) -> Result<(), Self::IoError> {
+        assert!(block < self.block_count());
+        let offset = block.0 as usize;
+        let range = self.leaf_byte_range_usize(block);
+        if let Some(data) = data {
+            self.block_bitmap[offset] = 1;
+            self.blocks[range].copy_from_slice(data);
+        } else {
+            self.block_bitmap[offset] = 0;
+            self.blocks[range].fill(0);
+        }
+        Ok(())
+    }
+
+    fn empty(block_level: BlockLevel) -> Result<Self, Self::IoError> {
+        todo!()
+    }
+
+    fn grow_storage(&mut self, new_len: ByteNum) -> Result<(), Self::IoError> {
+        todo!()
+    }
+}

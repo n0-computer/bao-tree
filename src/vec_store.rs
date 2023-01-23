@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// A simple in-memory store
-/// 
+///
 /// Can be used both synchronously and asynchronously
 pub struct VecStore {
     block_level: BlockLevel,
@@ -98,15 +98,15 @@ impl SyncStore for VecStore {
         }
         Ok(())
     }
-    fn empty(block_level: BlockLevel) -> Self {
+    fn empty(block_level: BlockLevel) -> Result<Self, Self::IoError> {
         let tree_len_usize = 1;
-        VecStore {
+        Ok(VecStore {
             tree: vec![empty_root_hash(); tree_len_usize],
             tree_bitmap: vec![true; tree_len_usize],
             block_level,
             data: Vec::new(),
             data_bitmap: Vec::new(),
-        }
+        })
     }
     fn grow_storage(&mut self, new_len: ByteNum) -> Result<(), Self::IoError> {
         if new_len < self.data_len() {
