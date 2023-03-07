@@ -3,6 +3,16 @@
 version = 3
 
 [[package]]
+name = "abao"
+version = "0.2.0"
+source = "git+https://github.com/n0-computer/abao?branch=post-order-outboard#9675e0426badc06fe728aea72d02892c91f5caa1"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "blake3",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -78,6 +88,7 @@ dependencies = [
 name = "bao-experiment"
 version = "0.1.0"
 dependencies = [
+ "abao",
  "async-recursion",
  "async-stream",
  "async-trait",
