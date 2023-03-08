@@ -13,8 +13,8 @@ blake3 = "1.3.3"
 bytes = "1"
 futures = "0.3.25"
 memmap2 = "0.5.8"
-range-collections = "0.2.4"
 tokio = { version = "1.24.1", features = ["full"] }
+range-collections = { path = "../range-collections" }
 
 [dev-dependencies]
 hex = "0.4.3"

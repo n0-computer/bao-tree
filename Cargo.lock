@@ -573,8 +573,6 @@ dependencies = [
 [[package]]
 name = "range-collections"
 version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61fdfd79629e2b44a1d34b4d227957174cb858e6b86ee45fad114edbcfc903ab"
 dependencies = [
  "binary-merge",
  "inplace-vec-builder",
