@@ -183,8 +183,26 @@ impl BaoTree {
         outboard: &[u8],
         ranges: impl AbstractRangeSet<ChunkNum>,
     ) -> Vec<u8> {
+        let size = ByteNum(data.len() as u64);
+        let chunks = size.chunks();
+        // todo: fix this hack to deal with non overlapping ranges
+        let mut ranges: RangeSet2<_> = ranges.intersection(&RangeSet2::from(ChunkNum(0)..chunks));
+        println!("start {:?}", ranges);
+        if ranges.is_empty() {
+            ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..chunks);
+        }
+        println!("corrected {:?} {:?} {:?}", ranges, chunks, size);
+        Self::encode_slice_impl(data, outboard, ranges)
+    }
+
+    fn encode_slice_impl(
+        data: &[u8],
+        outboard: &[u8],
+        ranges: impl AbstractRangeSet<ChunkNum>,
+    ) -> Vec<u8> {
         let mut res = Vec::new();
         let tree = Self::new(ByteNum(data.len() as u64), 0);
+        let chunks = tree.size.chunks();
         res.extend_from_slice(&tree.size.0.to_le_bytes());
         for (node, tl, tr) in tree.iterate_part_preorder(ranges) {
             if let Some(offset) = tree.post_order_offset(node) {
@@ -925,11 +943,12 @@ mod tests {
     }
 
     fn bao_tree_encode_slice_impl(data: Vec<u8>, mut range: Range<u64>) {
-        let (outboard, _hash) = BaoTree::outboard_post_order(&data);
         let expected = encode_slice_reference(&data, range.clone());
+        let (outboard, _hash) = BaoTree::outboard_post_order(&data);
+        // extend empty range to contain at least 1 byte
         if range.start == range.end {
             range.end += 1;
-        }
+        };
         let actual = BaoTree::encode_slice(
             &data,
             &outboard,
