@@ -21,12 +21,6 @@ index_newtype! {
 
 pub(crate) const BLAKE3_CHUNK_SIZE: u64 = 1024;
 
-impl ChunkNum {
-    pub const fn to_bytes(self) -> ByteNum {
-        ByteNum(self.0 * BLAKE3_CHUNK_SIZE)
-    }
-}
-
 index_newtype! {
     /// a number of leaf blocks with its own hash
     pub struct BlockNum(pub u64);

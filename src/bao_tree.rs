@@ -298,13 +298,6 @@ impl BaoTree {
             if node.is_leaf() && self.bytes(node.mid()) >= self.size.0 {
                 return None;
             }
-            // if let Some(leaf) = node.as_leaf() {
-
-            //     let (lr, rr) = self.leaf_chunk_ranges2(leaf);
-            //     if rr.is_empty() {
-            //         return None;
-            //     }
-            // }
             self.outboard_hash_pairs()
                 .checked_sub(u64::from(node.right_count()) + 1)
                 .map(PONum)
@@ -350,6 +343,21 @@ impl BaoTree {
 
     const fn chunk_group_bytes(&self) -> ByteNum {
         self.chunk_group_chunks().to_bytes()
+    }
+}
+
+impl ByteNum {
+    pub const fn chunks(&self) -> ChunkNum {
+        let mask = (1 << 10) - 1;
+        let part = ((self.0 & mask) != 0) as u64;
+        let whole = self.0 >> 10;
+        ChunkNum(whole + part)
+    }
+}
+
+impl ChunkNum {
+    pub const fn to_bytes(&self) -> ByteNum {
+        ByteNum(self.0 << 10)
     }
 }
 
@@ -916,9 +924,12 @@ mod tests {
         res
     }
 
-    fn bao_tree_encode_slice_impl(data: Vec<u8>, range: Range<u64>) {
+    fn bao_tree_encode_slice_impl(data: Vec<u8>, mut range: Range<u64>) {
         let (outboard, _hash) = BaoTree::outboard_post_order(&data);
         let expected = encode_slice_reference(&data, range.clone());
+        if range.start == range.end {
+            range.end += 1;
+        }
         let actual = BaoTree::encode_slice(
             &data,
             &outboard,
@@ -1053,6 +1064,34 @@ mod tests {
         bao_tree_blake3_impl(td(10000));
     }
 
+    fn size_and_slice_overlapping() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
+        (0..32768u64).prop_flat_map(|len| {
+            let len = ByteNum(len);
+            let chunks = len.chunks();
+            let slice_start = 0..=chunks.0.saturating_sub(1);
+            let slice_len = 1..=(chunks.0 + 1);
+            (
+                Just(len),
+                slice_start.prop_map(ChunkNum),
+                slice_len.prop_map(ChunkNum),
+            )
+        })
+    }
+
+    fn size_and_slice() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
+        (0..32768u64).prop_flat_map(|len| {
+            let len = ByteNum(len);
+            let chunks = len.chunks();
+            let slice_start = 0..=chunks.0;
+            let slice_len = 0..=chunks.0;
+            (
+                Just(len),
+                slice_start.prop_map(ChunkNum),
+                slice_len.prop_map(ChunkNum),
+            )
+        })
+    }
+
     proptest! {
         #[test]
         fn compare_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
@@ -1068,6 +1107,20 @@ mod tests {
         fn bao_tree_encode_slice_all(len in 0..32768usize) {
             let data = make_test_data(len);
             let chunk_range = 0..(data.len() / 1024 + 1) as u64;
+            bao_tree_encode_slice_impl(data, chunk_range);
+        }
+
+        #[test]
+        fn bao_tree_encode_slice_part_overlapping((len, start, size) in size_and_slice_overlapping()) {
+            let data = make_test_data(len.to_usize());
+            let chunk_range = start.0 .. start.0 + size.0;
+            bao_tree_encode_slice_impl(data, chunk_range);
+        }
+
+        #[test]
+        fn bao_tree_encode_slice_part_any((len, start, size) in size_and_slice()) {
+            let data = make_test_data(len.to_usize());
+            let chunk_range = start.0 .. start.0 + size.0;
             bao_tree_encode_slice_impl(data, chunk_range);
         }
 
