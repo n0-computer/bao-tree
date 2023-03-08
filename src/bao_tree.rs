@@ -53,10 +53,18 @@ impl BaoTree {
 
     /// Total number of nodes in the tree
     ///
-    /// Each leaf node contains 2 blocks, and for n leaf nodes there will be n-1 branch nodes
+    /// Each leaf node contains up to 2 blocks, and for n leaf nodes there will
+    /// be n-1 branch nodes
+    ///
+    /// Note that this is not the same as the number of hashes in the outboard.
     fn node_count(&self) -> u64 {
         let blocks = self.blocks().0 - 1;
         blocks.saturating_sub(1).max(1)
+    }
+
+    /// Number of hash pairs in the outboard
+    fn outboard_hash_pairs(&self) -> u64 {
+        self.blocks().0 - 1
     }
 
     fn filled_size(&self) -> TreeNode {
@@ -81,11 +89,13 @@ impl BaoTree {
         ChunkNum(node.0 << self.chunk_group_log)
     }
 
-    pub fn blake3_hash(data: &[u8]) -> blake3::Hash {
-        let mut stack = Vec::with_capacity(16);
+    pub fn outboard_post_order(data: &[u8]) -> (Vec<u8>, blake3::Hash) {
+        let mut stack = Vec::<blake3::Hash>::with_capacity(16);
         let tree = Self::new(ByteNum(data.len() as u64), 0);
+        let root = tree.root();
+        let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
+        let mut res = Vec::with_capacity(outboard_len);
         for node in tree.iterate() {
-            let is_root = node.0 == tree.root().0;
             let hash = if node.is_leaf() {
                 match tree.leaf_ranges(node) {
                     Ok((l, r)) => {
@@ -97,20 +107,62 @@ impl BaoTree {
                             right,
                             false,
                         );
-                        parent_cv(&left_hash, &right_hash, is_root)
+                        res.extend_from_slice(left_hash.as_bytes());
+                        res.extend_from_slice(right_hash.as_bytes());
+                        parent_cv(&left_hash, &right_hash, node == root)
                     }
                     Err(Range { start, end }) => {
                         let left = &data[start.to_usize()..end.to_usize()];
-                        hash_chunk(tree.chunk_num(node), left, is_root)
+                        hash_chunk(tree.chunk_num(node), left, node == root)
+                    }
+                }
+            } else {
+                let right_hash = stack.pop().unwrap();
+                let left_hash = stack.pop().unwrap();
+                res.extend_from_slice(left_hash.as_bytes());
+                res.extend_from_slice(right_hash.as_bytes());
+                parent_cv(&left_hash, &right_hash, node == root)
+            };
+            stack.push(hash);
+        }
+        res.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        debug_assert_eq!(stack.len(), 1);
+        debug_assert_eq!(res.len(), outboard_len);
+        let hash = stack.pop().unwrap();
+        (res, hash)
+    }
+
+    pub fn blake3_hash(data: &[u8]) -> blake3::Hash {
+        let mut stack = Vec::with_capacity(16);
+        let tree = Self::new(ByteNum(data.len() as u64), 0);
+        let root = tree.root();
+        for node in tree.iterate() {
+            let hash = if node.is_leaf() {
+                match tree.leaf_ranges(node) {
+                    Ok((l, r)) => {
+                        let left = &data[l.start.to_usize()..l.end.to_usize()];
+                        let right = &data[r.start.to_usize()..r.end.to_usize()];
+                        let left_hash = hash_chunk(tree.chunk_num(node), left, false);
+                        let right_hash = hash_chunk(
+                            tree.chunk_num(node) + tree.chunk_group_chunks(),
+                            right,
+                            false,
+                        );
+                        parent_cv(&left_hash, &right_hash, node == root)
+                    }
+                    Err(Range { start, end }) => {
+                        let left = &data[start.to_usize()..end.to_usize()];
+                        hash_chunk(tree.chunk_num(node), left, node == root)
                     }
                 }
             } else {
                 let right = stack.pop().unwrap();
                 let left = stack.pop().unwrap();
-                parent_cv(&left, &right, is_root)
+                parent_cv(&left, &right, node == root)
             };
             stack.push(hash);
         }
+        debug_assert_eq!(stack.len(), 1);
         stack.pop().unwrap()
     }
 
@@ -320,8 +372,11 @@ fn root0(leafs: ChunkNum) -> u64 {
     leafs.0.next_power_of_two() - 1
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TreeNode(u64);
+
+#[derive(Clone, Copy)]
+pub struct LeafNode(u64);
 
 impl fmt::Debug for TreeNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -334,18 +389,6 @@ impl fmt::Debug for TreeNode {
                 write!(f, "TreeNode::Branch({}, level={})", self.0, self.level())
             }
         }
-    }
-}
-
-impl Into<u64> for TreeNode {
-    fn into(self) -> u64 {
-        self.0
-    }
-}
-
-impl From<u64> for TreeNode {
-    fn from(x: u64) -> TreeNode {
-        TreeNode(x)
     }
 }
 
@@ -663,6 +706,16 @@ mod tests {
         assert_eq!(h1, h2);
     }
 
+    fn bao_tree_outboard_impl(data: Vec<u8>) {
+        let mut expected = Vec::new();
+        let cursor = std::io::Cursor::new(&mut expected);
+        let mut encoder = abao::encode::Encoder::new_outboard(cursor);
+        encoder.write_all(&data).unwrap();
+        let expected_hash = encoder.finalize_post_order().unwrap();
+        let (actual, actual_hash) = BaoTree::outboard_post_order(&data);
+        assert_eq!(expected_hash, actual_hash);
+    }
+
     fn compare_bao_outboard_impl(data: Vec<u8>) {
         let mut storage = Vec::new();
         let cursor = std::io::Cursor::new(&mut storage);
@@ -705,6 +758,20 @@ mod tests {
     }
 
     #[test]
+    fn bao_tree_outboard_0() {
+        bao_tree_outboard_impl(vec![]);
+        bao_tree_outboard_impl(vec![0; 1]);
+        bao_tree_outboard_impl(vec![0; 1023]);
+        bao_tree_outboard_impl(vec![0; 1024]);
+        bao_tree_outboard_impl(vec![0; 1025]);
+        bao_tree_outboard_impl(vec![0; 2047]);
+        bao_tree_outboard_impl(vec![0; 2048]);
+        bao_tree_outboard_impl(vec![0; 2049]);
+        bao_tree_outboard_impl(vec![0; 10000]);
+        bao_tree_outboard_impl(vec![0; 20000]);
+    }
+
+    #[test]
     fn compare_blake3_0() {
         compare_blake3_impl(vec![]);
         compare_blake3_impl(vec![0; 1]);
@@ -719,12 +786,12 @@ mod tests {
 
     #[test]
     fn bao_tree_blake3_0() {
-        // bao_tree_blake3_impl(vec![]);
-        // bao_tree_blake3_impl(vec![0; 1]);
-        // bao_tree_blake3_impl(vec![0; 1023]);
-        // bao_tree_blake3_impl(vec![0; 1024]);
-        // bao_tree_blake3_impl(vec![0; 1025]);
-        // bao_tree_blake3_impl(vec![0; 2047]);
+        bao_tree_blake3_impl(vec![]);
+        bao_tree_blake3_impl(vec![0; 1]);
+        bao_tree_blake3_impl(vec![0; 1023]);
+        bao_tree_blake3_impl(vec![0; 1024]);
+        bao_tree_blake3_impl(vec![0; 1025]);
+        bao_tree_blake3_impl(vec![0; 2047]);
         bao_tree_blake3_impl(vec![0; 2048]);
         bao_tree_blake3_impl(vec![0; 2049]);
         bao_tree_blake3_impl(vec![0; 10000]);
@@ -739,6 +806,11 @@ mod tests {
         #[test]
         fn bao_tree_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             bao_tree_blake3_impl(data);
+        }
+
+        #[test]
+        fn bao_tree_outboard(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
+            bao_tree_outboard_impl(data);
         }
 
         #[test]
@@ -796,7 +868,7 @@ mod tests {
     fn bitmap_query() {
         let mut elems = vec![None; 2000];
         for i in 0..1000 {
-            let nn = TreeNode::from(i);
+            let nn = TreeNode(i);
             let o = nn.post_order_offset();
             let level = nn.level();
             let text = if level == 0 {
