@@ -2,6 +2,7 @@ use crate::tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE};
 use blake3::guts::parent_cv;
 use range_collections::AbstractRangeSet;
 use std::{
+    fmt,
     num::NonZeroU64,
     ops::{Bound, Range, RangeBounds},
 };
@@ -40,18 +41,107 @@ impl BaoTree {
     /// number of blocks in the tree
     ///
     /// At chunk group size 1, this is the same as the number of chunks
+    /// Even a tree with 0 bytes size has a single block
     pub fn blocks(&self) -> BlockNum {
         let size = self.size.0;
-        let chunk_group_size = self.chunk_group_bytes().0;
-        let full_blocks = size / chunk_group_size;
-        let open_block = (size % chunk_group_size == 0) as u64;
-        ChunkNum(full_blocks + open_block)
+        let block_bits = self.chunk_group_log + 10;
+        let block_mask = (1 << block_bits) - 1;
+        let full_blocks = size >> block_bits;
+        let open_block = ((size & block_mask) != 0) as u64;
+        ChunkNum((full_blocks + open_block).max(1))
+    }
+
+    /// Total number of nodes in the tree
+    ///
+    /// Each leaf node contains 2 blocks, and for n leaf nodes there will be n-1 branch nodes
+    fn node_count(&self) -> u64 {
+        let blocks = self.blocks().0 - 1;
+        blocks.saturating_sub(1).max(1)
+    }
+
+    fn filled_size(&self) -> TreeNode {
+        let blocks = self.blocks();
+        let n = (blocks.0 + 1) / 2;
+        TreeNode(n + n.saturating_sub(1))
     }
 
     /// iterate over all nodes in the tree in depth first, left to right, post order
     pub fn iterate(&self) -> impl Iterator<Item = TreeNode> {
-        todo!();
-        vec![].into_iter()
+        // todo: make this a proper iterator
+        let nodes = self.node_count();
+        let mut res = Vec::with_capacity(nodes.try_into().unwrap());
+        self.iterate_rec(self.root(), &mut res);
+        res.into_iter()
+    }
+
+    pub fn chunk_num(&self, node: TreeNode) -> ChunkNum {
+        assert!(node.is_leaf());
+        // block number of a leaf node is just the node number
+        // multiply by chunk_group_size to get the chunk number
+        ChunkNum(node.0 << self.chunk_group_log)
+    }
+
+    pub fn blake3_hash(data: &[u8]) -> blake3::Hash {
+        let mut stack = Vec::with_capacity(16);
+        let tree = Self::new(ByteNum(data.len() as u64), 0);
+        for node in tree.iterate() {
+            let is_root = node.0 == tree.root().0;
+            let hash = if node.is_leaf() {
+                match tree.leaf_ranges(node) {
+                    Ok((l, r)) => {
+                        let left = &data[l.start.to_usize()..l.end.to_usize()];
+                        let right = &data[r.start.to_usize()..r.end.to_usize()];
+                        let left_hash = hash_chunk(tree.chunk_num(node), left, false);
+                        let right_hash = hash_chunk(
+                            tree.chunk_num(node) + tree.chunk_group_chunks(),
+                            right,
+                            false,
+                        );
+                        parent_cv(&left_hash, &right_hash, is_root)
+                    }
+                    Err(Range { start, end }) => {
+                        let left = &data[start.to_usize()..end.to_usize()];
+                        hash_chunk(tree.chunk_num(node), left, is_root)
+                    }
+                }
+            } else {
+                let right = stack.pop().unwrap();
+                let left = stack.pop().unwrap();
+                parent_cv(&left, &right, is_root)
+            };
+            stack.push(hash);
+        }
+        stack.pop().unwrap()
+    }
+
+    fn leaf_ranges(
+        &self,
+        leaf: TreeNode,
+    ) -> std::result::Result<(Range<ByteNum>, Range<ByteNum>), Range<ByteNum>> {
+        assert!(leaf.is_leaf());
+        let chunk_group_bytes = self.chunk_group_bytes();
+        let start = chunk_group_bytes * leaf.0;
+        let mid = start + chunk_group_bytes;
+        let end = start + chunk_group_bytes * 2;
+        if !(start < self.size || (start == 0 && self.size == 0)) {
+            debug_assert!(start < self.size || (start == 0 && self.size == 0));
+        }
+        if mid >= self.size {
+            Err((start..self.size))
+        } else {
+            Ok((start..mid, mid..end.min(self.size)))
+        }
+    }
+
+    fn iterate_rec(&self, nn: TreeNode, res: &mut Vec<TreeNode>) {
+        if !nn.is_leaf() {
+            let valid_nodes = self.filled_size();
+            let l = nn.left_child().unwrap();
+            let r = nn.right_descendant(valid_nodes).unwrap();
+            self.iterate_rec(l, res);
+            self.iterate_rec(r, res);
+        }
+        res.push(nn);
     }
 
     /// iterate over all nodes in the tree in depth first, left to right, post order
@@ -230,8 +320,22 @@ fn root0(leafs: ChunkNum) -> u64 {
     leafs.0.next_power_of_two() - 1
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct TreeNode(u64);
+
+impl fmt::Debug for TreeNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !f.alternate() {
+            write!(f, "TreeNode({})", self.0)
+        } else {
+            if self.is_leaf() {
+                write!(f, "TreeNode::Leaf({})", self.0)
+            } else {
+                write!(f, "TreeNode::Branch({}, level={})", self.0, self.level())
+            }
+        }
+    }
+}
 
 impl Into<u64> for TreeNode {
     fn into(self) -> u64 {
@@ -544,11 +648,17 @@ mod tests {
 
     use proptest::prelude::*;
 
-    use super::{blake3_hash, post_order_outboard, TreeNode};
+    use super::{blake3_hash, post_order_outboard, BaoTree, TreeNode};
     use crate::tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE};
 
     fn compare_blake3_impl(data: Vec<u8>) {
         let h1 = blake3_hash(&data);
+        let h2 = blake3::hash(&data);
+        assert_eq!(h1, h2);
+    }
+
+    fn bao_tree_blake3_impl(data: Vec<u8>) {
+        let h1 = BaoTree::blake3_hash(&data);
         let h2 = blake3::hash(&data);
         assert_eq!(h1, h2);
     }
@@ -607,10 +717,28 @@ mod tests {
         compare_blake3_impl(vec![0; 10000]);
     }
 
+    #[test]
+    fn bao_tree_blake3_0() {
+        // bao_tree_blake3_impl(vec![]);
+        // bao_tree_blake3_impl(vec![0; 1]);
+        // bao_tree_blake3_impl(vec![0; 1023]);
+        // bao_tree_blake3_impl(vec![0; 1024]);
+        // bao_tree_blake3_impl(vec![0; 1025]);
+        // bao_tree_blake3_impl(vec![0; 2047]);
+        bao_tree_blake3_impl(vec![0; 2048]);
+        bao_tree_blake3_impl(vec![0; 2049]);
+        bao_tree_blake3_impl(vec![0; 10000]);
+    }
+
     proptest! {
         #[test]
         fn compare_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             compare_blake3_impl(data);
+        }
+
+        #[test]
+        fn bao_tree_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
+            bao_tree_blake3_impl(data);
         }
 
         #[test]
@@ -698,6 +826,14 @@ mod tests {
                 TreeNode::filled_size(ChunkNum(i)),
                 TreeNode::root(ChunkNum(i))
             );
+        }
+    }
+
+    #[test]
+    fn bao_tree_iterate() {
+        let tree = BaoTree::new(ByteNum(0), 0);
+        for node in tree.iterate() {
+            println!("{:#?}", node);
         }
     }
 }
