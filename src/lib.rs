@@ -6,6 +6,8 @@ mod macros;
 mod tree;
 mod vec_store;
 
+mod bao_tree;
+
 #[cfg(test)]
 mod tests;
 

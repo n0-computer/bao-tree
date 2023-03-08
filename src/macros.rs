@@ -1,4 +1,3 @@
-
 /// A newtype for a thing that can be conveniently be use as an index
 ///
 /// The intention is not to make the newtype completely foolproof, but to make it
