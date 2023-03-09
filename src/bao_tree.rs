@@ -202,7 +202,6 @@ impl BaoTree {
     ) -> Vec<u8> {
         let mut res = Vec::new();
         let tree = Self::new(ByteNum(data.len() as u64), 0);
-        let chunks = tree.size.chunks();
         res.extend_from_slice(&tree.size.0.to_le_bytes());
         for (node, tl, tr) in tree.iterate_part_preorder(ranges) {
             if let Some(offset) = tree.post_order_offset(node) {
@@ -887,6 +886,7 @@ mod tests {
 
     use core::slice;
     use std::{
+        collections::BTreeSet,
         io::{Cursor, Read, Write},
         ops::Range,
     };
@@ -1261,6 +1261,134 @@ mod tests {
                 tree.is_sealed(node),
                 tree.post_order_offset(node)
             );
+        }
+    }
+
+    #[inline]
+    fn is_odd(x: usize) -> bool {
+        (x & 1) != 0
+    }
+
+    #[inline]
+    fn is_even(x: usize) -> bool {
+        (x & 1) == 0
+    }
+
+    /// Split a strictly ordered sequence of boundaries `ranges` into two parts
+    /// `left`, `right` at position `at`, so that
+    ///   contains(left, x) == contains(ranges, x) for x < at
+    ///   contains(right, x) == contains(ranges, x) for x >= at
+    fn split<'a, T: Ord>(ranges: &'a [T], at: &'a T) -> (&'a [T], &'a [T]) {
+        let l = ranges.len();
+        let res = ranges.binary_search(at);
+        match res {
+            Ok(i) if is_even(i) => {
+                // left will be an even size, so we can just cut it off
+                (&ranges[..i], &ranges[i..])
+            }
+            Err(i) if is_even(i) => {
+                // right will be an even size, so we can just cut it off
+                (&ranges[..i], &ranges[i..])
+            }
+            Ok(i) => {
+                // left will be an odd size, so we need to add one if possible
+                (
+                    &ranges[..i.saturating_add(1).min(l)],
+                    &ranges[i.saturating_add(1).min(l)..],
+                )
+            }
+            Err(i) => {
+                // left will be an odd size, so we add one if possible
+                (
+                    &ranges[..i.saturating_add(1).min(l)],
+                    &ranges[i.saturating_sub(1)..],
+                )
+            }
+        }
+    }
+
+    /// For a strictly ordered sequence of boundaries `ranges`, checks if the
+    /// value at `at` is true.
+    fn contains<T: Ord>(boundaries: &[T], value: &T) -> bool {
+        match boundaries.binary_search(value) {
+            Ok(index) => !is_odd(index),
+            Err(index) => is_odd(index),
+        }
+    }
+
+    fn test_points(boundaries: impl IntoIterator<Item = u64>) -> BTreeSet<u64> {
+        let mut res = BTreeSet::new();
+        for x in boundaries {
+            res.insert(x.saturating_sub(1));
+            res.insert(x);
+            res.insert(x.saturating_add(1));
+        }
+        res
+    }
+
+    fn test_boundaries() -> impl Strategy<Value = (Vec<u64>, u64)> {
+        proptest::collection::vec(any::<u64>(), 0..100).prop_flat_map(|mut v| {
+            v.sort();
+            v.dedup();
+            // split point should occasionally be outside of the range
+            let max_split = v
+                .iter()
+                .max()
+                .cloned()
+                .unwrap_or_default()
+                .saturating_add(2);
+            (Just(v), 0..max_split)
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn test_split((boundaries, at) in test_boundaries()) {
+            let (left, right) = split(&boundaries, &at);
+            for x in test_points(boundaries.clone()) {
+                // test that split does what it promises
+                if x < at {
+                    prop_assert_eq!(contains(left, &x), contains(&boundaries, &x), "left must be like boundaries for x < at");
+                } else {
+                    prop_assert_eq!(contains(right, &x), contains(&boundaries, &x), "right must be like boundaries for x >= at");
+                }
+                // test that split is not just returning the input, but minimal parts
+                let nr = right.iter().filter(|x| x < &&at).count();
+                prop_assert!(nr <= 1, "there must be at most one boundary before the split point");
+                let nl = left.iter().filter(|x| x >= &&at).count();
+                prop_assert!(nl <= 1, "there must be at most one boundary after the split point");
+            }
+        }
+    }
+
+    #[test]
+    fn test_split_0() {
+        let cases: Vec<(&[u64], u64, (&[u64], &[u64]))> = vec![
+            (&[0, 2], 0, (&[], &[0, 2])),
+            (&[0, 2], 2, (&[0, 2], &[])),
+            (&[0, 2, 4], 2, (&[0, 2], &[4])),
+            (&[0, 2, 4], 4, (&[0, 2], &[4])),
+            (&[0, 2, 4, 8], 2, (&[0, 2], &[4, 8])),
+            (&[0, 2, 4, 8], 4, (&[0, 2], &[4, 8])),
+            (&[0, 2, 4, 8], 3, (&[0, 2], &[4, 8])),
+            (&[0, 2, 4, 8], 6, (&[0, 2, 4, 8], &[4, 8])),
+        ];
+        for (ranges, pos, (left, right)) in cases {
+            assert_eq!(split(&ranges, &pos), (left, right));
+        }
+    }
+
+    #[test]
+    fn contains_0() {
+        let cases: Vec<(&[u64], u64, bool)> = vec![
+            (&[0, 2], 0, true),
+            (&[0, 2], 1, true),
+            (&[0, 2], 2, false),
+            (&[0, 2, 4, 8], 3, false),
+            (&[0, 2, 4, 8], 4, true),
+        ];
+        for (ranges, pos, expected) in cases {
+            assert_eq!(contains(ranges, &pos), expected);
         }
     }
 }
