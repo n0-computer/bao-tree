@@ -14,7 +14,8 @@ bytes = "1"
 futures = "0.3.25"
 memmap2 = "0.5.8"
 tokio = { version = "1.24.1", features = ["full"] }
-range-collections = { path = "../range-collections" }
+ref-cast = "1.0.15"
+num-traits = "0.2.15"
 
 [dev-dependencies]
 hex = "0.4.3"

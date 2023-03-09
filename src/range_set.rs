@@ -1,33 +1,143 @@
-use std::ops::Range;
+use num_traits::{Bounded, CheckedAdd, One, SaturatingAdd};
+use ref_cast::RefCast;
+use std::{
+    borrow::Borrow,
+    ops::{Deref, Range, RangeBounds, RangeFrom, RangeTo},
+};
 
-use crate::tree::ChunkNum;
+#[derive(Debug, Clone, Default)]
+pub struct RangeSet<T>(Vec<T>);
 
-/// A range specification
-///
-/// Basically just a wrapper around a strictly sorted sequence of ChunkNums
-pub struct RangeSpec<'a>(&'a [ChunkNum]);
-
-impl<'a> RangeSpec<'a> {
-    pub fn new(ranges: &'a [ChunkNum]) -> Option<RangeSpec<'a>> {
-        for i in 0..ranges.len().saturating_sub(1) {
-            if ranges[i] >= ranges[i + 1] {
-                return None;
-            }
+impl<T: Ord> RangeSet<T> {
+    /// Create a `RangeSet` from a `Vec`
+    ///
+    /// The `Vec` must be sorted and contain no duplicates
+    pub fn new(ranges: Vec<T>) -> Option<Self> {
+        if is_strictly_sorted(&ranges) {
+            Some(Self(ranges))
+        } else {
+            None
         }
-        Some(RangeSpec(ranges))
     }
 
-    pub fn split(&self, at: ChunkNum) -> (RangeSpec<'a>, RangeSpec<'a>) {
-        let (left, right) = split(self.0, at);
-        (RangeSpec(left), RangeSpec(right))
+    // /// Create a `RangeSet` from an arbitrary range
+    // pub fn from_range_bounds(range: impl RangeBounds<T>) -> Self
+    // where
+    //     T: Clone + SaturatingAdd + CheckedAdd + One + Bounded,
+    // {
+    //     use std::ops::Bound::*;
+    //     let min = match range.start_bound() {
+    //         Included(start) => start.clone(),
+    //         Excluded(start) => start.clone().saturating_add(&T::one()),
+    //         Unbounded => T::min_value(),
+    //     };
+    //     let max = match range.end_bound() {
+    //         Included(end) => end.clone().checked_add(&T::one()),
+    //         Excluded(end) => Some(end.clone()),
+    //         Unbounded => None,
+    //     };
+    //     if let Some(max) = max {
+    //         if max <= min {
+    //             Self(vec![])
+    //         } else {
+    //             Self(vec![min, max])
+    //         }
+    //     } else {
+    //         Self(vec![min])
+    //     }
+    // }
+}
+
+impl<T: Ord> From<Range<T>> for RangeSet<T> {
+    fn from(range: Range<T>) -> Self {
+        if range.is_empty() {
+            Self(Vec::new())
+        } else {
+            Self(vec![range.start, range.end])
+        }
+    }
+}
+
+impl<T: Ord> From<RangeFrom<T>> for RangeSet<T> {
+    fn from(range: RangeFrom<T>) -> Self {
+        Self(vec![range.start])
+    }
+}
+
+impl<T: Ord + Bounded> From<RangeTo<T>> for RangeSet<T> {
+    fn from(range: RangeTo<T>) -> Self {
+        Self::from(T::min_value()..range.end)
+    }
+}
+
+impl<T> Deref for RangeSet<T> {
+    type Target = RangeSetRef<T>;
+
+    fn deref(&self) -> &Self::Target {
+        RangeSetRef::new_unchecked(&self.0)
+    }
+}
+
+impl<T> AsRef<RangeSetRef<T>> for RangeSet<T> {
+    fn as_ref(&self) -> &RangeSetRef<T> {
+        RangeSetRef::new_unchecked(&self.0)
+    }
+}
+
+impl<T> Borrow<RangeSetRef<T>> for RangeSet<T> {
+    fn borrow(&self) -> &RangeSetRef<T> {
+        RangeSetRef::new_unchecked(&self.0)
+    }
+}
+
+/// A range specification reference
+///
+/// Basically just a wrapper around a strictly sorted slice of ChunkNums
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, RefCast)]
+#[repr(transparent)]
+pub struct RangeSetRef<T>([T]);
+
+impl<T> RangeSetRef<T> {
+    pub fn new(ranges: &[T]) -> Option<&Self>
+    where
+        T: Ord,
+    {
+        if is_strictly_sorted(ranges) {
+            Some(Self::new_unchecked(ranges))
+        } else {
+            None
+        }
     }
 
-    pub fn contains(&self, chunk: ChunkNum) -> bool {
-        contains(self.0, &chunk)
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
-    pub fn intersects(&self, range: Range<ChunkNum>) -> bool {
-        intersects(self.0, range)
+    pub fn split(&self, at: T) -> (&Self, &Self)
+    where
+        T: Ord,
+    {
+        let (left, right) = split(&self.0, at);
+        (Self::new_unchecked(left), Self::new_unchecked(right))
+    }
+
+    pub fn contains(&self, chunk: T) -> bool
+    where
+        T: Ord,
+    {
+        contains(&self.0, &chunk)
+    }
+
+    pub fn intersects(&self, range: Range<T>) -> bool
+    where
+        T: Ord,
+    {
+        intersects(&self.0, range)
+    }
+
+    /// Create a new RangeSpecRef from a sorted slice of ranges without checking
+    fn new_unchecked(ranges: &[T]) -> &Self {
+        Self::ref_cast(ranges)
     }
 }
 
@@ -39,6 +149,15 @@ fn is_odd(x: usize) -> bool {
 #[inline]
 fn is_even(x: usize) -> bool {
     (x & 1) == 0
+}
+
+fn is_strictly_sorted<T: Ord>(ranges: &[T]) -> bool {
+    for i in 0..ranges.len().saturating_sub(1) {
+        if ranges[i] >= ranges[i + 1] {
+            return false;
+        }
+    }
+    true
 }
 
 /// Split a strictly ordered sequence of boundaries `ranges` into two parts
@@ -93,6 +212,8 @@ fn contains<T: Ord>(boundaries: &[T], value: &T) -> bool {
 fn intersects<T: Ord>(boundaries: &[T], range: Range<T>) -> bool {
     let (_, remaining) = split(boundaries, range.start);
     let (remaining, _) = split(remaining, range.end);
+    // remaining is not the intersection but can be larger.
+    // But if remaining is empty, then we know that the intersection is empty.
     !remaining.is_empty()
 }
 

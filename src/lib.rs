@@ -7,7 +7,7 @@ mod tree;
 mod vec_store;
 
 mod bao_tree;
-mod range_spec;
+mod range_set;
 
 #[cfg(test)]
 mod tests;

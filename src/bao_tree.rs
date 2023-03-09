@@ -1,24 +1,12 @@
-use crate::tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE};
+use crate::{
+    range_set::{RangeSet, RangeSetRef},
+    tree::{hash_chunk, BlockNum, ByteNum, ChunkNum, PONum},
+};
 use blake3::guts::parent_cv;
-use range_collections::{range_set::RangeSetEntry, AbstractRangeSet, RangeSet, RangeSet2};
 use std::{
     fmt::{self, Debug},
-    num::NonZeroU64,
-    ops::{Bound, Range, RangeBounds},
+    ops::Range,
 };
-
-/// todo: change once we have chunk groups
-type BlockNum = ChunkNum;
-
-impl RangeSetEntry for ChunkNum {
-    fn min_value() -> Self {
-        Self(u64::min_value())
-    }
-
-    fn is_min_value(&self) -> bool {
-        self.0.is_min_value()
-    }
-}
 
 /// Defines a Bao tree.
 ///
@@ -31,11 +19,29 @@ pub struct BaoTree {
     chunk_group_log: u8,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum PostOrderOffset {
+    /// the node should not be considered
+    Skip,
+    /// the node is stable
+    Stable(PONum),
+    /// the node is unstable
+    Unstable(PONum),
+}
+
+impl PostOrderOffset {
+    pub fn value(self) -> Option<PONum> {
+        match self {
+            Self::Skip => None,
+            Self::Stable(n) => Some(n),
+            Self::Unstable(n) => Some(n),
+        }
+    }
+}
+
 impl BaoTree {
     /// Create a new BaoTree
     pub fn new(size: ByteNum, chunk_group_log: u8) -> BaoTree {
-        // no support for chunk groups yet
-        assert!(chunk_group_log == 0);
         BaoTree {
             size,
             chunk_group_log,
@@ -44,8 +50,7 @@ impl BaoTree {
 
     /// Root of the tree
     pub fn root(&self) -> TreeNode {
-        let blocks = self.blocks().0;
-        TreeNode(((blocks + 1) / 2).next_power_of_two() - 1)
+        TreeNode::root(self.blocks())
     }
 
     /// number of blocks in the tree
@@ -55,21 +60,12 @@ impl BaoTree {
     ///
     /// This is used very frequently, so init it on creation?
     pub fn blocks(&self) -> BlockNum {
-        let size = self.size.0;
-        let block_bits = self.chunk_group_log + 10;
-        let block_mask = (1 << block_bits) - 1;
-        let full_blocks = size >> block_bits;
-        let open_block = ((size & block_mask) != 0) as u64;
-        ChunkNum((full_blocks + open_block).max(1))
+        // handle the case of an empty tree having 1 block
+        self.size.blocks(self.chunk_group_log).max(BlockNum(1))
     }
 
     pub fn chunks(&self) -> ChunkNum {
-        let size = self.size.0;
-        let block_bits = 10;
-        let block_mask = (1 << block_bits) - 1;
-        let full_blocks = size >> block_bits;
-        let open_block = ((size & block_mask) != 0) as u64;
-        ChunkNum((full_blocks + open_block).max(1))
+        self.size.chunks()
     }
 
     /// Total number of nodes in the tree
@@ -101,9 +97,9 @@ impl BaoTree {
     }
 
     /// Compute the post order outboard for the given data
-    pub fn outboard_post_order(data: &[u8]) -> (Vec<u8>, blake3::Hash) {
+    pub fn outboard_post_order(data: &[u8], chunk_group_log: u8) -> (Vec<u8>, blake3::Hash) {
         let mut stack = Vec::<blake3::Hash>::with_capacity(16);
-        let tree = Self::new(ByteNum(data.len() as u64), 0);
+        let tree = Self::new(ByteNum(data.len() as u64), chunk_group_log);
         let root = tree.root();
         let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
         let mut res = Vec::with_capacity(outboard_len);
@@ -111,19 +107,19 @@ impl BaoTree {
             let is_root = node == root;
             let hash = if let Some(leaf) = node.as_leaf() {
                 let chunk0 = tree.chunk_num(leaf);
-                match tree.leaf_ranges(leaf) {
+                let cgc = tree.chunk_group_chunks();
+                match tree.leaf_byte_ranges(leaf) {
                     Ok((l, r)) => {
-                        let left = &data[l.start.to_usize()..l.end.to_usize()];
-                        let right = &data[r.start.to_usize()..r.end.to_usize()];
-                        let left_hash = hash_chunk(chunk0, left, false);
-                        let right_hash =
-                            hash_chunk(chunk0 + tree.chunk_group_chunks(), right, false);
-                        res.extend_from_slice(left_hash.as_bytes());
-                        res.extend_from_slice(right_hash.as_bytes());
-                        parent_cv(&left_hash, &right_hash, is_root)
+                        let l_data = &data[l.start.to_usize()..l.end.to_usize()];
+                        let r_data = &data[r.start.to_usize()..r.end.to_usize()];
+                        let l_hash = hash_chunk(chunk0, l_data, false);
+                        let r_hash = hash_chunk(chunk0 + cgc, r_data, false);
+                        res.extend_from_slice(l_hash.as_bytes());
+                        res.extend_from_slice(r_hash.as_bytes());
+                        parent_cv(&l_hash, &r_hash, is_root)
                     }
-                    Err(Range { start, end }) => {
-                        let left = &data[start.to_usize()..end.to_usize()];
+                    Err(l) => {
+                        let left = &data[l.start.to_usize()..l.end.to_usize()];
                         hash_chunk(chunk0, left, is_root)
                     }
                 }
@@ -152,7 +148,7 @@ impl BaoTree {
             let is_root = node == root;
             let hash = if let Some(leaf) = node.as_leaf() {
                 let chunk0 = tree.chunk_num(leaf);
-                match tree.leaf_ranges(leaf) {
+                match tree.leaf_byte_ranges(leaf) {
                     Ok((l, r)) => {
                         let left = &data[l.start.to_usize()..l.end.to_usize()];
                         let right = &data[r.start.to_usize()..r.end.to_usize()];
@@ -161,8 +157,8 @@ impl BaoTree {
                             hash_chunk(chunk0 + tree.chunk_group_chunks(), right, false);
                         parent_cv(&left_hash, &right_hash, is_root)
                     }
-                    Err(Range { start, end }) => {
-                        let left = &data[start.to_usize()..end.to_usize()];
+                    Err(l) => {
+                        let left = &data[l.start.to_usize()..l.end.to_usize()];
                         hash_chunk(chunk0, left, is_root)
                     }
                 }
@@ -177,38 +173,33 @@ impl BaoTree {
         stack.pop().unwrap()
     }
 
-    pub fn encode_slice(
-        data: &[u8],
-        outboard: &[u8],
-        ranges: impl AbstractRangeSet<ChunkNum>,
-    ) -> Vec<u8> {
+    /// Given a *post order* outboard, encode a slice of data
+    ///
+    /// Todo: validate on read option
+    pub fn encode_slice(data: &[u8], outboard: &[u8], ranges: &RangeSetRef<ChunkNum>) -> Vec<u8> {
         let size = ByteNum(data.len() as u64);
         let chunks = size.chunks();
-        // todo: fix this hack to deal with non overlapping ranges
-        let mut ranges: RangeSet2<_> = ranges.intersection(&RangeSet2::from(ChunkNum(0)..chunks));
-        println!("start {:?}", ranges);
-        if ranges.is_empty() {
-            ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..chunks);
+        if ranges.intersects(ChunkNum(0)..chunks) {
+            Self::encode_slice_impl(data, outboard, ranges)
+        } else {
+            // If the range doesn't intersect with the data, ask for the last chunk
+            // this is so it matches the behavior of bao
+            let ranges = RangeSet::from(ChunkNum(chunks.0.saturating_sub(1))..chunks);
+            Self::encode_slice_impl(data, outboard, &ranges)
         }
-        println!("corrected {:?} {:?} {:?}", ranges, chunks, size);
-        Self::encode_slice_impl(data, outboard, ranges)
     }
 
-    fn encode_slice_impl(
-        data: &[u8],
-        outboard: &[u8],
-        ranges: impl AbstractRangeSet<ChunkNum>,
-    ) -> Vec<u8> {
+    fn encode_slice_impl(data: &[u8], outboard: &[u8], ranges: &RangeSetRef<ChunkNum>) -> Vec<u8> {
         let mut res = Vec::new();
         let tree = Self::new(ByteNum(data.len() as u64), 0);
         res.extend_from_slice(&tree.size.0.to_le_bytes());
         for (node, tl, tr) in tree.iterate_part_preorder(ranges) {
-            if let Some(offset) = tree.post_order_offset(node) {
+            if let Some(offset) = tree.post_order_offset(node).value() {
                 let hash_offset = (offset * 64).to_usize();
                 res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
             }
             if let Some(leaf) = node.as_leaf() {
-                let (l, r) = tree.leaf_ranges2(leaf);
+                let (l, r) = tree.leaf_byte_ranges2(leaf);
                 if tl {
                     res.extend_from_slice(&data[l.start.to_usize()..l.end.to_usize()]);
                 }
@@ -220,7 +211,20 @@ impl BaoTree {
         res
     }
 
-    fn leaf_ranges(
+    /// Compute the byte range for a leaf node
+    fn leaf_byte_range(&self, leaf: LeafNode) -> Range<ByteNum> {
+        let chunk_group_bytes = self.chunk_group_bytes();
+        let start = chunk_group_bytes * leaf.0;
+        let end = start + chunk_group_bytes * 2;
+        debug_assert!(start < self.size || (start == 0 && self.size == 0));
+        start..end.min(self.size)
+    }
+
+    /// Compute the byte ranges for a leaf node
+    ///
+    /// Returns Ok((left, right)) if the leaf is fully contained in the tree
+    /// Returns Err(left) if the leaf is partially contained in the tree
+    fn leaf_byte_ranges(
         &self,
         leaf: LeafNode,
     ) -> std::result::Result<(Range<ByteNum>, Range<ByteNum>), Range<ByteNum>> {
@@ -236,7 +240,11 @@ impl BaoTree {
         }
     }
 
-    fn leaf_ranges2(&self, leaf: LeafNode) -> (Range<ByteNum>, Range<ByteNum>) {
+    /// Compute the byte ranges for a leaf node
+    ///
+    /// Returns two ranges, the first is the left range, the second is the right range
+    /// If the leaf is partially contained in the tree, the right range will be empty
+    fn leaf_byte_ranges2(&self, leaf: LeafNode) -> (Range<ByteNum>, Range<ByteNum>) {
         let chunk_group_bytes = self.chunk_group_bytes();
         let start = chunk_group_bytes * leaf.0;
         let mid = start + chunk_group_bytes;
@@ -248,6 +256,10 @@ impl BaoTree {
         )
     }
 
+    /// Compute the chunk ranges for a leaf node
+    ///
+    /// Returns two ranges, the first is the left range, the second is the right range
+    /// If the leaf is partially contained in the tree, the right range will be empty
     fn leaf_chunk_ranges2(&self, leaf: LeafNode) -> (Range<ChunkNum>, Range<ChunkNum>) {
         let max = self.chunks();
         let chunk_group_chunks = self.chunk_group_chunks();
@@ -256,14 +268,6 @@ impl BaoTree {
         let end = start + chunk_group_chunks * 2;
         debug_assert!(start < max || (start == 0 && self.size == 0));
         (start..mid.min(max), mid.min(max)..end.min(max))
-    }
-
-    fn leaf_range(&self, leaf: LeafNode) -> Range<ByteNum> {
-        let chunk_group_bytes = self.chunk_group_bytes();
-        let start = chunk_group_bytes * leaf.0;
-        let end = start + chunk_group_bytes * 2;
-        debug_assert!(start < self.size || (start == 0 && self.size == 0));
-        start..end.min(self.size)
     }
 
     /// iterate over all nodes in the tree in depth first, left to right, post order
@@ -290,7 +294,7 @@ impl BaoTree {
     /// that are required to validate the given ranges
     pub fn iterate_part_preorder(
         &self,
-        ranges: impl AbstractRangeSet<ChunkNum>,
+        ranges: &RangeSetRef<ChunkNum>,
     ) -> impl Iterator<Item = (TreeNode, bool, bool)> {
         let mut res = Vec::new();
         self.iterate_part_rec(self.root(), ranges, &mut res);
@@ -299,31 +303,34 @@ impl BaoTree {
 
     /// true if the given node is complete/sealed
     fn is_sealed(&self, node: TreeNode) -> bool {
-        node.byte_range().end <= self.size
+        node.byte_range(self.chunk_group_log).end <= self.size
     }
 
     fn bytes(&self, blocks: BlockNum) -> ByteNum {
         ByteNum(blocks.0 << (10 + self.chunk_group_log))
     }
 
-    fn post_order_offset(&self, node: TreeNode) -> Option<PONum> {
+    fn post_order_offset(&self, node: TreeNode) -> PostOrderOffset {
         if self.is_sealed(node) {
-            Some(node.post_order_offset())
+            PostOrderOffset::Stable(node.post_order_offset())
         } else {
             // a leaf node that only has data on the left is not persisted
             if node.is_leaf() && self.bytes(node.mid()) >= self.size.0 {
-                return None;
+                PostOrderOffset::Skip
+            } else {
+                // compute the offset based on the total size and the height of the node
+                self.outboard_hash_pairs()
+                    .checked_sub(u64::from(node.right_count()) + 1)
+                    .map(|i| PostOrderOffset::Unstable(PONum(i)))
+                    .unwrap_or(PostOrderOffset::Skip)
             }
-            self.outboard_hash_pairs()
-                .checked_sub(u64::from(node.right_count()) + 1)
-                .map(PONum)
         }
     }
 
     fn iterate_part_rec(
         &self,
         node: TreeNode,
-        ranges: impl AbstractRangeSet<ChunkNum>,
+        ranges: &RangeSetRef<ChunkNum>,
         res: &mut Vec<(TreeNode, bool, bool)>,
     ) {
         if ranges.is_empty() {
@@ -331,10 +338,8 @@ impl BaoTree {
         }
         if let Some(leaf) = node.as_leaf() {
             let (lr, rr) = self.leaf_chunk_ranges2(leaf);
-            let lr = RangeSet2::from(lr);
-            let rr = RangeSet2::from(rr);
-            let lt = !ranges.is_disjoint(&lr);
-            let rt = !ranges.is_disjoint(&rr);
+            let lt = ranges.intersects(lr);
+            let rt = ranges.intersects(rr);
             if lt || rt {
                 res.push((node, lt, rt));
             }
@@ -345,9 +350,7 @@ impl BaoTree {
             let r = node.right_descendant(valid_nodes).unwrap();
             // chunk offset of the middle
             let mid = ChunkNum((node.0 + 1) << self.chunk_group_log);
-            // todo: optimize this to just partition
-            let l_ranges: RangeSet2<ChunkNum> = ranges.intersection(&RangeSet2::from(..mid));
-            let r_ranges: RangeSet2<ChunkNum> = ranges.intersection(&RangeSet2::from(mid..));
+            let (l_ranges, r_ranges) = ranges.split(mid);
             self.iterate_part_rec(l, l_ranges, res);
             self.iterate_part_rec(r, r_ranges, res);
         }
@@ -363,11 +366,23 @@ impl BaoTree {
 }
 
 impl ByteNum {
+    /// number of chunks that this number of bytes covers
     pub const fn chunks(&self) -> ChunkNum {
         let mask = (1 << 10) - 1;
         let part = ((self.0 & mask) != 0) as u64;
         let whole = self.0 >> 10;
         ChunkNum(whole + part)
+    }
+
+    /// number of blocks that this number of bytes covers,
+    /// given a block size of `2^chunk_group_log` chunks
+    pub const fn blocks(&self, chunk_group_log: u8) -> BlockNum {
+        let size = self.0;
+        let block_bits = chunk_group_log + 10;
+        let block_mask = (1 << block_bits) - 1;
+        let full_blocks = size >> block_bits;
+        let open_block = ((size & block_mask) != 0) as u64;
+        BlockNum(full_blocks + open_block)
     }
 }
 
@@ -381,157 +396,11 @@ fn is_odd(x: usize) -> bool {
     x & 1 == 1
 }
 
-struct GenericRange {
-    min: Option<u64>,
-    max: Option<u64>,
-}
-
-impl RangeBounds<u64> for GenericRange {
-    fn start_bound(&self) -> Bound<&u64> {
-        match &self.min {
-            Some(x) => Bound::Included(x),
-            None => Bound::Unbounded,
-        }
-    }
-
-    fn end_bound(&self) -> Bound<&u64> {
-        match &self.max {
-            Some(x) => Bound::Excluded(x),
-            None => Bound::Unbounded,
-        }
-    }
-}
-
-struct RangeSetRef<'a> {
-    /// If true, the set contains all values below the first boundary.
-    below: bool,
-    /// The boundaries of the set. Every boundary is a state change.
-    /// The value changes before the boundary.
-    boundaries: &'a [u64],
-}
-
-impl RangeSetRef<'_> {
-    fn new(below: bool, boundaries: &[u64]) -> RangeSetRef {
-        // debug_assert!(boundaries.is_sorted());
-        RangeSetRef { below, boundaries }
-    }
-
-    fn partition(&self, x: u64) -> (RangeSetRef, RangeSetRef) {
-        match self.boundaries.binary_search(&x) {
-            Ok(i) => {
-                let (left, right) = self.boundaries.split_at(i);
-                (
-                    RangeSetRef::new(self.below ^ is_odd(i), left),
-                    RangeSetRef::new(self.below ^ !is_odd(i), right),
-                )
-            }
-            Err(i) => {
-                let (left, right) = self.boundaries.split_at(i);
-                (
-                    RangeSetRef::new(self.below ^ !is_odd(i), left),
-                    RangeSetRef::new(self.below ^ is_odd(i), right),
-                )
-            }
-        }
-    }
-
-    fn serialize(&self) -> (bool, impl Iterator<Item = NonZeroU64> + '_) {
-        let below = self.below;
-        let iter = (0..self.boundaries.len().checked_sub(1).unwrap_or_default()).map(move |i| {
-            let min = self.boundaries[i];
-            let max = self.boundaries[i + 1];
-            NonZeroU64::new(max - min).unwrap()
-        });
-        (below, iter)
-    }
-
-    fn range(&self) -> impl RangeBounds<u64> {
-        GenericRange {
-            min: self.min(),
-            max: self.max(),
-        }
-    }
-
-    fn contains(&self, x: u64) -> bool {
-        match self.boundaries.binary_search(&x) {
-            Ok(i) => self.below ^ is_odd(i),
-            Err(i) => self.below ^ !is_odd(i),
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.boundaries.is_empty() && !self.below
-    }
-
-    fn is_all(&self) -> bool {
-        self.boundaries.is_empty() && self.below
-    }
-
-    fn limit(&self, bounds: impl RangeBounds<u64>) -> Self {
-        let min = match bounds.start_bound() {
-            Bound::Included(&x) => Some(x),
-            Bound::Excluded(&x) => x.checked_add(1),
-            Bound::Unbounded => None,
-        };
-        let max = match bounds.end_bound() {
-            Bound::Included(&x) => x.checked_add(1),
-            Bound::Excluded(&x) => Some(x),
-            Bound::Unbounded => None,
-        };
-        self.limit_impl(min, max)
-    }
-
-    #[inline(always)]
-    fn limit_impl(&self, min: Option<u64>, max: Option<u64>) -> Self {
-        let mut below = self.below;
-        let mut boundaries = self.boundaries;
-        if let (Some(min), Some(max)) = (min, max) {
-            debug_assert!(min < max);
-        }
-        if let Some(min) = min {
-            let i = boundaries.binary_search(&min).unwrap_or_else(|i| i);
-            boundaries = &boundaries[i..];
-            below = below ^ is_odd(i);
-        }
-        if let Some(max) = max {
-            let i = boundaries.binary_search(&max).unwrap_or_else(|i| i);
-            boundaries = &boundaries[..i];
-        }
-        Self::new(below, boundaries)
-    }
-
-    fn min(&self) -> Option<u64> {
-        if !self.below {
-            self.boundaries.first().copied()
-        } else {
-            None
-        }
-    }
-
-    fn max(&self) -> Option<u64> {
-        let flip = is_odd(self.boundaries.len());
-        let above = self.below ^ flip;
-        if !above {
-            self.boundaries.last().copied()
-        } else {
-            None
-        }
-    }
-}
-
 type Parent = (blake3::Hash, blake3::Hash);
 
 struct Outboard {
     stable: Vec<Parent>,
     unstable: Vec<Parent>,
-}
-
-fn root(leafs: ChunkNum) -> TreeNode {
-    TreeNode(root0(leafs))
-}
-
-fn root0(leafs: ChunkNum) -> u64 {
-    leafs.0.next_power_of_two() - 1
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -543,6 +412,13 @@ pub struct LeafNode(u64);
 impl From<LeafNode> for TreeNode {
     fn from(leaf: LeafNode) -> TreeNode {
         Self(leaf.0)
+    }
+}
+
+impl LeafNode {
+    #[inline]
+    pub fn block_range(&self) -> Range<BlockNum> {
+        BlockNum(self.0)..BlockNum(self.0 + 2)
     }
 }
 
@@ -575,34 +451,13 @@ impl TreeNode {
     }
 
     /// Given a number of chunks, gives root node
-    fn root(chunks: ChunkNum) -> TreeNode {
-        TreeNode(((chunks.0 + 1) / 2).next_power_of_two() - 1)
+    fn root(blocks: BlockNum) -> TreeNode {
+        Self(((blocks.0 + 1) / 2).next_power_of_two() - 1)
     }
 
     // the middle of the tree node, in blocks
     fn mid(&self) -> BlockNum {
-        ChunkNum(self.0 + 1)
-    }
-
-    fn iterate(nn: Self, len: TreeNode, s: RangeSetRef, res: &mut Vec<Self>) {
-        if s.is_empty() {
-            return;
-        }
-        if s.is_all() {
-            res.push(nn);
-            return;
-        }
-        if nn.is_leaf() {
-            res.push(nn);
-            return;
-        } else {
-            let mid = nn.0 + 1;
-            let (sl, sr) = s.partition(mid);
-            let l = nn.left_child().unwrap();
-            let r = nn.right_descendant(len).unwrap();
-            Self::iterate(l, len, sl, res);
-            Self::iterate(r, len, sr, res);
-        }
+        BlockNum(self.0 + 1)
     }
 
     #[inline]
@@ -620,17 +475,15 @@ impl TreeNode {
         self.level() == 0
     }
 
+    pub fn byte_range(&self, chunk_group_log: u8) -> Range<ByteNum> {
+        let range = self.block_range();
+        let shift = 10 + chunk_group_log;
+        ByteNum(range.start.0 << shift)..ByteNum(range.end.0 << shift)
+    }
+
     pub const fn as_leaf(&self) -> Option<LeafNode> {
         if self.is_leaf() {
             Some(LeafNode(self.0))
-        } else {
-            None
-        }
-    }
-
-    pub const fn leaf_number(&self) -> Option<ChunkNum> {
-        if self.is_leaf() {
-            Some(ChunkNum(self.0))
         } else {
             None
         }
@@ -682,31 +535,18 @@ impl TreeNode {
 
     pub fn block_range(&self) -> Range<BlockNum> {
         let Range { start, end } = self.block_range0();
-        ChunkNum(start)..ChunkNum(end)
-    }
-
-    pub fn byte_range(&self) -> Range<ByteNum> {
-        // todo: remove
-        // assumes constant chunk size, and does not consider end
-        let Range { start, end } = self.block_range0();
-        ByteNum(start * BLAKE3_CHUNK_SIZE)..ByteNum(end * BLAKE3_CHUNK_SIZE)
+        BlockNum(start)..BlockNum(end)
     }
 
     /// Range of blocks this node covers
     const fn block_range0(&self) -> Range<u64> {
         let level = self.level();
         let nn = self.0;
-        match level.checked_sub(1) {
-            Some(l) => {
-                let span = 2 << l;
-                let mid = nn + 1;
-                mid - span..mid + span
-            }
-            None => {
-                let mid = nn;
-                mid..mid + 2
-            }
-        }
+        let span = 1 << level;
+        let mid = nn + 1;
+        // at level 0 (leaf), range will be nn..nn+2
+        // at level >0 (branch), range will be centered on nn+1
+        mid - span..mid + span
     }
 
     pub fn post_order_offset(&self) -> PONum {
@@ -767,119 +607,6 @@ impl Outboard {
     }
 }
 
-pub fn post_order_outboard(data: &[u8]) -> Vec<(blake3::Hash, blake3::Hash)> {
-    let has_incomplete = data.len() % 1024 != 0;
-    let chunks = ChunkNum((data.len() / 1024 + has_incomplete as usize).max(1) as u64);
-    let nodes = TreeNode::filled_size(chunks);
-    let root = TreeNode::root(chunks);
-    let incomplete = chunks.0.count_ones().saturating_sub(1) as usize;
-    let os = (chunks.0 - 1) as usize;
-    let mut res = Outboard {
-        stable: vec![(blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32])); os - incomplete],
-        unstable: vec![(blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32])); incomplete],
-    };
-    post_order_outboard_rec(data, nodes, root, true, incomplete, &mut res);
-    let mut t = res.stable;
-    t.extend_from_slice(&res.unstable);
-    t
-}
-
-fn post_order_outboard_rec(
-    data: &[u8],
-    valid_nodes: TreeNode,
-    nn: TreeNode,
-    is_root: bool,
-    incomplete: usize,
-    res: &mut Outboard,
-) -> blake3::Hash {
-    let (lh, rh) = if nn.is_leaf() {
-        let chunk_range = nn.block_range();
-        let range = nn.byte_range();
-        let mut data = &data[range.start.to_usize()..];
-        if data.len() <= 1024 {
-            return hash_chunk(chunk_range.start, data, is_root);
-        } else {
-            if data.len() > 2048 {
-                data = &data[..2048];
-            }
-            let lh = hash_chunk(chunk_range.start, &data[..1024], false);
-            let rh = hash_chunk(chunk_range.start + 1, &data[1024..], false);
-            (lh, rh)
-        }
-    } else {
-        let left = nn.left_child().unwrap();
-        let right = nn.right_descendant(valid_nodes).unwrap();
-        let lh = post_order_outboard_rec(data, valid_nodes, left, false, 0, res);
-        let rh = post_order_outboard_rec(
-            data,
-            valid_nodes,
-            right,
-            false,
-            incomplete.saturating_sub(1),
-            res,
-        );
-        (lh, rh)
-    };
-    if incomplete > 0 {
-        res.unstable[incomplete - 1] = (lh, rh);
-    } else {
-        let offset = nn.post_order_offset();
-        res.stable[offset.to_usize()] = (lh, rh);
-    }
-    parent_cv(&lh, &rh, is_root)
-}
-
-pub fn blake3_hash(data: &[u8]) -> blake3::Hash {
-    let chunks = ChunkNum((data.len() / 1024 + if data.len() % 1024 != 0 { 1 } else { 0 }) as u64);
-    let nodes = TreeNode::filled_size(chunks);
-    let root = TreeNode::root(chunks);
-    blake3_hash_rec(data, nodes, root, true)
-}
-
-fn blake3_hash_rec(
-    data: &[u8],
-    valid_nodes: TreeNode,
-    nn: TreeNode,
-    is_root: bool,
-) -> blake3::Hash {
-    if nn.is_leaf() {
-        let chunk_range = nn.block_range();
-        let range = nn.byte_range();
-        let mut data = &data[range.start.to_usize()..];
-        if data.len() <= 1024 {
-            hash_chunk(chunk_range.start, &data, is_root)
-        } else {
-            if data.len() > 2048 {
-                data = &data[..2048];
-            }
-            let lh = hash_chunk(chunk_range.start, &data[..1024], false);
-            let rh = hash_chunk(chunk_range.start + 1, &data[1024..], false);
-            parent_cv(&lh, &rh, is_root)
-        }
-    } else {
-        let left = nn.left_child().unwrap();
-        let right = nn.right_descendant(valid_nodes).unwrap();
-        let lh = blake3_hash_rec(data, valid_nodes, left, false);
-        let rh = blake3_hash_rec(data, valid_nodes, right, false);
-        parent_cv(&lh, &rh, is_root)
-    }
-}
-
-fn post_order_offset(n: u64) -> u64 {
-    // compute level
-    let level = (n + 1).trailing_zeros();
-    // compute number of nodes below me
-    let below_me = (1 << (level + 1)) - 2;
-    // compute next ancestor that is to the left
-    let next_left_ancestor = ((n + 1) & !(1 << level)).checked_sub(1);
-    // compute offset
-    let offset = match next_left_ancestor {
-        Some(nla) => below_me + nla + 1 - ((nla + 1).count_ones() as u64),
-        None => below_me,
-    };
-    offset
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -891,10 +618,12 @@ mod tests {
     };
 
     use proptest::prelude::*;
-    use range_collections::RangeSet2;
 
-    use super::{blake3_hash, post_order_outboard, BaoTree, TreeNode};
-    use crate::tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE};
+    use super::{BaoTree, TreeNode};
+    use crate::{
+        range_set::RangeSet,
+        tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE},
+    };
 
     fn make_test_data(n: usize) -> Vec<u8> {
         let mut data = Vec::with_capacity(n);
@@ -902,12 +631,6 @@ mod tests {
             data.push((i / 1024) as u8);
         }
         data
-    }
-
-    fn compare_blake3_impl(data: Vec<u8>) {
-        let h1 = blake3_hash(&data);
-        let h2 = blake3::hash(&data);
-        assert_eq!(h1, h2);
     }
 
     fn bao_tree_blake3_impl(data: Vec<u8>) {
@@ -943,7 +666,7 @@ mod tests {
 
     fn bao_tree_encode_slice_impl(data: Vec<u8>, mut range: Range<u64>) {
         let expected = encode_slice_reference(&data, range.clone());
-        let (outboard, _hash) = BaoTree::outboard_post_order(&data);
+        let (outboard, _hash) = BaoTree::outboard_post_order(&data, 0);
         // extend empty range to contain at least 1 byte
         if range.start == range.end {
             range.end += 1;
@@ -951,7 +674,7 @@ mod tests {
         let actual = BaoTree::encode_slice(
             &data,
             &outboard,
-            RangeSet2::from(ChunkNum(range.start)..ChunkNum(range.end)),
+            &RangeSet::from(ChunkNum(range.start)..ChunkNum(range.end)),
         );
         if expected.len() != actual.len() {
             println!("expected");
@@ -965,72 +688,31 @@ mod tests {
 
     fn bao_tree_outboard_impl(data: Vec<u8>) {
         let (expected, expected_hash) = post_order_outboard_reference(&data);
-        let (actual, actual_hash) = BaoTree::outboard_post_order(&data);
+        let (actual, actual_hash) = BaoTree::outboard_post_order(&data, 0);
         assert_eq!(expected_hash, actual_hash);
         assert_eq!(expected, actual);
     }
 
     fn bao_tree_slice_impl(data: Vec<u8>) {
         let (expected, expected_hash) = post_order_outboard_reference(&data);
-        let (actual, actual_hash) = BaoTree::outboard_post_order(&data);
+        let (actual, actual_hash) = BaoTree::outboard_post_order(&data, 0);
         assert_eq!(expected_hash, actual_hash);
         assert_eq!(expected, actual);
-    }
-
-    fn compare_bao_outboard_impl(data: Vec<u8>) {
-        let mut storage = Vec::new();
-        let cursor = std::io::Cursor::new(&mut storage);
-        let mut encoder = abao::encode::Encoder::new_outboard(cursor);
-        encoder.write_all(&data).unwrap();
-        encoder.finalize_post_order().unwrap();
-
-        println!("{}", storage.len() / 64);
-        let hashes1 = post_order_outboard(&data);
-        let mut data1 = hashes1
-            .iter()
-            .map(|(l, r)| {
-                let mut res = [0; 64];
-                res[..32].copy_from_slice(l.as_bytes());
-                res[32..].copy_from_slice(r.as_bytes());
-                res
-            })
-            .flatten()
-            .collect::<Vec<_>>();
-        data1.extend_from_slice((data.len() as u64).to_le_bytes().as_ref());
-
-        println!("{} {} {}", data.len(), data1.len(), storage.len());
-        println!("{}", hex::encode(&data1));
-        println!("{}", hex::encode(&storage));
-        assert_eq!(data1, storage);
-    }
-
-    #[test]
-    fn compare_bao_outboard_0() {
-        // compare_bao_outboard_impl(vec![]);
-        compare_bao_outboard_impl(vec![0; 1]);
-        compare_bao_outboard_impl(vec![0; 1023]);
-        compare_bao_outboard_impl(vec![0; 1024]);
-        compare_bao_outboard_impl(vec![0; 1025]);
-        compare_bao_outboard_impl(vec![0; 2047]);
-        compare_bao_outboard_impl(vec![0; 2048]);
-        compare_bao_outboard_impl(vec![0; 2049]);
-        compare_bao_outboard_impl(vec![0; 10000]);
-        compare_bao_outboard_impl(vec![0; 20000]);
     }
 
     #[test]
     fn bao_tree_outboard_0() {
         use make_test_data as td;
-        bao_tree_outboard_impl(vec![]);
-        bao_tree_outboard_impl(vec![0; 1]);
-        bao_tree_outboard_impl(vec![0; 1023]);
-        bao_tree_outboard_impl(vec![0; 1024]);
-        bao_tree_outboard_impl(vec![0; 1025]);
-        bao_tree_outboard_impl(vec![0; 2047]);
-        bao_tree_outboard_impl(vec![0; 2048]);
-        bao_tree_outboard_impl(vec![0; 2049]);
-        bao_tree_outboard_impl(vec![0; 10000]);
-        bao_tree_outboard_impl(vec![0; 20000]);
+        bao_tree_outboard_impl(td(0));
+        bao_tree_outboard_impl(td(1));
+        bao_tree_outboard_impl(td(1023));
+        bao_tree_outboard_impl(td(1024));
+        bao_tree_outboard_impl(td(1025));
+        bao_tree_outboard_impl(td(2047));
+        bao_tree_outboard_impl(td(2048));
+        bao_tree_outboard_impl(td(2049));
+        bao_tree_outboard_impl(td(10000));
+        bao_tree_outboard_impl(td(20000));
         bao_tree_outboard_impl(td(24577));
     }
 
@@ -1053,19 +735,6 @@ mod tests {
         // bao_tree_encode_slice_impl(td(2048), 1..2);
         // bao_tree_encode_slice_impl(td(10000), 1..2);
         // bao_tree_encode_slice_impl(td(20000), 1..2);
-    }
-
-    #[test]
-    fn compare_blake3_0() {
-        compare_blake3_impl(vec![]);
-        compare_blake3_impl(vec![0; 1]);
-        compare_blake3_impl(vec![0; 1023]);
-        compare_blake3_impl(vec![0; 1024]);
-        compare_blake3_impl(vec![0; 1025]);
-        compare_blake3_impl(vec![0; 2047]);
-        compare_blake3_impl(vec![0; 2048]);
-        compare_blake3_impl(vec![0; 2049]);
-        compare_blake3_impl(vec![0; 10000]);
     }
 
     #[test]
@@ -1111,10 +780,6 @@ mod tests {
     }
 
     proptest! {
-        #[test]
-        fn compare_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
-            compare_blake3_impl(data);
-        }
 
         #[test]
         fn bao_tree_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
@@ -1146,93 +811,6 @@ mod tests {
         fn bao_tree_outboard(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
             bao_tree_outboard_impl(data);
         }
-
-        #[test]
-        fn compare_bao_outboard(data in proptest::collection::vec(any::<u8>(), 0..32768 * 8)) {
-            compare_bao_outboard_impl(data);
-        }
-    }
-
-    #[test]
-    fn test_incomplete() {
-        fn incomplete(n: u64) -> u32 {
-            let has_incomplete = n & 1023 != 0;
-            let complete = n / 1024;
-            let chunks = complete + has_incomplete as u64;
-            let res = chunks.count_ones().saturating_sub(1);
-            res
-        }
-        for i in 0..17 {
-            println!("{}k\t{}", i, incomplete(i * 1024));
-        }
-        println!();
-        for i in 1..17 {
-            println!("{}k-1\t{}", i, incomplete(i * 1024 - 1));
-        }
-        assert_eq!(incomplete(0 * 1024), 0);
-        assert_eq!(incomplete(1 * 1024), 0);
-        assert_eq!(incomplete(2 * 1024), 0);
-        assert_eq!(incomplete(3 * 1024), 1);
-        assert_eq!(incomplete(4 * 1024), 0);
-        assert_eq!(incomplete(5 * 1024), 1);
-        assert_eq!(incomplete(6 * 1024), 1);
-        assert_eq!(incomplete(7 * 1024), 2);
-        assert_eq!(incomplete(8 * 1024), 0);
-        assert_eq!(incomplete(9 * 1024), 1);
-
-        assert_eq!(incomplete(1 * 1024 - 1), 0);
-        assert_eq!(incomplete(2 * 1024 - 1), 1);
-        assert_eq!(incomplete(3 * 1024 - 1), 1);
-        assert_eq!(incomplete(4 * 1024 - 1), 2);
-        assert_eq!(incomplete(5 * 1024 - 1), 2);
-        assert_eq!(incomplete(6 * 1024 - 1), 2);
-        assert_eq!(incomplete(7 * 1024 - 1), 2);
-        assert_eq!(incomplete(8 * 1024 - 1), 3);
-        // 0 -> 0
-        // 1 -> 0
-        // 1023 -> 0
-        // 1024 -> 0
-        // 1025 -> 1
-        // 2047 -> 1
-        // 2048 -> 0
-        // 2049 -> 2
-    }
-
-    #[test]
-    fn bitmap_query() {
-        let mut elems = vec![None; 2000];
-        for i in 0..1000 {
-            let nn = TreeNode(i);
-            let o = nn.post_order_offset();
-            let level = nn.level();
-            let text = if level == 0 {
-                format!("c {:?} {:?}", nn.leaf_number().unwrap(), nn.block_range())
-            } else {
-                format!(
-                    "p ({:?}) ({:?}) ({:?})",
-                    nn.node_range(),
-                    nn.post_order_range(),
-                    nn.block_range()
-                )
-            };
-            elems[o.0 as usize] = Some(text);
-        }
-        for (i, elem) in elems.into_iter().take(50).enumerate() {
-            if let Some(text) = elem {
-                println!("{} {}", i, text);
-            } else {
-                println!();
-            }
-        }
-
-        for i in 0..100 {
-            println!(
-                "{} {:?} {:?}",
-                i,
-                TreeNode::filled_size(ChunkNum(i)),
-                TreeNode::root(ChunkNum(i))
-            );
-        }
     }
 
     #[test]
@@ -1253,7 +831,8 @@ mod tests {
     fn bao_tree_iterate_part() {
         let tree = BaoTree::new(ByteNum(1024 * 5), 0);
         println!();
-        for (node, ..) in tree.iterate_part_preorder(RangeSet2::from(ChunkNum(2)..ChunkNum(3))) {
+        let spec = RangeSet::from(ChunkNum(2)..ChunkNum(3));
+        for (node, ..) in tree.iterate_part_preorder(&spec) {
             println!(
                 "{:#?}\t{}\t{:?}",
                 node,
