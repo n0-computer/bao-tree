@@ -6,16 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-async-recursion = "1.0.2"
-async-stream = "0.3.3"
-async-trait = "0.1.62"
 blake3 = "1.3.3"
-bytes = "1"
-futures = "0.3.25"
-memmap2 = "0.5.8"
-tokio = { version = "1.24.1", features = ["full"] }
-ref-cast = "1.0.15"
-num-traits = "0.2.15"
 range-collections = "0.4.0"
 
 [dev-dependencies]
