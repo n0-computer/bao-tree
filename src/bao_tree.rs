@@ -213,8 +213,7 @@ impl BaoTree {
         let tree = Self::new(size, 0);
         let mut is_root = true;
         for (node, tl, tr) in tree.iterate_part_preorder(ranges) {
-            let has_parent = tree.is_persisted(node);
-            if has_parent {
+            if tree.is_persisted(node) {
                 let (parent, rest) = remaining.split_at(64);
                 remaining = rest;
                 let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&parent[..32]).unwrap());
@@ -229,9 +228,12 @@ impl BaoTree {
                     )));
                     break;
                 }
+                // Push the children in reverse order so they are popped in the correct order
+                // only push right if the range intersects with the right child
                 if tr {
                     stack.push(r_hash);
                 }
+                // only push left if the range intersects with the left child
                 if tl {
                     stack.push(l_hash);
                 }
@@ -255,7 +257,7 @@ impl BaoTree {
                     }
                     res.push(Ok((l_range.start, l_data)));
                 }
-                if tr {
+                if tr && r_range.start < size {
                     let r_hash = stack.pop().unwrap();
                     let r_size = (r_range.end - r_range.start).to_usize();
                     let (r_data, rest) = remaining.split_at(r_size);
@@ -865,7 +867,8 @@ mod tests {
         // bao_tree_decode_slice_impl(td(2048), 0..2);
         // bao_tree_encode_slice_impl(td(24 * 1024 + 1), 0..25);
         // bao_tree_decode_slice_impl(td(1025), 0..1);
-        bao_tree_decode_slice_impl(td(1025), 1..2);
+        // bao_tree_decode_slice_impl(td(1025), 1..2);
+        bao_tree_decode_slice_impl(td(1024 * 17), 0..18);
     }
 
     #[test]
