@@ -213,25 +213,30 @@ impl BaoTree {
         let tree = Self::new(size, 0);
         let mut is_root = true;
         for (node, tl, tr) in tree.iterate_part_preorder(ranges) {
-            if let Some(leaf) = node.as_leaf() {
-                if tl && tr {
-                    let (parent, rest) = remaining.split_at(64);
-                    remaining = rest;
-                    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&parent[..32]).unwrap());
-                    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&parent[32..]).unwrap());
-                    let parent_hash = stack.pop().unwrap();
-                    let actual = parent_cv(&l_hash, &r_hash, is_root);
-                    is_root = false;
-                    if parent_hash != actual {
-                        res.push(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Hash mismatch",
-                        )));
-                        break;
-                    }
+            let has_parent = tree.is_persisted(node);
+            if has_parent {
+                let (parent, rest) = remaining.split_at(64);
+                remaining = rest;
+                let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&parent[..32]).unwrap());
+                let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&parent[32..]).unwrap());
+                let parent_hash = stack.pop().unwrap();
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                is_root = false;
+                if parent_hash != actual {
+                    res.push(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Hash mismatch",
+                    )));
+                    break;
+                }
+                if tr {
                     stack.push(r_hash);
+                }
+                if tl {
                     stack.push(l_hash);
                 }
+            }
+            if let Some(leaf) = node.as_leaf() {
                 let (l_range, r_range) = tree.leaf_byte_ranges2(leaf);
                 let start_chunk = tree.chunk_num(leaf);
                 if tl {
@@ -267,25 +272,7 @@ impl BaoTree {
                     }
                     res.push(Ok((l_range.start, r_data)));
                 }
-            } else {
-                let (parent, rest) = remaining.split_at(64);
-                remaining = rest;
-                let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&parent[..32]).unwrap());
-                let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&parent[32..]).unwrap());
-                let parent_hash = stack.pop().unwrap();
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
-                is_root = false;
-                if parent_hash != actual {
-                    res.push(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Hash mismatch",
-                    )));
-                    break;
-                }
-                stack.push(l_hash);
-                stack.push(r_hash);
             }
-            is_root = false;
         }
         res
     }
@@ -423,6 +410,14 @@ impl BaoTree {
         node.byte_range(self.chunk_group_log).end <= self.size
     }
 
+    /// true if the given node is persisted
+    ///
+    /// the only node that is not persisted is the last leaf node, if it is
+    /// less than half full
+    fn is_persisted(&self, node: TreeNode) -> bool {
+        !node.is_leaf() || self.bytes(node.mid()) < self.size.0
+    }
+
     fn bytes(&self, blocks: BlockNum) -> ByteNum {
         ByteNum(blocks.0 << (10 + self.chunk_group_log))
     }
@@ -432,7 +427,7 @@ impl BaoTree {
             PostOrderOffset::Stable(node.post_order_offset())
         } else {
             // a leaf node that only has data on the left is not persisted
-            if node.is_leaf() && self.bytes(node.mid()) >= self.size.0 {
+            if !self.is_persisted(node) {
                 PostOrderOffset::Skip
             } else {
                 // compute the offset based on the total size and the height of the node
@@ -865,7 +860,12 @@ mod tests {
         // bao_tree_decode_slice_impl(td(1), 0..1);
         // bao_tree_decode_slice_impl(td(1023), 0..1);
         // bao_tree_decode_slice_impl(td(1024), 0..1);
-        bao_tree_decode_slice_impl(td(1025), 0..2);
+        // bao_tree_decode_slice_impl(td(1025), 0..2);
+        // bao_tree_decode_slice_impl(td(2047), 0..2);
+        // bao_tree_decode_slice_impl(td(2048), 0..2);
+        // bao_tree_encode_slice_impl(td(24 * 1024 + 1), 0..25);
+        // bao_tree_decode_slice_impl(td(1025), 0..1);
+        bao_tree_decode_slice_impl(td(1025), 1..2);
     }
 
     #[test]
