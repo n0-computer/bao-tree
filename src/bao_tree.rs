@@ -1,8 +1,8 @@
 use crate::{
-    range_set::{RangeSet, RangeSetRef},
     tree::{hash_chunk, BlockNum, ByteNum, ChunkNum, PONum},
 };
 use blake3::guts::parent_cv;
+use range_collections::{RangeSetRef, RangeSet2};
 use std::{
     fmt::{self, Debug},
     ops::Range,
@@ -179,12 +179,12 @@ impl BaoTree {
     pub fn encode_slice(data: &[u8], outboard: &[u8], ranges: &RangeSetRef<ChunkNum>) -> Vec<u8> {
         let size = ByteNum(data.len() as u64);
         let chunks = size.chunks();
-        if ranges.intersects(ChunkNum(0)..chunks) {
+        if ranges.intersects(&RangeSet2::from(ChunkNum(0)..chunks)) {
             Self::encode_slice_impl(data, outboard, ranges)
         } else {
             // If the range doesn't intersect with the data, ask for the last chunk
             // this is so it matches the behavior of bao
-            let ranges = RangeSet::from(ChunkNum(chunks.0.saturating_sub(1))..chunks);
+            let ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..chunks);
             Self::encode_slice_impl(data, outboard, &ranges)
         }
     }
@@ -338,8 +338,10 @@ impl BaoTree {
         }
         if let Some(leaf) = node.as_leaf() {
             let (lr, rr) = self.leaf_chunk_ranges2(leaf);
-            let lt = ranges.intersects(lr);
-            let rt = ranges.intersects(rr);
+            let lr = RangeSet2::from(lr);
+            let rr = RangeSet2::from(rr);
+            let lt = ranges.intersects(&lr);
+            let rt = ranges.intersects(&rr);
             if lt || rt {
                 res.push((node, lt, rt));
             }
@@ -618,10 +620,10 @@ mod tests {
     };
 
     use proptest::prelude::*;
+    use range_collections::RangeSet2;
 
     use super::{BaoTree, TreeNode};
     use crate::{
-        range_set::RangeSet,
         tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE},
     };
 
@@ -674,7 +676,7 @@ mod tests {
         let actual = BaoTree::encode_slice(
             &data,
             &outboard,
-            &RangeSet::from(ChunkNum(range.start)..ChunkNum(range.end)),
+            &RangeSet2::from(ChunkNum(range.start)..ChunkNum(range.end)),
         );
         if expected.len() != actual.len() {
             println!("expected");
@@ -831,7 +833,7 @@ mod tests {
     fn bao_tree_iterate_part() {
         let tree = BaoTree::new(ByteNum(1024 * 5), 0);
         println!();
-        let spec = RangeSet::from(ChunkNum(2)..ChunkNum(3));
+        let spec = RangeSet2::from(ChunkNum(2)..ChunkNum(3));
         for (node, ..) in tree.iterate_part_preorder(&spec) {
             println!(
                 "{:#?}\t{}\t{:?}",

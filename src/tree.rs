@@ -3,6 +3,8 @@
 //! Most operations are concerned with node indexes in an in order traversal of a binary tree.
 use std::ops::{Add, Div, Mul, Range, Sub};
 
+use range_collections::range_set::RangeSetEntry;
+
 index_newtype! {
     /// A number of nodes in the tree
     ///
@@ -17,6 +19,16 @@ index_newtype! {
 index_newtype! {
     /// A number of <=1024 byte blake3 chunks
     pub struct ChunkNum(pub u64);
+}
+
+impl RangeSetEntry for ChunkNum {
+    fn min_value() -> Self {
+        ChunkNum(0)
+    }
+
+    fn is_min_value(&self) -> bool {
+        self.0 == 0
+    }
 }
 
 pub(crate) const BLAKE3_CHUNK_SIZE: u64 = 1024;
