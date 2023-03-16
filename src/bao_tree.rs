@@ -224,12 +224,13 @@ impl BaoTree {
         }
         let size = ByteNum(u64::from_le_bytes(encoded[..8].try_into().unwrap()));
         let chunks = size.chunks();
-        let res = if ranges.intersects(&RangeSet2::from(ChunkNum(0)..chunks)) {
+        let (ranges, _) = ranges.split(chunks);
+        let res = if !ranges.is_empty() {
             Self::decode_ranges_impl(root, &encoded[8..], size, ranges, chunk_group_log)
         } else {
             // If the range doesn't intersect with the data, ask for the last chunk
             // this is so it matches the behavior of bao
-            let ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..chunks);
+            let ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..);
             Self::decode_ranges_impl(root, &encoded[8..], size, &ranges, chunk_group_log)
         };
         res.into_iter()
@@ -247,7 +248,7 @@ impl BaoTree {
         let mut stack = vec![root];
         let tree = Self::new(size, chunk_group_log);
         let mut is_root = true;
-        for NodeInfo { node, tl, tr } in tree.iterate_part_preorder(ranges) {
+        for NodeInfo { node, tl, tr } in tree.iterate_part_preorder_ref(ranges) {
             if tree.is_persisted(node) {
                 let (parent, rest) = remaining.split_at(64);
                 remaining = rest;
@@ -325,12 +326,13 @@ impl BaoTree {
     ) -> Vec<u8> {
         let size = ByteNum(data.len() as u64);
         let chunks = size.chunks();
-        if ranges.intersects(&RangeSet2::from(ChunkNum(0)..chunks)) {
+        let (ranges, _) = ranges.split(chunks);
+        if !ranges.is_empty() {
             Self::encode_ranges_impl(data, outboard, ranges, chunk_group_log)
         } else {
             // If the range doesn't intersect with the data, ask for the last chunk
             // this is so it matches the behavior of bao
-            let ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..chunks);
+            let ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..);
             Self::encode_ranges_impl(data, outboard, &ranges, chunk_group_log)
         }
     }
@@ -344,7 +346,7 @@ impl BaoTree {
         let mut res = Vec::new();
         let tree = Self::new(ByteNum(data.len() as u64), chunk_group_log);
         res.extend_from_slice(&tree.size.0.to_le_bytes());
-        for NodeInfo { node, tl, tr } in tree.iterate_part_preorder(ranges) {
+        for NodeInfo { node, tl, tr } in tree.iterate_part_preorder_ref(ranges) {
             if let Some(offset) = tree.post_order_offset(node).value() {
                 let hash_offset = (offset * 64).to_usize();
                 res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
@@ -425,11 +427,18 @@ impl BaoTree {
         PostOrderTreeIter::new(*self)
     }
 
-    pub fn iterate_part_preorder<'a>(
+    pub fn iterate_part_preorder_ref<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
     ) -> impl Iterator<Item = NodeInfo> + 'a {
         PreOrderPartialIterRef::new(*self, ranges)
+    }
+
+    pub fn iterate_part_preorder<R: AsRef<RangeSetRef<ChunkNum>> + 'static>(
+        &self,
+        ranges: R,
+    ) -> impl Iterator<Item = NodeInfo> {
+        PreOrderPartialIter::new(*self, ranges)
     }
 
     /// iterate over all nodes in the tree in depth first, left to right, post order
@@ -458,7 +467,7 @@ impl BaoTree {
     ///
     /// Recursive reference implementation, just used in tests
     #[cfg(test)]
-    pub fn iterate_part_preorder_reference(&self, ranges: &RangeSetRef<ChunkNum>) -> Vec<NodeInfo> {
+    fn iterate_part_preorder_reference(&self, ranges: &RangeSetRef<ChunkNum>) -> Vec<NodeInfo> {
         fn iterate_part_rec(
             tree: &BaoTree,
             node: TreeNode,
@@ -815,9 +824,13 @@ impl NodeInfo {
     }
 }
 
+/// Iterator over all nodes in a BaoTree in pre-order that overlap with a given chunk range.
 pub struct PreOrderPartialIterRef<'a> {
+    /// the tree we want to traverse
     tree: BaoTree,
+    /// number of valid nodes, needed in node.right_descendant
     valid_nodes: TreeNode,
+    /// stack of nodes to visit
     stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
 }
 
@@ -876,6 +889,10 @@ struct OwnedIter<A: AsRef<RangeSetRef<ChunkNum>> + 'static> {
 pub struct PreOrderPartialIter<A: AsRef<RangeSetRef<ChunkNum>> + 'static>(OwnedIter<A>);
 
 impl<A: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<A> {
+
+    /// Create a new PreOrderPartialIter.
+    /// 
+    /// ranges has to implement AsRef<RangeSetRef<ChunkNum>>, so you can pass e.g. a RangeSet2.
     pub fn new(tree: BaoTree, ranges: A) -> Self {
         Self(
             OwnedIterBuilder {
@@ -884,6 +901,14 @@ impl<A: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<A> {
             }
             .build(),
         )
+    }
+}
+
+impl<A: AsRef<RangeSetRef<ChunkNum>> + 'static> Iterator for PreOrderPartialIter<A> {
+    type Item = NodeInfo;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.with_iter_mut(|x| x.next())
     }
 }
 
@@ -1257,8 +1282,10 @@ mod tests {
             let tree = BaoTree::new(len, 0);
             let chunk_range = start .. start + size;
             let iter1 = tree.iterate_part_preorder_reference(&RangeSet2::from(chunk_range.clone()));
-            let iter2 = tree.iterate_part_preorder(&RangeSet2::from(chunk_range)).collect::<Vec<_>>();
-            prop_assert_eq!(iter1, iter2);
+            let iter2 = tree.iterate_part_preorder_ref(&RangeSet2::from(chunk_range.clone())).collect::<Vec<_>>();
+            let iter3 = tree.iterate_part_preorder(RangeSet2::from(chunk_range)).collect::<Vec<_>>();
+            prop_assert_eq!(&iter1, &iter2);
+            prop_assert_eq!(&iter1, &iter3);
         }
     }
 
@@ -1281,7 +1308,7 @@ mod tests {
         let tree = BaoTree::new(ByteNum(1024 * 5), 0);
         println!();
         let spec = RangeSet2::from(ChunkNum(2)..ChunkNum(3));
-        for NodeInfo { node, .. } in tree.iterate_part_preorder(&spec) {
+        for NodeInfo { node, .. } in tree.iterate_part_preorder_ref(&spec) {
             println!(
                 "{:#?}\t{}\t{:?}",
                 node,
