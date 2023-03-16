@@ -17,7 +17,7 @@ pub struct BaoTree {
     /// Log base 2 of the chunk group size
     chunk_group_log: u8,
     /// start block of the tree, 0 for self-contained trees
-    start_block: BlockNum,
+    start_chunk: ChunkNum,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,7 +46,7 @@ impl BaoTree {
         BaoTree {
             size,
             chunk_group_log,
-            start_block: BlockNum(0),
+            start_chunk: ChunkNum(0),
         }
     }
 
@@ -212,7 +212,7 @@ impl BaoTree {
         let mut stack = vec![root];
         let tree = Self::new(size, 0);
         let mut is_root = true;
-        for (node, tl, tr) in tree.iterate_part_preorder(ranges) {
+        for NodeInfo { node, tl, tr } in tree.iterate_part_preorder(ranges) {
             if tree.is_persisted(node) {
                 let (parent, rest) = remaining.split_at(64);
                 remaining = rest;
@@ -299,7 +299,7 @@ impl BaoTree {
         let mut res = Vec::new();
         let tree = Self::new(ByteNum(data.len() as u64), 0);
         res.extend_from_slice(&tree.size.0.to_le_bytes());
-        for (node, tl, tr) in tree.iterate_part_preorder(ranges) {
+        for NodeInfo { node, tl, tr } in tree.iterate_part_preorder(ranges) {
             if let Some(offset) = tree.post_order_offset(node).value() {
                 let hash_offset = (offset * 64).to_usize();
                 res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
@@ -401,7 +401,7 @@ impl BaoTree {
     pub fn iterate_part_preorder(
         &self,
         ranges: &RangeSetRef<ChunkNum>,
-    ) -> impl Iterator<Item = (TreeNode, bool, bool)> {
+    ) -> impl Iterator<Item = NodeInfo> {
         let mut res = Vec::new();
         self.iterate_part_rec(self.root(), ranges, &mut res);
         res.into_iter()
@@ -445,7 +445,7 @@ impl BaoTree {
         &self,
         node: TreeNode,
         ranges: &RangeSetRef<ChunkNum>,
-        res: &mut Vec<(TreeNode, bool, bool)>,
+        res: &mut Vec<NodeInfo>,
     ) {
         if ranges.is_empty() {
             return;
@@ -455,7 +455,7 @@ impl BaoTree {
         // split the ranges into left and right
         let (l_ranges, r_ranges) = ranges.split(mid);
         // push no matter if leaf or not
-        res.push((node, !l_ranges.is_empty(), !r_ranges.is_empty()));
+        res.push(NodeInfo::new(node, !l_ranges.is_empty(), !r_ranges.is_empty()));
         // if not leaf, recurse
         if !node.is_leaf() {
             let valid_nodes = self.filled_size();
@@ -717,6 +717,22 @@ impl Outboard {
     }
 }
 
+pub struct NodeInfo {
+    /// the node
+    pub node: TreeNode,
+    /// left child intersects with the query range
+    pub tl: bool,
+    /// right child intersects with the query range
+    pub tr: bool,
+}
+
+impl NodeInfo {
+    /// Create a new NodeInfo
+    pub fn new(node: TreeNode, tl: bool, tr: bool) -> Self {
+        Self { node, tl, tr }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -729,7 +745,7 @@ mod tests {
     use range_collections::RangeSet2;
 
     use super::BaoTree;
-    use crate::tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE};
+    use crate::{tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE}, bao_tree::NodeInfo};
 
     fn make_test_data(n: usize) -> Vec<u8> {
         let mut data = Vec::with_capacity(n);
@@ -973,7 +989,7 @@ mod tests {
         let tree = BaoTree::new(ByteNum(1024 * 5), 0);
         println!();
         let spec = RangeSet2::from(ChunkNum(2)..ChunkNum(3));
-        for (node, ..) in tree.iterate_part_preorder(&spec) {
+        for NodeInfo { node, ..} in tree.iterate_part_preorder(&spec) {
             println!(
                 "{:#?}\t{}\t{:?}",
                 node,
