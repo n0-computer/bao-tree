@@ -1,4 +1,4 @@
-use crate::tree::{hash_chunk, BlockNum, ByteNum, ChunkNum, PONum};
+use crate::tree::{BlockNum, ByteNum, ChunkNum, PONum};
 use blake3::guts::parent_cv;
 use range_collections::{RangeSet2, RangeSetRef};
 use std::{
@@ -43,10 +43,14 @@ impl PostOrderOffset {
 impl BaoTree {
     /// Create a new BaoTree
     pub fn new(size: ByteNum, chunk_group_log: u8) -> BaoTree {
+        Self::new_internal(size, chunk_group_log, ChunkNum(0))
+    }
+
+    pub fn new_internal(size: ByteNum, chunk_group_log: u8, start_chunk: ChunkNum) -> BaoTree {
         BaoTree {
             size,
             chunk_group_log,
-            start_chunk: ChunkNum(0),
+            start_chunk,
         }
     }
 
@@ -95,13 +99,18 @@ impl BaoTree {
     pub fn chunk_num(&self, node: LeafNode) -> ChunkNum {
         // block number of a leaf node is just the node number
         // multiply by chunk_group_size to get the chunk number
-        ChunkNum(node.0 << self.chunk_group_log)
+        ChunkNum(node.0 << self.chunk_group_log) + self.start_chunk
     }
 
     /// Compute the post order outboard for the given data
+    /// 
     pub fn outboard_post_order(data: &[u8], chunk_group_log: u8) -> (Vec<u8>, blake3::Hash) {
+        Self::outboard_post_order_impl(data, chunk_group_log, ChunkNum(0))
+    }
+
+    fn outboard_post_order_impl(data: &[u8], chunk_group_log: u8, start_chunk: ChunkNum) -> (Vec<u8>, blake3::Hash) {
         let mut stack = Vec::<blake3::Hash>::with_capacity(16);
-        let tree = Self::new(ByteNum(data.len() as u64), chunk_group_log);
+        let tree = Self::new_internal(ByteNum(data.len() as u64), chunk_group_log, start_chunk);
         let root = tree.root();
         let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
         let mut res = Vec::with_capacity(outboard_len);
@@ -114,8 +123,8 @@ impl BaoTree {
                     Ok((l, r)) => {
                         let l_data = &data[l.start.to_usize()..l.end.to_usize()];
                         let r_data = &data[r.start.to_usize()..r.end.to_usize()];
-                        let l_hash = hash_chunk(chunk0, l_data, false);
-                        let r_hash = hash_chunk(chunk0 + cgc, r_data, false);
+                        let l_hash = hash_block(chunk0, l_data, false);
+                        let r_hash = hash_block(chunk0 + cgc, r_data, false);
                         res.extend_from_slice(l_hash.as_bytes());
                         res.extend_from_slice(r_hash.as_bytes());
                         parent_cv(&l_hash, &r_hash, is_root)
@@ -143,11 +152,19 @@ impl BaoTree {
 
     /// Compute the blake3 hash for the given data
     pub fn blake3_hash(data: &[u8]) -> blake3::Hash {
+        Self::blake3_hash_internal(data, ChunkNum(0), true)
+    }
+
+    /// Internal hash computation. This allows to also compute a non root hash, e.g. for a block
+    pub fn blake3_hash_internal(data: &[u8], start_chunk: ChunkNum, is_root: bool) -> blake3::Hash {
+        // todo: allocate on the stack
         let mut stack = Vec::with_capacity(16);
-        let tree = Self::new(ByteNum(data.len() as u64), 0);
+        let tree = Self::new_internal(ByteNum(data.len() as u64), 0, start_chunk);
         let root = tree.root();
+        let can_be_root = is_root;
         for node in tree.iterate() {
-            let is_root = node == root;
+            // if our is_root is not set, this can never be true
+            let is_root = can_be_root && node == root;
             let hash = if let Some(leaf) = node.as_leaf() {
                 let chunk0 = tree.chunk_num(leaf);
                 match tree.leaf_byte_ranges(leaf) {
@@ -272,7 +289,7 @@ impl BaoTree {
                         )));
                         break;
                     }
-                    res.push(Ok((l_range.start, r_data)));
+                    res.push(Ok((r_range.start, r_data)));
                 }
             }
         }
@@ -703,6 +720,27 @@ impl TreeNode {
     }
 }
 
+/// Hash a blake3 chunk.
+///
+/// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
+pub(crate) fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
+    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
+    let mut hasher = blake3::guts::ChunkState::new(chunk.0);
+    hasher.update(data);
+    hasher.finalize(is_root)
+}
+
+/// Hash a block.
+/// 
+/// `start_chunk` is the chunk index of the first chunk in the block, `data` is the block data, 
+/// and `is_root` is true if this is the only block.
+///
+/// It is up to the user to make sure `data.len() <= 1024 * 2^chunk_group_log`
+/// It does not make sense to set start_chunk to a value that is not a multiple of 2^chunk_group_log.
+pub(crate) fn hash_block(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
+    BaoTree::blake3_hash_internal(data, start_chunk, is_root)
+}
+
 impl Outboard {
     fn new() -> Outboard {
         Outboard {
@@ -745,7 +783,7 @@ mod tests {
     use range_collections::RangeSet2;
 
     use super::BaoTree;
-    use crate::{tree::{hash_chunk, ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE}, bao_tree::NodeInfo};
+    use crate::{tree::{ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE}, bao_tree::NodeInfo};
 
     fn make_test_data(n: usize) -> Vec<u8> {
         let mut data = Vec::with_capacity(n);
@@ -811,14 +849,15 @@ mod tests {
 
     /// range is a range of chunks. Just using u64 for convenience in tests
     fn bao_tree_decode_slice_impl(data: Vec<u8>, range: Range<u64>) {
-        let mut range = ChunkNum(range.start)..ChunkNum(range.end);
+        let range = ChunkNum(range.start)..ChunkNum(range.end);
         let (encoded, root) = encode_slice_reference(&data, range.clone());
         let expected = data;
-        let mut actual = Vec::new();
         for item in BaoTree::decode_ranges(root, &encoded, &RangeSet2::from(range)) {
-            let (pos, data) = item.unwrap();
-            actual.extend_from_slice(data);
+            let (pos, slice) = item.unwrap();
+            let pos = pos.to_usize();
+            assert_eq!(expected[pos..pos + slice.len()], *slice);
         }
+
     }
 
     fn bao_tree_outboard_impl(data: Vec<u8>) {
@@ -852,6 +891,17 @@ mod tests {
     }
 
     #[test]
+    fn bao_tree_outboard_levels() {
+        use make_test_data as td;
+        let td = td(1024 * 32);
+        let expected = BaoTree::blake3_hash(&td);
+        for chunk_group_log in 0..4 {
+            let (outboard, hash) = BaoTree::outboard_post_order(&td, chunk_group_log);
+            assert_eq!(expected, hash);
+        }
+    }
+
+    #[test]
     fn bao_tree_encode_slice_0() {
         use make_test_data as td;
         bao_tree_encode_slice_impl(td(0), 0..1);
@@ -874,16 +924,16 @@ mod tests {
     #[test]
     fn bao_tree_decode_slice_0() {
         use make_test_data as td;
-        // bao_tree_decode_slice_impl(td(0), 0..1);
-        // bao_tree_decode_slice_impl(td(1), 0..1);
-        // bao_tree_decode_slice_impl(td(1023), 0..1);
-        // bao_tree_decode_slice_impl(td(1024), 0..1);
-        // bao_tree_decode_slice_impl(td(1025), 0..2);
-        // bao_tree_decode_slice_impl(td(2047), 0..2);
-        // bao_tree_decode_slice_impl(td(2048), 0..2);
-        // bao_tree_encode_slice_impl(td(24 * 1024 + 1), 0..25);
-        // bao_tree_decode_slice_impl(td(1025), 0..1);
-        // bao_tree_decode_slice_impl(td(1025), 1..2);
+        bao_tree_decode_slice_impl(td(0), 0..1);
+        bao_tree_decode_slice_impl(td(1), 0..1);
+        bao_tree_decode_slice_impl(td(1023), 0..1);
+        bao_tree_decode_slice_impl(td(1024), 0..1);
+        bao_tree_decode_slice_impl(td(1025), 0..2);
+        bao_tree_decode_slice_impl(td(2047), 0..2);
+        bao_tree_decode_slice_impl(td(2048), 0..2);
+        bao_tree_encode_slice_impl(td(24 * 1024 + 1), 0..25);
+        bao_tree_decode_slice_impl(td(1025), 0..1);
+        bao_tree_decode_slice_impl(td(1025), 1..2);
         bao_tree_decode_slice_impl(td(1024 * 17), 0..18);
     }
 

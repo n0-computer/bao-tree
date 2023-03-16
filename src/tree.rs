@@ -212,13 +212,3 @@ pub fn leaf_byte_range(
 pub fn leaf_size(index: BlockNum, block_level: BlockLevel, data_len: ByteNum) -> ByteNum {
     block_size(block_level).min(data_len - index.to_bytes(block_level))
 }
-
-/// Hash a blake3 chunk.
-///
-/// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
-pub(crate) fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
-    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
-    let mut hasher = blake3::guts::ChunkState::new(chunk.0);
-    hasher.update(data);
-    hasher.finalize(is_root)
-}
