@@ -21,16 +21,6 @@ index_newtype! {
     pub struct ChunkNum(pub u64);
 }
 
-impl RangeSetEntry for ChunkNum {
-    fn min_value() -> Self {
-        ChunkNum(0)
-    }
-
-    fn is_min_value(&self) -> bool {
-        self.0 == 0
-    }
-}
-
 pub(crate) const BLAKE3_CHUNK_SIZE: u64 = 1024;
 
 index_newtype! {

@@ -12,6 +12,15 @@ macro_rules! index_newtype {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(pub $wrapped);
 
+        impl RangeSetEntry for $name {
+            fn min_value() -> Self {
+                $name(0)
+            }
+
+            fn is_min_value(&self) -> bool {
+                self.0 == 0
+            }
+        }
 
         impl Mul<$wrapped> for $name {
             type Output = $name;
