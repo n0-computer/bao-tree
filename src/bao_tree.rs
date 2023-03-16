@@ -90,6 +90,11 @@ impl BaoTree {
         self.blocks().0 - 1
     }
 
+    pub fn outboard_size(size: ByteNum, chunk_group_log: u8) -> ByteNum {
+        let tree = Self::new(size, chunk_group_log);
+        ByteNum(tree.outboard_hash_pairs() * 64 + 8)
+    }
+
     fn filled_size(&self) -> TreeNode {
         let blocks = self.blocks();
         let n = (blocks.0 + 1) / 2;
@@ -103,12 +108,16 @@ impl BaoTree {
     }
 
     /// Compute the post order outboard for the given data
-    /// 
+    ///
     pub fn outboard_post_order(data: &[u8], chunk_group_log: u8) -> (Vec<u8>, blake3::Hash) {
         Self::outboard_post_order_impl(data, chunk_group_log, ChunkNum(0))
     }
 
-    fn outboard_post_order_impl(data: &[u8], chunk_group_log: u8, start_chunk: ChunkNum) -> (Vec<u8>, blake3::Hash) {
+    fn outboard_post_order_impl(
+        data: &[u8],
+        chunk_group_log: u8,
+        start_chunk: ChunkNum,
+    ) -> (Vec<u8>, blake3::Hash) {
         let mut stack = Vec::<blake3::Hash>::with_capacity(16);
         let tree = Self::new_internal(ByteNum(data.len() as u64), chunk_group_log, start_chunk);
         let root = tree.root();
@@ -472,7 +481,11 @@ impl BaoTree {
         // split the ranges into left and right
         let (l_ranges, r_ranges) = ranges.split(mid);
         // push no matter if leaf or not
-        res.push(NodeInfo::new(node, !l_ranges.is_empty(), !r_ranges.is_empty()));
+        res.push(NodeInfo::new(
+            node,
+            !l_ranges.is_empty(),
+            !r_ranges.is_empty(),
+        ));
         // if not leaf, recurse
         if !node.is_leaf() {
             let valid_nodes = self.filled_size();
@@ -731,8 +744,8 @@ pub(crate) fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3:
 }
 
 /// Hash a block.
-/// 
-/// `start_chunk` is the chunk index of the first chunk in the block, `data` is the block data, 
+///
+/// `start_chunk` is the chunk index of the first chunk in the block, `data` is the block data,
 /// and `is_root` is true if this is the only block.
 ///
 /// It is up to the user to make sure `data.len() <= 1024 * 2^chunk_group_log`
@@ -783,7 +796,10 @@ mod tests {
     use range_collections::RangeSet2;
 
     use super::BaoTree;
-    use crate::{tree::{ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE}, bao_tree::NodeInfo};
+    use crate::{
+        bao_tree::NodeInfo,
+        tree::{ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE},
+    };
 
     fn make_test_data(n: usize) -> Vec<u8> {
         let mut data = Vec::with_capacity(n);
@@ -857,7 +873,6 @@ mod tests {
             let pos = pos.to_usize();
             assert_eq!(expected[pos..pos + slice.len()], *slice);
         }
-
     }
 
     fn bao_tree_outboard_impl(data: Vec<u8>) {
@@ -867,12 +882,7 @@ mod tests {
         assert_eq!(expected, actual);
     }
 
-    fn bao_tree_slice_impl(data: Vec<u8>) {
-        let (expected, expected_hash) = post_order_outboard_reference(&data);
-        let (actual, actual_hash) = BaoTree::outboard_post_order(&data, 0);
-        assert_eq!(expected_hash, actual_hash);
-        assert_eq!(expected, actual);
-    }
+    fn bao_tree_outboard_slice_roundtrip_impl(data: Vec<u8>, level: u8) {}
 
     #[test]
     fn bao_tree_outboard_0() {
@@ -898,6 +908,10 @@ mod tests {
         for chunk_group_log in 0..4 {
             let (outboard, hash) = BaoTree::outboard_post_order(&td, chunk_group_log);
             assert_eq!(expected, hash);
+            assert_eq!(
+                ByteNum(outboard.len() as u64),
+                BaoTree::outboard_size(ByteNum(td.len() as u64), chunk_group_log)
+            );
         }
     }
 
@@ -1039,7 +1053,7 @@ mod tests {
         let tree = BaoTree::new(ByteNum(1024 * 5), 0);
         println!();
         let spec = RangeSet2::from(ChunkNum(2)..ChunkNum(3));
-        for NodeInfo { node, ..} in tree.iterate_part_preorder(&spec) {
+        for NodeInfo { node, .. } in tree.iterate_part_preorder(&spec) {
             println!(
                 "{:#?}\t{}\t{:?}",
                 node,
