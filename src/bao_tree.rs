@@ -481,11 +481,11 @@ impl BaoTree {
             // split the ranges into left and right
             let (l_ranges, r_ranges) = ranges.split(mid);
             // push no matter if leaf or not
-            res.push(NodeInfo::new(
+            res.push(NodeInfo {
                 node,
-                !l_ranges.is_empty(),
-                !r_ranges.is_empty(),
-            ));
+                tl: !l_ranges.is_empty(),
+                tr: !r_ranges.is_empty(),
+            });
             // if not leaf, recurse
             if !node.is_leaf() {
                 let valid_nodes = tree.filled_size();
@@ -863,11 +863,16 @@ pub struct NodeInfo {
     pub tr: bool,
 }
 
-impl NodeInfo {
-    /// Create a new NodeInfo
-    pub fn new(node: TreeNode, tl: bool, tr: bool) -> Self {
-        Self { node, tl, tr }
-    }
+#[derive(Debug, PartialEq, Eq)]
+pub struct NodeInfo2 {
+    /// the node
+    pub node: TreeNode,
+    /// left child intersects with the query range
+    pub tl: bool,
+    /// right child intersects with the query range
+    pub tr: bool,
+    /// the node is fully included in the query range
+    pub full: bool,
 }
 
 /// Iterator over all nodes in a BaoTree in pre-order that overlap with a given chunk range.
@@ -914,33 +919,35 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
                 self.stack.push((l, l_ranges));
             }
             // emit the node in any case
-            break Some(NodeInfo::new(
+            break Some(NodeInfo {
                 node,
-                !l_ranges.is_empty(),
-                !r_ranges.is_empty(),
-            ));
+                tl: !l_ranges.is_empty(),
+                tr: !r_ranges.is_empty(),
+            });
         }
     }
 }
 
 #[self_referencing]
-struct OwnedIter<A: AsRef<RangeSetRef<ChunkNum>> + 'static> {
-    ranges: A,
+struct PreOrderPartialIterInner<R: 'static> {
+    ranges: R,
     #[borrows(ranges)]
     #[not_covariant]
     iter: PreOrderPartialIterRef<'this>,
 }
 
 /// Same as PreOrderPartialIterRef, but owns the ranges so it can be converted into a stream conveniently.
-pub struct PreOrderPartialIter<A: AsRef<RangeSetRef<ChunkNum>> + 'static>(OwnedIter<A>);
+pub struct PreOrderPartialIter<R: AsRef<RangeSetRef<ChunkNum>> + 'static>(
+    PreOrderPartialIterInner<R>,
+);
 
-impl<A: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<A> {
+impl<R: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<R> {
     /// Create a new PreOrderPartialIter.
     ///
     /// ranges has to implement AsRef<RangeSetRef<ChunkNum>>, so you can pass e.g. a RangeSet2.
-    pub fn new(tree: BaoTree, ranges: A) -> Self {
+    pub fn new(tree: BaoTree, ranges: R) -> Self {
         Self(
-            OwnedIterBuilder {
+            PreOrderPartialIterInnerBuilder {
                 ranges,
                 iter_builder: |ranges| PreOrderPartialIterRef::new(tree, ranges.as_ref()),
             }
@@ -954,6 +961,67 @@ impl<A: AsRef<RangeSetRef<ChunkNum>> + 'static> Iterator for PreOrderPartialIter
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.with_iter_mut(|x| x.next())
+    }
+}
+
+/// Iterator over all nodes in a BaoTree in pre-order that overlap with a given chunk range.
+pub struct PreOrderPartialIterRef2<'a> {
+    /// the tree we want to traverse
+    tree: BaoTree,
+    /// number of valid nodes, needed in node.right_descendant
+    valid_nodes: TreeNode,
+    /// stack of nodes to visit
+    stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
+}
+
+impl<'a> PreOrderPartialIterRef2<'a> {
+    pub fn new(tree: BaoTree, range: &'a RangeSetRef<ChunkNum>) -> Self {
+        let mut stack = SmallVec::new();
+        stack.push((tree.root(), range));
+        Self {
+            tree,
+            stack,
+            valid_nodes: tree.filled_size(),
+        }
+    }
+}
+
+impl<'a> Iterator for PreOrderPartialIterRef2<'a> {
+    type Item = NodeInfo2;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let tree = &self.tree;
+        loop {
+            let (node, ranges) = self.stack.pop()?;
+            if ranges.is_empty() {
+                continue;
+            }
+            // the middle chunk of the node
+            let mid = node.mid().to_chunks(tree.chunk_group_log);
+            // the start chunk of the node
+            let start = node.block_range().start.to_chunks(tree.chunk_group_log);
+            // split the ranges into left and right
+            let (l_ranges, r_ranges) = ranges.split(mid);
+            // check if the node is fully included
+            let is_fully_included =
+                ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
+            // this is the only difference to the other iterator.
+            // When a node is fully included in the ranges we don't traverse the children.
+            if !is_fully_included && !node.is_leaf() {
+                let l = node.left_child().unwrap();
+                let r = node.right_descendant(self.valid_nodes).unwrap();
+                // push right first so we pop left first
+                self.stack.push((r, r_ranges));
+                self.stack.push((l, l_ranges));
+            }
+            // emit the node in any case
+            break Some(NodeInfo2 {
+                node,
+                tl: !l_ranges.is_empty(),
+                tr: !r_ranges.is_empty(),
+                full: is_fully_included,
+            });
+        }
     }
 }
 
