@@ -1,11 +1,11 @@
 use crate::tree::{BlockNum, ByteNum, ChunkNum, PONum};
 use blake3::guts::parent_cv;
 use ouroboros::self_referencing;
-use range_collections::{range_set::RangeSetEntry, RangeSet, RangeSet2, RangeSetRef};
-use smallvec::{Array, SmallVec};
+use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
+use smallvec::SmallVec;
 use std::{
     fmt::{self, Debug},
-    io,
+    io::{self, Cursor, Read, Write},
     ops::{Range, RangeFrom},
     result,
 };
@@ -115,56 +115,71 @@ impl BaoTree {
     }
 
     /// Compute the post order outboard for the given data
-    ///
     pub fn outboard_post_order(data: &[u8], chunk_group_log: u8) -> (Vec<u8>, blake3::Hash) {
-        Self::outboard_post_order_with_start_chunk(data, chunk_group_log, ChunkNum(0))
-    }
-
-    fn outboard_post_order_with_start_chunk(
-        data: &[u8],
-        chunk_group_log: u8,
-        start_chunk: ChunkNum,
-    ) -> (Vec<u8>, blake3::Hash) {
-        let mut stack = Vec::<blake3::Hash>::with_capacity(16);
         let tree =
-            Self::new_with_start_chunk(ByteNum(data.len() as u64), chunk_group_log, start_chunk);
-        let root = tree.root();
+            Self::new_with_start_chunk(ByteNum(data.len() as u64), chunk_group_log, ChunkNum(0));
         let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
         let mut res = Vec::with_capacity(outboard_len);
-        for node in tree.iterate() {
+        let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
+        let hash = tree
+            .outboard_post_order_with_start_chunk(&mut Cursor::new(data), &mut res, &mut buffer)
+            .unwrap();
+        res.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        (res, hash)
+    }
+
+    /// Compute the post order outboard for the given data
+    ///
+    /// This is the internal version that takes a start chunk and does not append the size!
+    fn outboard_post_order_with_start_chunk(
+        &self,
+        data: &mut impl Read,
+        outboard: &mut impl Write,
+        buffer: &mut [u8],
+    ) -> io::Result<blake3::Hash> {
+        // do not allocate for small trees
+        let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+        debug_assert!(buffer.len() == self.chunk_group_bytes().to_usize());
+        let root = self.root();
+        for node in self.iterate() {
             let is_root = node == root;
             let hash = if let Some(leaf) = node.as_leaf() {
-                let chunk0 = tree.chunk_num(leaf);
-                let cgc = tree.chunk_group_chunks();
-                match tree.leaf_byte_ranges(leaf) {
+                let chunk0 = self.chunk_num(leaf);
+                let cgc = self.chunk_group_chunks();
+                match self.leaf_byte_ranges(leaf) {
                     Ok((l, r)) => {
-                        let l_data = &data[l.start.to_usize()..l.end.to_usize()];
-                        let r_data = &data[r.start.to_usize()..r.end.to_usize()];
+                        let l_len = (l.end - l.start).to_usize();
+                        let l_data = &mut buffer[..l_len];
+                        data.read_exact(l_data)?;
                         let l_hash = hash_block(chunk0, l_data, false);
+                        let r_len = (r.end - r.start).to_usize();
+                        let r_data = &mut buffer[..r_len];
+                        data.read_exact(r_data)?;
                         let r_hash = hash_block(chunk0 + cgc, r_data, false);
-                        res.extend_from_slice(l_hash.as_bytes());
-                        res.extend_from_slice(r_hash.as_bytes());
+                        outboard.write_all(l_hash.as_bytes())?;
+                        outboard.write_all(r_hash.as_bytes())?;
                         parent_cv(&l_hash, &r_hash, is_root)
                     }
                     Err(l) => {
-                        let left = &data[l.start.to_usize()..l.end.to_usize()];
-                        hash_block(chunk0, left, is_root)
+                        let l_len = (l.end - l.start).to_usize();
+                        let l_data = &mut buffer[..l_len];
+                        data.read_exact(l_data)?;
+                        let l_hash = hash_block(chunk0, l_data, is_root);
+                        l_hash
                     }
                 }
             } else {
                 let right_hash = stack.pop().unwrap();
                 let left_hash = stack.pop().unwrap();
-                res.extend_from_slice(left_hash.as_bytes());
-                res.extend_from_slice(right_hash.as_bytes());
+                outboard.write_all(left_hash.as_bytes())?;
+                outboard.write_all(right_hash.as_bytes())?;
                 parent_cv(&left_hash, &right_hash, is_root)
             };
             stack.push(hash);
         }
-        res.extend_from_slice(&(data.len() as u64).to_le_bytes());
         debug_assert_eq!(stack.len(), 1);
-        debug_assert_eq!(res.len(), outboard_len);
         let hash = stack.pop().unwrap();
-        (res, hash)
+        Ok(hash)
     }
 
     /// Compute the blake3 hash for the given data
@@ -175,7 +190,7 @@ impl BaoTree {
     /// Internal hash computation. This allows to also compute a non root hash, e.g. for a block
     pub fn blake3_hash_internal(data: &[u8], start_chunk: ChunkNum, is_root: bool) -> blake3::Hash {
         // todo: allocate on the stack
-        let mut stack = Vec::with_capacity(16);
+        let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
         let tree = Self::new_with_start_chunk(ByteNum(data.len() as u64), 0, start_chunk);
         let root = tree.root();
         let can_be_root = is_root;
@@ -247,7 +262,8 @@ impl BaoTree {
     ) -> Vec<io::Result<(ByteNum, &'a [u8])>> {
         let mut res = Vec::new();
         let mut remaining = encoded;
-        let mut stack = vec![root];
+        let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+        stack.push(root);
         let tree = Self::new(size, chunk_group_log);
         let mut is_root = true;
         for NodeInfo { node, tl, tr } in tree.iterate_part_preorder_ref(ranges) {
