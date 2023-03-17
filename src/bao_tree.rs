@@ -1,12 +1,13 @@
 use crate::tree::{BlockNum, ByteNum, ChunkNum, PONum};
 use blake3::guts::parent_cv;
 use ouroboros::self_referencing;
-use range_collections::{RangeSet, RangeSet2, RangeSetRef};
+use range_collections::{range_set::RangeSetEntry, RangeSet, RangeSet2, RangeSetRef};
 use smallvec::{Array, SmallVec};
 use std::{
     fmt::{self, Debug},
     io,
-    ops::Range,
+    ops::{Range, RangeFrom},
+    result,
 };
 
 /// Defines a Bao tree.
@@ -223,15 +224,16 @@ impl BaoTree {
             .into_iter();
         }
         let size = ByteNum(u64::from_le_bytes(encoded[..8].try_into().unwrap()));
-        let chunks = size.chunks();
-        let (ranges, _) = ranges.split(chunks);
-        let res = if !ranges.is_empty() {
-            Self::decode_ranges_impl(root, &encoded[8..], size, ranges, chunk_group_log)
-        } else {
-            // If the range doesn't intersect with the data, ask for the last chunk
-            // this is so it matches the behavior of bao
-            let ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..);
-            Self::decode_ranges_impl(root, &encoded[8..], size, &ranges, chunk_group_log)
+        let res = match canonicalize_range(ranges, size.chunks()) {
+            Ok(ranges) => {
+                Self::decode_ranges_impl(root, &encoded[8..], size, ranges, chunk_group_log)
+            }
+            Err(range) => {
+                let ranges = RangeSet2::from(range);
+                // If the range doesn't intersect with the data, ask for the last chunk
+                // this is so it matches the behavior of bao
+                Self::decode_ranges_impl(root, &encoded[8..], size, &ranges, chunk_group_log)
+            }
         };
         res.into_iter()
     }
@@ -325,15 +327,12 @@ impl BaoTree {
         chunk_group_log: u8,
     ) -> Vec<u8> {
         let size = ByteNum(data.len() as u64);
-        let chunks = size.chunks();
-        let (ranges, _) = ranges.split(chunks);
-        if !ranges.is_empty() {
-            Self::encode_ranges_impl(data, outboard, ranges, chunk_group_log)
-        } else {
-            // If the range doesn't intersect with the data, ask for the last chunk
-            // this is so it matches the behavior of bao
-            let ranges = RangeSet2::from(ChunkNum(chunks.0.saturating_sub(1))..);
-            Self::encode_ranges_impl(data, outboard, &ranges, chunk_group_log)
+        match canonicalize_range(ranges, size.chunks()) {
+            Ok(ranges) => Self::encode_ranges_impl(data, outboard, &ranges, chunk_group_log),
+            Err(range) => {
+                let ranges = RangeSet2::from(range);
+                Self::encode_ranges_impl(data, outboard, &ranges, chunk_group_log)
+            }
         }
     }
 
@@ -571,6 +570,21 @@ impl ChunkNum {
     }
 }
 
+/// truncate a range so that it overlaps with the range 0..end if possible, and has no extra boundaries behind end
+fn canonicalize_range(
+    range: &RangeSetRef<ChunkNum>,
+    end: ChunkNum,
+) -> result::Result<&RangeSetRef<ChunkNum>, RangeFrom<ChunkNum>> {
+    let (range, _) = range.split(end);
+    if !range.is_empty() {
+        Ok(range)
+    } else if !end.is_min_value() {
+        Err(end - 1..)
+    } else {
+        Err(end..)
+    }
+}
+
 fn is_odd(x: usize) -> bool {
     x & 1 == 1
 }
@@ -685,6 +699,24 @@ impl TreeNode {
         self.right_child0().map(Self)
     }
 
+    /// Unrestricted parent, can only be None if we are at the top
+    pub fn parent(&self) -> Option<Self> {
+        self.parent0().map(Self)
+    }
+
+    /// Restricted parent, will be None if we call parent on the root
+    pub fn restricted_parent(&self, len: Self) -> Option<Self> {
+        let mut curr = *self;
+        while let Some(parent) = curr.parent() {
+            if parent.0 < len.0 {
+                return Some(parent);
+            }
+            curr = parent;
+        }
+        // we hit the top
+        None
+    }
+
     /// Get a valid right descendant for an offset
     pub(crate) fn right_descendant(&self, len: Self) -> Option<Self> {
         let mut node = self.right_child()?;
@@ -702,6 +734,20 @@ impl TreeNode {
     fn right_child0(&self) -> Option<u64> {
         let offset = 1 << self.level().checked_sub(1)?;
         Some(self.0 + offset)
+    }
+
+    fn parent0(&self) -> Option<u64> {
+        let level = self.level();
+        if level == 63 {
+            return None;
+        }
+        let span = 1u64 << level;
+        let offset = self.0;
+        Some(if (offset & (span * 2)) == 0 {
+            offset + span
+        } else {
+            offset - span
+        })
     }
 
     pub const fn node_range(&self) -> Range<Self> {
@@ -889,9 +935,8 @@ struct OwnedIter<A: AsRef<RangeSetRef<ChunkNum>> + 'static> {
 pub struct PreOrderPartialIter<A: AsRef<RangeSetRef<ChunkNum>> + 'static>(OwnedIter<A>);
 
 impl<A: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<A> {
-
     /// Create a new PreOrderPartialIter.
-    /// 
+    ///
     /// ranges has to implement AsRef<RangeSetRef<ChunkNum>>, so you can pass e.g. a RangeSet2.
     pub fn new(tree: BaoTree, ranges: A) -> Self {
         Self(
@@ -912,7 +957,87 @@ impl<A: AsRef<RangeSetRef<ChunkNum>> + 'static> Iterator for PreOrderPartialIter
     }
 }
 
+/// Iterator over all nodes in a BaoTree in post-order.
 pub struct PostOrderTreeIter {
+    /// the overall number of nodes in the tree
+    len: TreeNode,
+    /// the current node, None if we are done
+    curr: TreeNode,
+    /// where we came from, used to determine the next node
+    prev: Prev,
+}
+
+impl PostOrderTreeIter {
+    pub fn new(tree: BaoTree) -> Self {
+        Self {
+            len: tree.filled_size(),
+            curr: tree.root(),
+            prev: Prev::Parent,
+        }
+    }
+
+    fn go_up(&mut self, curr: TreeNode) {
+        let prev = curr;
+        (self.curr, self.prev) = if let Some(parent) = curr.restricted_parent(self.len) {
+            (
+                parent,
+                if prev < parent {
+                    Prev::Left
+                } else {
+                    Prev::Right
+                },
+            )
+        } else {
+            (curr, Prev::Done)
+        };
+    }
+}
+
+impl Iterator for PostOrderTreeIter {
+    type Item = TreeNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let curr = self.curr;
+            match self.prev {
+                Prev::Done => {
+                    break None;
+                }
+                Prev::Parent => {
+                    if curr.is_leaf() {
+                        self.go_up(curr);
+                        break Some(curr);
+                    } else {
+                        // go left first when coming from above, don't emit curr
+                        self.curr = curr.left_child().unwrap();
+                        self.prev = Prev::Parent;
+                    }
+                }
+                Prev::Left => {
+                    // no need to check is_leaf, since we come from a left child
+                    // go right when coming from left, don't emit curr
+                    self.curr = curr.right_descendant(self.len).unwrap();
+                    self.prev = Prev::Parent;
+                }
+                Prev::Right => {
+                    // go up in any case, do emit curr
+                    self.go_up(curr);
+                    break Some(curr);
+                }
+            }
+        }
+    }
+}
+
+enum Prev {
+    Parent,
+    Left,
+    Right,
+    Done,
+}
+
+#[cfg(test)]
+pub struct PostOrderTreeIterStack {
     len: TreeNode,
     // stack of (node, done) pairs
     // done=true means we immediately return the node
@@ -924,7 +1049,8 @@ pub struct PostOrderTreeIter {
     stack: SmallVec<[(TreeNode, bool); 8]>,
 }
 
-impl PostOrderTreeIter {
+#[cfg(test)]
+impl PostOrderTreeIterStack {
     fn new(tree: BaoTree) -> Self {
         let mut stack = SmallVec::new();
         stack.push((tree.root(), false));
@@ -933,7 +1059,8 @@ impl PostOrderTreeIter {
     }
 }
 
-impl Iterator for PostOrderTreeIter {
+#[cfg(test)]
+impl Iterator for PostOrderTreeIterStack {
     type Item = TreeNode;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -967,7 +1094,7 @@ mod tests {
 
     use super::BaoTree;
     use crate::{
-        bao_tree::{NodeInfo, PostOrderTreeIter},
+        bao_tree::{NodeInfo, PostOrderTreeIter, PostOrderTreeIterStack},
         tree::{ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE},
     };
 
@@ -1273,8 +1400,10 @@ mod tests {
         fn tree_iterator_comparison(len in 0u64..100000) {
             let tree = BaoTree::new(ByteNum(len), 0);
             let iter1 = tree.iterate_reference();
-            let iter2 = PostOrderTreeIter::new(tree).collect::<Vec<_>>();
-            prop_assert_eq!(iter1, iter2);
+            let iter2 = PostOrderTreeIterStack::new(tree).collect::<Vec<_>>();
+            let iter3 = PostOrderTreeIter::new(tree).collect::<Vec<_>>();
+            prop_assert_eq!(&iter1, &iter2);
+            prop_assert_eq!(&iter1, &iter3);
         }
 
         #[test]
