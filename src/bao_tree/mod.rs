@@ -170,16 +170,16 @@ impl BaoTree {
                 let cgc = self.chunk_group_chunks();
                 match self.leaf_byte_ranges(leaf) {
                     Ok((l, r)) => {
-                        let l_data = read_range_io(data, l, buffer)?;
+                        let l_data = read_bytes_io(data, l, buffer)?;
                         let l_hash = hash_block(chunk0, l_data, false);
-                        let r_data = read_range_io(data, r, buffer)?;
+                        let r_data = read_bytes_io(data, r, buffer)?;
                         let r_hash = hash_block(chunk0 + cgc, r_data, false);
                         outboard.write_all(l_hash.as_bytes())?;
                         outboard.write_all(r_hash.as_bytes())?;
                         parent_cv(&l_hash, &r_hash, is_root)
                     }
                     Err(l) => {
-                        let l_data = read_range_io(data, l, buffer)?;
+                        let l_data = read_bytes_io(data, l, buffer)?;
                         let l_hash = hash_block(chunk0, l_data, is_root);
                         l_hash
                     }
@@ -232,14 +232,14 @@ impl BaoTree {
                 let chunk0 = tree.chunk_num(leaf);
                 match tree.leaf_byte_ranges(leaf) {
                     Ok((l, r)) => {
-                        let ld = read_range_io(&mut data, l, buf)?;
+                        let ld = read_bytes_io(&mut data, l, buf)?;
                         let left_hash = hash_chunk(chunk0, ld, false);
-                        let rd = read_range_io(&mut data, r, buf)?;
+                        let rd = read_bytes_io(&mut data, r, buf)?;
                         let right_hash = hash_chunk(chunk0 + tree.chunk_group_chunks(), rd, false);
                         parent_cv(&left_hash, &right_hash, is_root)
                     }
                     Err(l) => {
-                        let ld = read_range_io(&mut data, l, buf)?;
+                        let ld = read_bytes_io(&mut data, l, buf)?;
                         hash_chunk(chunk0, ld, is_root)
                     }
                 }
@@ -261,7 +261,7 @@ impl BaoTree {
         ranges: &RangeSetRef<ChunkNum>,
         chunk_group_log: u8,
     ) -> impl Iterator<Item = io::Result<(ByteNum, Vec<u8>)>> + 'a {
-        let mut buffer = vec![0u8; 2 << (10 + chunk_group_log)];
+        let mut buffer = vec![0u8; 2048 << (10 + chunk_group_log)];
         let mut iter =
             DecodeSliceIter::new(root, &ranges, chunk_group_log, &mut encoded, &mut buffer);
         let mut res = Vec::new();
@@ -405,7 +405,7 @@ impl BaoTree {
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
                 if tl {
                     let l_hash = stack.pop().unwrap();
-                    let l_data = read_range_io(encoded, l_range.clone(), buffer).unwrap();
+                    let l_data = read_bytes_io(encoded, l_range.clone(), buffer).unwrap();
                     let actual = hash_block(l_start_chunk, l_data, is_root);
 
                     is_root = false;
@@ -421,7 +421,7 @@ impl BaoTree {
                 }
                 if tr && r_range.start < size {
                     let r_hash = stack.pop().unwrap();
-                    let r_data = read_range_io(encoded, r_range.clone(), buffer).unwrap();
+                    let r_data = read_bytes_io(encoded, r_range.clone(), buffer).unwrap();
                     let actual = hash_block(r_start_chunk, r_data, is_root);
                     is_root = false;
                     if r_hash != actual {
@@ -491,7 +491,7 @@ impl BaoTree {
                 if tl {
                     let l_hash = stack.pop().unwrap();
                     let l_start = start;
-                    let l_data = read_range_io(encoded, start..mid, buffer).unwrap();
+                    let l_data = read_bytes_io(encoded, start..mid, buffer).unwrap();
                     offset += (mid - start).to_usize();
                     let actual = hash_block(l_start_chunk, l_data, is_root);
                     is_root = false;
@@ -507,7 +507,7 @@ impl BaoTree {
                 if tr && mid < end {
                     let r_hash = stack.pop().unwrap();
                     let r_start = mid;
-                    let r_data = read_range_io(encoded, mid..end, &mut buffer[offset..]).unwrap();
+                    let r_data = read_bytes_io(encoded, mid..end, &mut buffer[offset..]).unwrap();
                     offset += (end - mid).to_usize();
                     let actual = hash_block(r_start_chunk, r_data, is_root);
                     is_root = false;
@@ -831,6 +831,13 @@ fn canonicalize_range(
     }
 }
 
+fn range_ok(range: &RangeSetRef<ChunkNum>, end: ChunkNum) -> bool {
+    match canonicalize_range(range, end) {
+        Ok(_) => true,
+        Err(x) => x.start.is_min_value(),
+    }
+}
+
 fn canonicalize_range_owned(range: &RangeSetRef<ChunkNum>, end: ByteNum) -> RangeSet2<ChunkNum> {
     match canonicalize_range(range, end.chunks()) {
         Ok(range) => {
@@ -863,12 +870,35 @@ fn read_parent_io(from: &mut impl Read) -> io::Result<(blake3::Hash, blake3::Has
     Ok((l_hash, r_hash))
 }
 
-fn read_range_io<'a>(
+fn parse_hash_pair(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
+    assert!(buf.len() == 64);
+    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
+    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
+    (l_hash, r_hash)
+}
+
+/// read the bytes for the range from the source
+///
+/// note that this will read start-end bytes from the current position, not seek to start
+fn read_bytes_io<'a>(
     from: &mut impl Read,
     range: Range<ByteNum>,
     buf: &'a mut [u8],
 ) -> io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
+    let mut buf = &mut buf[..len];
+    from.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// seeks read the bytes for the range from the source
+fn read_range_io<'a>(
+    from: &mut (impl Read + Seek),
+    range: Range<ByteNum>,
+    buf: &'a mut [u8],
+) -> io::Result<&'a [u8]> {
+    let len = (range.end - range.start).to_usize();
+    from.seek(io::SeekFrom::Start(range.start.0))?;
     let mut buf = &mut buf[..len];
     from.read_exact(&mut buf)?;
     Ok(buf)

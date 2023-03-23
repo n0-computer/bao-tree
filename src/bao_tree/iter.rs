@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom, Write},
     ops::Range,
     result,
 };
@@ -10,11 +10,11 @@ use range_collections::RangeSetRef;
 use smallvec::SmallVec;
 
 use crate::{
-    bao_tree::{canonicalize_range, hash_block, read_range_io, TreeNode},
+    bao_tree::{canonicalize_range, hash_block, range_ok, read_bytes_io, TreeNode},
     BaoTree, ByteNum, ChunkNum,
 };
 
-use super::{read_len_io, read_parent_io};
+use super::{parse_hash_pair, read_len_io, read_parent_io, read_range_io};
 
 /// Extended node info.
 ///
@@ -263,6 +263,195 @@ impl Iterator for PostOrderTreeIterStack {
     }
 }
 
+macro_rules! io_error {
+    ($($arg:tt)*) => {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
+    };
+}
+
+/// Encode the relevant part for a range set given an outboard in post-order and the corresponding data.
+/// chunk_group_log is for the outboard.
+pub fn encode_ranges<D: Read + Seek, W: Write>(
+    data: D,
+    outboard: &[u8],
+    chunk_group_log: u8,
+    ranges: &RangeSetRef<ChunkNum>,
+    encoded: W,
+) -> io::Result<()> {
+    let mut data = data;
+    let mut encoded = encoded;
+    // validate roughly that the outboard is correct
+    if outboard.len() < 8 {
+        io_error!("outboard must be at least 8 bytes");
+    };
+    let len = u64::from_le_bytes(outboard[outboard.len() - 8..].try_into().unwrap());
+    let len2 = data.seek(SeekFrom::End(0))?;
+    if len != len2 {
+        io_error!(
+            "length from outboard does not match actual file length: {} != {}",
+            len,
+            len2
+        );
+    }
+    let tree = BaoTree::new(ByteNum(len), chunk_group_log);
+    if !range_ok(ranges, tree.chunks()) {
+        io_error!("ranges are not valid for this tree");
+    }
+    let expected_outboard_len = tree.outboard_hash_pairs() * 64 + 8;
+    if outboard.len() as u64 != expected_outboard_len {
+        io_error!(
+            "outboard length does not match expected outboard length: {} != {}",
+            outboard.len(),
+            expected_outboard_len
+        );
+    }
+    let mut buffer = vec![0u8; 1024 << chunk_group_log];
+    let buf = &mut buffer;
+    // write header
+    encoded.write_all(len.to_le_bytes().as_slice())?;
+    // traverse tree and write encoded from outboard and data
+    for NodeInfo {
+        node,
+        l_range: lr,
+        r_range: rr,
+        ..
+    } in tree.iterate_part_preorder_ref(ranges, 0)
+    {
+        let tl = !lr.is_empty();
+        let tr = !rr.is_empty();
+        // each node corresponds to 64 bytes we have to write
+        if let Some(offset) = tree.post_order_offset(node).value() {
+            let hash_offset = (offset * 64).to_usize();
+            encoded.write_all(&outboard[hash_offset..hash_offset + 64])?;
+        }
+        // each leaf corresponds to 2 ranges we have to write
+        if let Some(leaf) = node.as_leaf() {
+            let (l, m, r) = tree.leaf_byte_ranges3(leaf);
+            if tl {
+                let ld = read_range_io(&mut data, l..m, buf)?;
+                encoded.write_all(ld)?;
+            }
+            if tr {
+                let rd = read_range_io(&mut data, m..r, buf)?;
+                encoded.write_all(rd)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Encode the relevant part for a range set given an outboard in post-order and the corresponding data.
+/// chunk_group_log is for the outboard.
+pub fn encode_ranges_validated<D: Read + Seek, W: Write>(
+    data: D,
+    outboard: &[u8],
+    chunk_group_log: u8,
+    root: blake3::Hash,
+    ranges: &RangeSetRef<ChunkNum>,
+    encoded: W,
+) -> io::Result<()> {
+    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+    stack.push(root);
+    let mut data = data;
+    let mut encoded = encoded;
+    // validate roughly that the outboard is correct
+    if outboard.len() < 8 {
+        io_error!("outboard must be at least 8 bytes");
+    };
+    let len = u64::from_le_bytes(outboard[outboard.len() - 8..].try_into().unwrap());
+    let len2 = data.seek(SeekFrom::End(0))?;
+    if len != len2 {
+        io_error!(
+            "length from outboard does not match actual file length: {} != {}",
+            len,
+            len2
+        );
+    }
+    let tree = BaoTree::new(ByteNum(len), chunk_group_log);
+    if !range_ok(ranges, tree.chunks()) {
+        io_error!("ranges are not valid for this tree");
+    }
+    let expected_outboard_len = tree.outboard_hash_pairs() * 64 + 8;
+    if outboard.len() as u64 != expected_outboard_len {
+        io_error!(
+            "outboard length does not match expected outboard length: {} != {}",
+            outboard.len(),
+            expected_outboard_len
+        );
+    }
+    let mut buffer = vec![0u8; 1024 << chunk_group_log];
+    let buf = &mut buffer;
+    // write header
+    encoded.write_all(len.to_le_bytes().as_slice())?;
+    // traverse tree and write encoded from outboard and data
+    for NodeInfo {
+        node,
+        l_range,
+        r_range,
+        is_root,
+        ..
+    } in tree.iterate_part_preorder_ref(ranges, 0)
+    {
+        let tl = !l_range.is_empty();
+        let tr = !r_range.is_empty();
+        // each node corresponds to 64 bytes we have to write
+        let post_order_offset = tree.post_order_offset(node).value();
+        if let Some(offset) = post_order_offset {
+            let hash_offset = (offset * 64).to_usize();
+            let hashes = &outboard[hash_offset..hash_offset + 64];
+            let (l_hash, r_hash) = parse_hash_pair(hashes);
+            let actual = parent_cv(&l_hash, &r_hash, is_root);
+            let expected = stack.pop().unwrap();
+            if actual != expected {
+                io_error!("hash mismatch");
+            }
+            if tr {
+                stack.push(r_hash);
+            }
+            if tl {
+                stack.push(l_hash);
+            }
+            encoded.write_all(&outboard[hash_offset..hash_offset + 64])?;
+        }
+        // each leaf corresponds to 2 ranges we have to write
+        if let Some(leaf) = node.as_leaf() {
+            // let (l, m, r) = tree.leaf_byte_ranges3(leaf);
+            let chunk0 = tree.chunk_num(leaf);
+            let chunkm = chunk0 + tree.chunk_group_chunks();
+            match tree.leaf_byte_ranges(leaf) {
+                Ok((l, r)) => {
+                    if tl {
+                        let l_data = read_range_io(&mut data, l, buf)?;
+                        let l_hash = hash_block(chunk0, l_data, false);
+                        if l_hash != stack.pop().unwrap() {
+                            io_error!("hash mismatch");
+                        }
+                        encoded.write_all(l_data)?;
+                    }
+                    if tr {
+                        let r_data = read_range_io(&mut data, r, buf)?;
+                        let r_hash = hash_block(chunkm, r_data, false);
+                        if r_hash != stack.pop().unwrap() {
+                            io_error!("hash mismatch");
+                        }
+                        encoded.write_all(r_data)?;
+                    }
+                }
+                Err(l) => {
+                    if tl {
+                        let l_data = read_range_io(&mut data, l, buf)?;
+                        let l_hash = hash_block(chunk0, l_data, is_root);
+                        if l_hash != stack.pop().unwrap() {
+                            io_error!("hash mismatch");
+                        }
+                        encoded.write_all(l_data)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 enum Position<'a> {
     /// currently reading the header, so don't know how big the tree is
     /// so we need to store the ranges and the chunk group log
@@ -277,13 +466,14 @@ enum Position<'a> {
 pub struct DecodeSliceIter<'a, R> {
     inner: Position<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
-    buffer: &'a mut [u8],
     encoded: R,
+    scratch: &'a mut [u8],
 }
 
 pub enum DecodeSliceError {
     Io(io::Error),
     HashMismatch(TreeNode),
+    InvalidQueryRange,
 }
 
 impl From<DecodeSliceError> for io::Error {
@@ -292,6 +482,9 @@ impl From<DecodeSliceError> for io::Error {
             DecodeSliceError::Io(e) => e,
             DecodeSliceError::HashMismatch(_) => {
                 io::Error::new(io::ErrorKind::InvalidData, "hash mismatch")
+            }
+            DecodeSliceError::InvalidQueryRange => {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
             }
         }
     }
@@ -309,10 +502,10 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
         range: &'a RangeSetRef<ChunkNum>,
         chunk_group_log: u8,
         encoded: R,
-        buffer: &'a mut [u8],
+        scratch: &'a mut [u8],
     ) -> Self {
         // make sure the buffer is big enough
-        assert!(buffer.len() >= 1024 << chunk_group_log);
+        assert!(scratch.len() >= 1024 << chunk_group_log);
         let mut stack = SmallVec::new();
         stack.push(root);
         Self {
@@ -321,13 +514,13 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                 ranges: range,
                 chunk_group_log,
             },
-            buffer,
             encoded,
+            scratch,
         }
     }
 
     pub fn buffer(&self) -> &[u8] {
-        &self.buffer
+        &self.scratch
     }
 
     fn next0(&mut self) -> result::Result<Option<Range<ByteNum>>, DecodeSliceError> {
@@ -340,7 +533,9 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                 } => {
                     let size = read_len_io(&mut self.encoded)?;
                     // make sure the range is valid and canonical
-                    // assert!(canonicalize_range(self.range, size.chunks()).is_ok());
+                    if !range_ok(range, size.chunks()) {
+                        break Err(DecodeSliceError::InvalidQueryRange);
+                    }
                     let tree = BaoTree::new(size, *chunk_group_log);
                     self.inner = Position::Content {
                         iter: tree.iterate_part_preorder_ref(range, 0),
@@ -361,7 +556,9 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
             };
             let tl = !l_range.is_empty();
             let tr = !r_range.is_empty();
-            if tree.is_persisted(node) {
+            let is_half_leaf = !tree.is_persisted(node);
+            // do not expect a parent pair for a half leaf
+            if !is_half_leaf {
                 let (l_hash, r_hash) = read_parent_io(&mut self.encoded)?;
                 let parent_hash = self.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
@@ -384,13 +581,14 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                 let l_start_chunk = tree.chunk_num(leaf);
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
                 let mut offset = 0usize;
+                let buf = &mut self.scratch;
                 if tl {
                     let l_hash = self.stack.pop().unwrap();
-                    let l_data = read_range_io(&mut self.encoded, start..mid, &mut self.buffer)?;
+                    let l_data = read_bytes_io(&mut self.encoded, start..mid, buf)?;
                     offset += (mid - start).to_usize();
                     // if is_persisted is true, this is just the left child of a leaf with 2 children
                     // and therefore not the root. Only if it is a half full leaf can it be root
-                    let l_is_root = is_root && !tree.is_persisted(node);
+                    let l_is_root = is_root && is_half_leaf;
                     let actual = hash_block(l_start_chunk, l_data, l_is_root);
                     if l_hash != actual {
                         break Err(DecodeSliceError::HashMismatch(node));
@@ -398,8 +596,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                 }
                 if tr && mid < end {
                     let r_hash = self.stack.pop().unwrap();
-                    let r_data =
-                        read_range_io(&mut self.encoded, mid..end, &mut self.buffer[offset..])?;
+                    let r_data = read_bytes_io(&mut self.encoded, mid..end, &mut buf[offset..])?;
                     offset += (end - mid).to_usize();
                     // right side can never be root, sorry
                     let r_is_root = false;
