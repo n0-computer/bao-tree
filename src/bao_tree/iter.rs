@@ -31,6 +31,8 @@ pub struct NodeInfo<'a> {
     pub full: bool,
     /// the node is a leaf for the purpose of this query
     pub query_leaf: bool,
+    /// the node is the root node (needs special handling when computing hash)
+    pub is_root: bool,
 }
 
 /// Iterator over all nodes in a BaoTree in pre-order that overlap with a given chunk range.
@@ -41,6 +43,8 @@ pub struct PreOrderPartialIterRef<'a> {
     tree_filled_size: TreeNode,
     /// minimum level of *full* nodes to visit
     min_level: u8,
+    /// is root
+    is_root: bool,
     /// stack of nodes to visit
     stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
 }
@@ -54,6 +58,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
             tree_filled_size: tree.filled_size(),
             min_level,
             stack,
+            is_root: tree.start_chunk == 0,
         }
     }
 
@@ -91,6 +96,8 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
                 self.stack.push((r, r_ranges));
                 self.stack.push((l, l_ranges));
             }
+            let is_root = self.is_root;
+            self.is_root = false;
             // emit the node in any case
             break Some(NodeInfo {
                 node,
@@ -98,6 +105,7 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
                 r_range: r_ranges,
                 full,
                 query_leaf,
+                is_root,
             });
         }
     }
@@ -255,14 +263,22 @@ impl Iterator for PostOrderTreeIterStack {
     }
 }
 
+enum Position<'a> {
+    /// currently reading the header, so don't know how big the tree is
+    /// so we need to store the ranges and the chunk group log
+    Header {
+        ranges: &'a RangeSetRef<ChunkNum>,
+        chunk_group_log: u8,
+    },
+    /// currently reading the tree, all the info we need is in the iter
+    Content { iter: PreOrderPartialIterRef<'a> },
+}
+
 pub struct DecodeSliceIter<'a, R> {
-    inner: Option<PreOrderPartialIterRef<'a>>,
+    inner: Position<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
     buffer: &'a mut [u8],
     encoded: R,
-    range: &'a RangeSetRef<ChunkNum>,
-    is_root: bool,
-    chunk_group_log: u8,
 }
 
 pub enum DecodeSliceError {
@@ -301,12 +317,12 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
         stack.push(root);
         Self {
             stack,
-            inner: None,
-            is_root: true,
+            inner: Position::Header {
+                ranges: range,
+                chunk_group_log,
+            },
             buffer,
             encoded,
-            range,
-            chunk_group_log,
         }
     }
 
@@ -317,33 +333,38 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
     fn next0(&mut self) -> result::Result<Option<Range<ByteNum>>, DecodeSliceError> {
         loop {
             let inner = match &mut self.inner {
-                Some(ref mut tree) => tree,
-                None => {
+                Position::Content { ref mut iter } => iter,
+                Position::Header {
+                    chunk_group_log,
+                    ranges: range,
+                } => {
                     let size = read_len_io(&mut self.encoded)?;
                     // make sure the range is valid and canonical
                     // assert!(canonicalize_range(self.range, size.chunks()).is_ok());
-                    let tree = BaoTree::new(size, self.chunk_group_log);
-                    self.inner = Some(tree.iterate_part_preorder_ref(self.range, 0));
+                    let tree = BaoTree::new(size, *chunk_group_log);
+                    self.inner = Position::Content {
+                        iter: tree.iterate_part_preorder_ref(range, 0),
+                    };
                     continue;
                 }
             };
             let tree = inner.tree();
             let NodeInfo {
                 node,
-                l_range: lr,
-                r_range: rr,
+                l_range,
+                r_range,
+                is_root,
                 ..
             } = match inner.next() {
                 Some(node) => node,
                 None => break Ok(None),
             };
-            let tl = !lr.is_empty();
-            let tr = !rr.is_empty();
+            let tl = !l_range.is_empty();
+            let tr = !r_range.is_empty();
             if tree.is_persisted(node) {
                 let (l_hash, r_hash) = read_parent_io(&mut self.encoded)?;
                 let parent_hash = self.stack.pop().unwrap();
-                let actual = parent_cv(&l_hash, &r_hash, self.is_root);
-                self.is_root = false;
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
                 // Push the children in reverse order so they are popped in the correct order
                 // only push right if the range intersects with the right child
                 if tr {
@@ -367,8 +388,10 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     let l_hash = self.stack.pop().unwrap();
                     let l_data = read_range_io(&mut self.encoded, start..mid, &mut self.buffer)?;
                     offset += (mid - start).to_usize();
-                    let actual = hash_block(l_start_chunk, l_data, self.is_root);
-                    self.is_root = false;
+                    // if is_persisted is true, this is just the left child of a leaf with 2 children
+                    // and therefore not the root. Only if it is a half full leaf can it be root
+                    let l_is_root = is_root && !tree.is_persisted(node);
+                    let actual = hash_block(l_start_chunk, l_data, l_is_root);
                     if l_hash != actual {
                         break Err(DecodeSliceError::HashMismatch(node));
                     }
@@ -378,8 +401,9 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     let r_data =
                         read_range_io(&mut self.encoded, mid..end, &mut self.buffer[offset..])?;
                     offset += (end - mid).to_usize();
-                    let actual = hash_block(r_start_chunk, r_data, self.is_root);
-                    self.is_root = false;
+                    // right side can never be root, sorry
+                    let r_is_root = false;
+                    let actual = hash_block(r_start_chunk, r_data, r_is_root);
                     if r_hash != actual {
                         break Err(DecodeSliceError::HashMismatch(node));
                     }

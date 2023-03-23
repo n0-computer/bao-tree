@@ -702,6 +702,7 @@ impl BaoTree {
             node: TreeNode,
             ranges: &'a RangeSetRef<ChunkNum>,
             min_level: u8,
+            is_root: bool,
             res: &mut Vec<NodeInfo<'a>>,
         ) {
             if ranges.is_empty() {
@@ -724,18 +725,20 @@ impl BaoTree {
                 r_range: r_ranges,
                 full,
                 query_leaf,
+                is_root,
             });
             // if not leaf, recurse
             if !query_leaf {
                 let valid_nodes = tree.filled_size();
                 let l = node.left_child().unwrap();
                 let r = node.right_descendant(valid_nodes).unwrap();
-                iterate_part_rec(tree, l, l_ranges, min_level, res);
-                iterate_part_rec(tree, r, r_ranges, min_level, res);
+                iterate_part_rec(tree, l, l_ranges, min_level, false, res);
+                iterate_part_rec(tree, r, r_ranges, min_level, false, res);
             }
         }
         let mut res = Vec::new();
-        iterate_part_rec(self, self.root(), ranges, min_level, &mut res);
+        let can_be_root = self.start_chunk == 0;
+        iterate_part_rec(self, self.root(), ranges, min_level, can_be_root, &mut res);
         res
     }
 
