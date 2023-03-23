@@ -1,6 +1,5 @@
 use crate::tree::{BlockNum, ByteNum, ChunkNum, PONum};
 use blake3::guts::parent_cv;
-use ouroboros::self_referencing;
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
@@ -9,6 +8,8 @@ use std::{
     ops::{Range, RangeFrom},
     result,
 };
+mod iter;
+use iter::*;
 
 /// Defines a Bao tree.
 ///
@@ -102,7 +103,7 @@ impl BaoTree {
         ByteNum(tree.outboard_hash_pairs() * 64 + 8)
     }
 
-    fn filled_size(&self) -> TreeNode {
+    pub(crate) fn filled_size(&self) -> TreeNode {
         let blocks = self.blocks();
         let n = (blocks.0 + 1) / 2;
         TreeNode(n + n.saturating_sub(1))
@@ -114,24 +115,42 @@ impl BaoTree {
         ChunkNum(node.0 << self.chunk_group_log) + self.start_chunk
     }
 
-    /// Compute the post order outboard for the given data
-    pub fn outboard_post_order(data: &[u8], chunk_group_log: u8) -> (Vec<u8>, blake3::Hash) {
+    /// Compute the post order outboard for the given data, returning a Vec
+    pub fn outboard_post_order_mem(
+        data: impl AsRef<[u8]>,
+        chunk_group_log: u8,
+    ) -> (Vec<u8>, blake3::Hash) {
+        let data = data.as_ref();
         let tree =
             Self::new_with_start_chunk(ByteNum(data.len() as u64), chunk_group_log, ChunkNum(0));
         let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
         let mut res = Vec::with_capacity(outboard_len);
         let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
         let hash = tree
-            .outboard_post_order_with_start_chunk(&mut Cursor::new(data), &mut res, &mut buffer)
+            .outboard_post_order_sync_impl(&mut Cursor::new(data), &mut res, &mut buffer)
             .unwrap();
         res.extend_from_slice(&(data.len() as u64).to_le_bytes());
         (res, hash)
     }
 
+    /// Compute the post order outboard for the given data, writing into a io::Write
+    pub fn outboard_post_order_io(
+        data: &mut impl Read,
+        size: u64,
+        chunk_group_log: u8,
+        outboard: &mut impl Write,
+    ) -> io::Result<blake3::Hash> {
+        let tree = Self::new_with_start_chunk(ByteNum(size), chunk_group_log, ChunkNum(0));
+        let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
+        let hash = tree.outboard_post_order_sync_impl(data, outboard, &mut buffer)?;
+        outboard.write_all(&size.to_le_bytes())?;
+        Ok(hash)
+    }
+
     /// Compute the post order outboard for the given data
     ///
     /// This is the internal version that takes a start chunk and does not append the size!
-    fn outboard_post_order_with_start_chunk(
+    fn outboard_post_order_sync_impl(
         &self,
         data: &mut impl Read,
         outboard: &mut impl Write,
@@ -148,22 +167,16 @@ impl BaoTree {
                 let cgc = self.chunk_group_chunks();
                 match self.leaf_byte_ranges(leaf) {
                     Ok((l, r)) => {
-                        let l_len = (l.end - l.start).to_usize();
-                        let l_data = &mut buffer[..l_len];
-                        data.read_exact(l_data)?;
+                        let l_data = read_range_io(data, l, buffer)?;
                         let l_hash = hash_block(chunk0, l_data, false);
-                        let r_len = (r.end - r.start).to_usize();
-                        let r_data = &mut buffer[..r_len];
-                        data.read_exact(r_data)?;
+                        let r_data = read_range_io(data, r, buffer)?;
                         let r_hash = hash_block(chunk0 + cgc, r_data, false);
                         outboard.write_all(l_hash.as_bytes())?;
                         outboard.write_all(r_hash.as_bytes())?;
                         parent_cv(&l_hash, &r_hash, is_root)
                     }
                     Err(l) => {
-                        let l_len = (l.end - l.start).to_usize();
-                        let l_data = &mut buffer[..l_len];
-                        data.read_exact(l_data)?;
+                        let l_data = read_range_io(data, l, buffer)?;
                         let l_hash = hash_block(chunk0, l_data, is_root);
                         l_hash
                     }
@@ -183,15 +196,30 @@ impl BaoTree {
     }
 
     /// Compute the blake3 hash for the given data
-    pub fn blake3_hash(data: &[u8]) -> blake3::Hash {
-        Self::blake3_hash_internal(data, ChunkNum(0), true)
+    pub fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
+        let data = data.as_ref();
+        let cursor = Cursor::new(data);
+        let mut buffer = [0u8; 1024];
+        Self::blake3_hash_inner(
+            cursor,
+            ByteNum(data.len() as u64),
+            ChunkNum(0),
+            true,
+            &mut buffer,
+        )
+        .unwrap()
     }
 
     /// Internal hash computation. This allows to also compute a non root hash, e.g. for a block
-    pub fn blake3_hash_internal(data: &[u8], start_chunk: ChunkNum, is_root: bool) -> blake3::Hash {
-        // todo: allocate on the stack
+    pub fn blake3_hash_inner(
+        mut data: impl Read,
+        data_len: ByteNum,
+        start_chunk: ChunkNum,
+        is_root: bool,
+        buf: &mut [u8],
+    ) -> io::Result<blake3::Hash> {
         let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-        let tree = Self::new_with_start_chunk(ByteNum(data.len() as u64), 0, start_chunk);
+        let tree = Self::new_with_start_chunk(data_len, 0, start_chunk);
         let root = tree.root();
         let can_be_root = is_root;
         for node in tree.iterate() {
@@ -201,16 +229,15 @@ impl BaoTree {
                 let chunk0 = tree.chunk_num(leaf);
                 match tree.leaf_byte_ranges(leaf) {
                     Ok((l, r)) => {
-                        let left = &data[l.start.to_usize()..l.end.to_usize()];
-                        let right = &data[r.start.to_usize()..r.end.to_usize()];
-                        let left_hash = hash_chunk(chunk0, left, false);
-                        let right_hash =
-                            hash_chunk(chunk0 + tree.chunk_group_chunks(), right, false);
+                        let ld = read_range_io(&mut data, l, buf)?;
+                        let left_hash = hash_chunk(chunk0, ld, false);
+                        let rd = read_range_io(&mut data, r, buf)?;
+                        let right_hash = hash_chunk(chunk0 + tree.chunk_group_chunks(), rd, false);
                         parent_cv(&left_hash, &right_hash, is_root)
                     }
                     Err(l) => {
-                        let left = &data[l.start.to_usize()..l.end.to_usize()];
-                        hash_chunk(chunk0, left, is_root)
+                        let ld = read_range_io(&mut data, l, buf)?;
+                        hash_chunk(chunk0, ld, is_root)
                     }
                 }
             } else {
@@ -221,7 +248,7 @@ impl BaoTree {
             stack.push(hash);
         }
         debug_assert_eq!(stack.len(), 1);
-        stack.pop().unwrap()
+        Ok(stack.pop().unwrap())
     }
 
     /// Decode encoded ranges given the root hash
@@ -533,6 +560,10 @@ impl BaoTree {
         ByteNum(blocks.0 << (10 + self.chunk_group_log))
     }
 
+    fn pre_order_offset(&self, node: TreeNode) -> u64 {
+        pre_order_offset_slow(node.0, self.filled_size().0)
+    }
+
     fn post_order_offset(&self, node: TreeNode) -> PostOrderOffset {
         if self.is_sealed(node) {
             PostOrderOffset::Stable(node.post_order_offset())
@@ -601,6 +632,34 @@ fn canonicalize_range(
     }
 }
 
+fn read_range_io<'a>(
+    from: &mut impl Read,
+    range: Range<ByteNum>,
+    buf: &'a mut [u8],
+) -> io::Result<&'a [u8]> {
+    let len = (range.end - range.start).to_usize();
+    let mut buf = &mut buf[..len];
+    from.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+fn read_range_mem(from: &[u8], range: Range<ByteNum>) -> &[u8] {
+    let start = range.start.to_usize();
+    let end = range.end.to_usize();
+    &from[start..end]
+}
+
+// async fn read_range_tokio<'a>(
+//     from: &mut impl AsyncRead,
+//     range: Range<ByteNum>,
+//     buf: &'a mut [u8],
+// ) -> io::Result<&'a [u8]> {
+//     let len = (range.end - range.start).to_usize();
+//     let mut buf = &mut buf[..len];
+//     from.read_exact(&mut buf)?;
+//     Ok(buf)
+// }
+
 fn is_odd(x: usize) -> bool {
     x & 1 == 1
 }
@@ -665,7 +724,7 @@ impl TreeNode {
     }
 
     // the middle of the tree node, in blocks
-    fn mid(&self) -> BlockNum {
+    pub fn mid(&self) -> BlockNum {
         BlockNum(self.0 + 1)
     }
 
@@ -782,9 +841,8 @@ impl TreeNode {
     /// Range of blocks this node covers
     const fn block_range0(&self) -> Range<u64> {
         let level = self.level();
-        let nn = self.0;
         let span = 1 << level;
-        let mid = nn + 1;
+        let mid = self.0 + 1;
         // at level 0 (leaf), range will be nn..nn+2
         // at level >0 (branch), range will be centered on nn+1
         mid - span..mid + span
@@ -852,7 +910,10 @@ pub(crate) fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3:
 /// It is up to the user to make sure `data.len() <= 1024 * 2^chunk_group_log`
 /// It does not make sense to set start_chunk to a value that is not a multiple of 2^chunk_group_log.
 pub(crate) fn hash_block(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
-    BaoTree::blake3_hash_internal(data, start_chunk, is_root)
+    let mut buffer = [0u8; 1024];
+    let data_len = ByteNum(data.len() as u64);
+    let data = Cursor::new(data);
+    BaoTree::blake3_hash_inner(data, data_len, start_chunk, is_root, &mut buffer).unwrap()
 }
 
 impl Outboard {
@@ -869,306 +930,43 @@ impl Outboard {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct NodeInfo {
-    /// the node
-    pub node: TreeNode,
-    /// left child intersects with the query range
-    pub tl: bool,
-    /// right child intersects with the query range
-    pub tr: bool,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct NodeInfo2 {
-    /// the node
-    pub node: TreeNode,
-    /// left child intersects with the query range
-    pub tl: bool,
-    /// right child intersects with the query range
-    pub tr: bool,
-    /// the node is fully included in the query range
-    pub full: bool,
-}
-
-/// Iterator over all nodes in a BaoTree in pre-order that overlap with a given chunk range.
-pub struct PreOrderPartialIterRef<'a> {
-    /// the tree we want to traverse
-    tree: BaoTree,
-    /// number of valid nodes, needed in node.right_descendant
-    valid_nodes: TreeNode,
-    /// stack of nodes to visit
-    stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
-}
-
-impl<'a> PreOrderPartialIterRef<'a> {
-    pub fn new(tree: BaoTree, range: &'a RangeSetRef<ChunkNum>) -> Self {
-        let mut stack = SmallVec::new();
-        stack.push((tree.root(), range));
-        Self {
-            tree,
-            stack,
-            valid_nodes: tree.filled_size(),
-        }
-    }
-}
-
-impl<'a> Iterator for PreOrderPartialIterRef<'a> {
-    type Item = NodeInfo;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let tree = &self.tree;
-        loop {
-            let (node, ranges) = self.stack.pop()?;
-            if ranges.is_empty() {
-                continue;
-            }
-            // the middle chunk of the node
-            let mid = node.mid().to_chunks(tree.chunk_group_log);
-            // split the ranges into left and right
-            let (l_ranges, r_ranges) = ranges.split(mid);
-            if !node.is_leaf() {
-                let l = node.left_child().unwrap();
-                let r = node.right_descendant(self.valid_nodes).unwrap();
-                // push right first so we pop left first
-                self.stack.push((r, r_ranges));
-                self.stack.push((l, l_ranges));
-            }
-            // emit the node in any case
-            break Some(NodeInfo {
-                node,
-                tl: !l_ranges.is_empty(),
-                tr: !r_ranges.is_empty(),
-            });
-        }
-    }
-}
-
-#[self_referencing]
-struct PreOrderPartialIterInner<R: 'static> {
-    ranges: R,
-    #[borrows(ranges)]
-    #[not_covariant]
-    iter: PreOrderPartialIterRef<'this>,
-}
-
-/// Same as PreOrderPartialIterRef, but owns the ranges so it can be converted into a stream conveniently.
-pub struct PreOrderPartialIter<R: AsRef<RangeSetRef<ChunkNum>> + 'static>(
-    PreOrderPartialIterInner<R>,
-);
-
-impl<R: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<R> {
-    /// Create a new PreOrderPartialIter.
-    ///
-    /// ranges has to implement AsRef<RangeSetRef<ChunkNum>>, so you can pass e.g. a RangeSet2.
-    pub fn new(tree: BaoTree, ranges: R) -> Self {
-        Self(
-            PreOrderPartialIterInnerBuilder {
-                ranges,
-                iter_builder: |ranges| PreOrderPartialIterRef::new(tree, ranges.as_ref()),
-            }
-            .build(),
-        )
-    }
-}
-
-impl<A: AsRef<RangeSetRef<ChunkNum>> + 'static> Iterator for PreOrderPartialIter<A> {
-    type Item = NodeInfo;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.with_iter_mut(|x| x.next())
-    }
-}
-
-/// Iterator over all nodes in a BaoTree in pre-order that overlap with a given chunk range.
-pub struct PreOrderPartialIterRef2<'a> {
-    /// the tree we want to traverse
-    tree: BaoTree,
-    /// number of valid nodes, needed in node.right_descendant
-    valid_nodes: TreeNode,
-    /// stack of nodes to visit
-    stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
-}
-
-impl<'a> PreOrderPartialIterRef2<'a> {
-    pub fn new(tree: BaoTree, range: &'a RangeSetRef<ChunkNum>) -> Self {
-        let mut stack = SmallVec::new();
-        stack.push((tree.root(), range));
-        Self {
-            tree,
-            stack,
-            valid_nodes: tree.filled_size(),
-        }
-    }
-}
-
-impl<'a> Iterator for PreOrderPartialIterRef2<'a> {
-    type Item = NodeInfo2;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let tree = &self.tree;
-        loop {
-            let (node, ranges) = self.stack.pop()?;
-            if ranges.is_empty() {
-                continue;
-            }
-            // the middle chunk of the node
-            let mid = node.mid().to_chunks(tree.chunk_group_log);
-            // the start chunk of the node
-            let start = node.block_range().start.to_chunks(tree.chunk_group_log);
-            // split the ranges into left and right
-            let (l_ranges, r_ranges) = ranges.split(mid);
-            // check if the node is fully included
-            let is_fully_included =
-                ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
-            // this is the only difference to the other iterator.
-            // When a node is fully included in the ranges we don't traverse the children.
-            if !is_fully_included && !node.is_leaf() {
-                let l = node.left_child().unwrap();
-                let r = node.right_descendant(self.valid_nodes).unwrap();
-                // push right first so we pop left first
-                self.stack.push((r, r_ranges));
-                self.stack.push((l, l_ranges));
-            }
-            // emit the node in any case
-            break Some(NodeInfo2 {
-                node,
-                tl: !l_ranges.is_empty(),
-                tr: !r_ranges.is_empty(),
-                full: is_fully_included,
-            });
-        }
-    }
-}
-
-/// Iterator over all nodes in a BaoTree in post-order.
-pub struct PostOrderTreeIter {
-    /// the overall number of nodes in the tree
-    len: TreeNode,
-    /// the current node, None if we are done
-    curr: TreeNode,
-    /// where we came from, used to determine the next node
-    prev: Prev,
-}
-
-impl PostOrderTreeIter {
-    pub fn new(tree: BaoTree) -> Self {
-        Self {
-            len: tree.filled_size(),
-            curr: tree.root(),
-            prev: Prev::Parent,
-        }
-    }
-
-    fn go_up(&mut self, curr: TreeNode) {
-        let prev = curr;
-        (self.curr, self.prev) = if let Some(parent) = curr.restricted_parent(self.len) {
-            (
-                parent,
-                if prev < parent {
-                    Prev::Left
-                } else {
-                    Prev::Right
-                },
-            )
+/// Slow iterative way to find the offset of a node in a pre-order traversal.
+///
+/// I am sure there is a way that does not require a loop, but this will do for now.
+fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
+    // node level, 0 for leaf nodes
+    let level = (!node).trailing_zeros();
+    // span of the node, 1 for leaf nodes
+    let span = 1u64 << level;
+    // nodes to the left of the tree of this node
+    let left = node + 1 - span;
+    // count the parents with a loop
+    let mut pc = 0;
+    let mut offset = node;
+    let mut span = span;
+    loop {
+        let pspan = span * 2;
+        offset = if (offset & pspan) == 0 {
+            offset + span
         } else {
-            (curr, Prev::Done)
+            offset - span
         };
-    }
-}
-
-impl Iterator for PostOrderTreeIter {
-    type Item = TreeNode;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let curr = self.curr;
-            match self.prev {
-                Prev::Done => {
-                    break None;
-                }
-                Prev::Parent => {
-                    if curr.is_leaf() {
-                        self.go_up(curr);
-                        break Some(curr);
-                    } else {
-                        // go left first when coming from above, don't emit curr
-                        self.curr = curr.left_child().unwrap();
-                        self.prev = Prev::Parent;
-                    }
-                }
-                Prev::Left => {
-                    // no need to check is_leaf, since we come from a left child
-                    // go right when coming from left, don't emit curr
-                    self.curr = curr.right_descendant(self.len).unwrap();
-                    self.prev = Prev::Parent;
-                }
-                Prev::Right => {
-                    // go up in any case, do emit curr
-                    self.go_up(curr);
-                    break Some(curr);
-                }
-            }
+        if offset < len {
+            pc += 1;
         }
-    }
-}
-
-enum Prev {
-    Parent,
-    Left,
-    Right,
-    Done,
-}
-
-#[cfg(test)]
-pub struct PostOrderTreeIterStack {
-    len: TreeNode,
-    // stack of (node, done) pairs
-    // done=true means we immediately return the node
-    //
-    // this is not big enough for the worst case, but it's fine to allocate
-    // for a giant tree
-    //
-    // todo: figure out how to get rid of the done flag
-    stack: SmallVec<[(TreeNode, bool); 8]>,
-}
-
-#[cfg(test)]
-impl PostOrderTreeIterStack {
-    fn new(tree: BaoTree) -> Self {
-        let mut stack = SmallVec::new();
-        stack.push((tree.root(), false));
-        let len = tree.filled_size();
-        Self { len, stack }
-    }
-}
-
-#[cfg(test)]
-impl Iterator for PostOrderTreeIterStack {
-    type Item = TreeNode;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let (node, done) = self.stack.pop()?;
-            if done || node.is_leaf() {
-                return Some(node);
-            } else {
-                // push node back on stack, with done=true
-                self.stack.push((node, true));
-                // push right child on stack first, with done=false
-                self.stack
-                    .push((node.right_descendant(self.len).unwrap(), false));
-                // push left child on stack, with done=false
-                self.stack.push((node.left_child().unwrap(), false));
-            }
+        if pspan >= len {
+            break;
         }
+        span = pspan;
     }
+    left - (left.count_ones() as u64) + pc
 }
 
 #[cfg(test)]
 mod tests {
 
     use std::{
+        collections::HashMap,
         io::{Cursor, Read, Write},
         ops::Range,
     };
@@ -1178,7 +976,10 @@ mod tests {
 
     use super::BaoTree;
     use crate::{
-        bao_tree::{NodeInfo, PostOrderTreeIter, PostOrderTreeIterStack},
+        bao_tree::{
+            pre_order_offset_slow, NodeInfo, PostOrderOffset, PostOrderTreeIter,
+            PostOrderTreeIterStack, TreeNode,
+        },
         tree::{ByteNum, ChunkNum, PONum, BLAKE3_CHUNK_SIZE},
     };
 
@@ -1226,7 +1027,7 @@ mod tests {
 
     fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNum>) {
         let expected = encode_slice_reference(&data, range.clone()).0;
-        let (outboard, _hash) = BaoTree::outboard_post_order(&data, 0);
+        let (outboard, _hash) = BaoTree::outboard_post_order_mem(&data, 0);
         // extend empty range to contain at least 1 byte
         if range.start == range.end {
             range.end.0 += 1;
@@ -1250,7 +1051,7 @@ mod tests {
 
     fn bao_tree_outboard_comparison_impl(data: Vec<u8>) {
         let (expected, expected_hash) = post_order_outboard_reference(&data);
-        let (actual, actual_hash) = BaoTree::outboard_post_order(&data, 0);
+        let (actual, actual_hash) = BaoTree::outboard_post_order_mem(&data, 0);
         assert_eq!(expected_hash, actual_hash);
         assert_eq!(expected, actual);
     }
@@ -1277,7 +1078,7 @@ mod tests {
         let td = td(1024 * 32);
         let expected = BaoTree::blake3_hash(&td);
         for chunk_group_log in 0..4 {
-            let (outboard, hash) = BaoTree::outboard_post_order(&td, chunk_group_log);
+            let (outboard, hash) = BaoTree::outboard_post_order_mem(&td, chunk_group_log);
             assert_eq!(expected, hash);
             assert_eq!(
                 ByteNum(outboard.len() as u64),
@@ -1293,7 +1094,7 @@ mod tests {
         mut range: Range<ChunkNum>,
         chunk_group_log: u8,
     ) {
-        let (outboard, root) = BaoTree::outboard_post_order(&data, chunk_group_log);
+        let (outboard, root) = BaoTree::outboard_post_order_mem(&data, chunk_group_log);
         // extend empty range to contain at least 1 byte
         if range.start == range.end {
             range.end.0 += 1;
@@ -1433,6 +1234,137 @@ mod tests {
         })
     }
 
+    // create the mapping from a node number to the offset in the pre order traversal,
+    // using brute force lookup in the bao output
+    fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
+        use make_test_data as td;
+        let data = td(size);
+        let (post, _) = BaoTree::outboard_post_order_mem(&data, 0);
+        let (mut pre, _) = bao::encode::outboard(data);
+        pre.splice(..8, []);
+        let map = pre
+            .chunks_exact(64)
+            .enumerate()
+            .map(|(i, h)| (h, i))
+            .collect::<HashMap<_, _>>();
+        let tree = BaoTree::new(ByteNum(size as u64), 0);
+        let mut res = Vec::new();
+        for c in 0..tree.filled_size().0 {
+            let node = TreeNode(c);
+            if let Some(offset) = tree.post_order_offset(node).value() {
+                let offset = offset.to_usize();
+                let hash = post[offset * 64..offset * 64 + 64].to_vec();
+                let index = *map.get(hash.as_slice()).unwrap();
+                res.push((node, index));
+            }
+        }
+        res
+    }
+
+    fn right_parent_count(node: TreeNode, len: TreeNode) -> u64 {
+        assert!(node < len);
+        let mut node = node;
+        let mut count = 0;
+        while let Some(parent) = node.parent() {
+            if parent < node || parent >= len {
+                break;
+            }
+            count += 1;
+            node = parent;
+        }
+        count
+    }
+
+    fn parent_count(node: TreeNode, tree: BaoTree, x: u64) -> u64 {
+        let len = tree.filled_size();
+        let root = tree.root();
+        assert!(node < len);
+        let mut node = node;
+        let mut count = 0;
+        while let Some(parent) = node.parent() {
+            if parent < len && parent.0 >= x {
+                count += 1;
+            }
+            node = parent;
+            if parent == root {
+                break;
+            }
+        }
+        count
+    }
+
+    fn parent_count2(node: TreeNode, tree: BaoTree) -> u64 {
+        let len = tree.filled_size();
+        let root = tree.root();
+        assert!(node < len);
+        assert!(root < len);
+        let mut node = node;
+        let mut count = 0;
+        while let Some(parent) = node.parent() {
+            if parent < len {
+                count += 1;
+            }
+            node = parent;
+            if parent == root {
+                break;
+            }
+        }
+        count
+    }
+
+    /// Counts the number of parents that `node` would have if it were in a tree of size `len`
+    fn parents_loop(node: u64, len: u64) -> u64 {
+        assert!(node < len);
+        let mut count = 0;
+        let level = (!node).trailing_zeros();
+        let mut span = 1u64 << level;
+        let mut offset = node;
+        loop {
+            let pspan = span * 2;
+            offset = if (offset & pspan) == 0 {
+                offset + span
+            } else {
+                offset - span
+            };
+            if offset < len {
+                count += 1;
+            }
+            if pspan >= len {
+                break;
+            }
+            span = pspan;
+        }
+        count
+    }
+
+    fn compare_pre_order_outboard(case: usize) {
+        let size = ByteNum(case as u64);
+        let tree = BaoTree::new(size, 0);
+        let perm = create_permutation_reference(case);
+        for (k, v) in perm {
+            let preo = k.block_range().start.0;
+            let rpc = parent_count(k, tree, preo);
+            let res = preo + rpc;
+            let pc = parents_loop(k.0, tree.filled_size().0);
+            let corr = preo.count_ones() as u64;
+            let res2 = preo + pc - corr;
+            // println!("{}\t{:b}\t:\t{}\t{}\t{}\t{}", k.0, k.0, v, preo, rpc, ld);
+            // println!("{}\t{:b}\t:\t{}\t{}\t{}\t{}", k.0, k.0, v, preo, pc, res2);
+            // println!("{}\t:\t{}\t{}", k.0, v, res);
+            assert_eq!(v as u64, res);
+            assert_eq!(v as u64, res2);
+            assert_eq!(v as u64, pre_order_offset_slow(k.0, tree.filled_size().0));
+        }
+    }
+
+    #[test]
+    fn pre_post_outboard_cases() {
+        let cases = [20000];
+        for case in cases {
+            compare_pre_order_outboard(case);
+        }
+    }
+
     proptest! {
 
         #[test]
@@ -1499,6 +1431,11 @@ mod tests {
             let iter3 = tree.iterate_part_preorder(RangeSet2::from(chunk_range)).collect::<Vec<_>>();
             prop_assert_eq!(&iter1, &iter2);
             prop_assert_eq!(&iter1, &iter3);
+        }
+
+        #[test]
+        fn pre_post_outboard(n in 0usize..1000000) {
+            compare_pre_order_outboard(n);
         }
     }
 
