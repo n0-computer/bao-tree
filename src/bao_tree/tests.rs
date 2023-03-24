@@ -91,7 +91,9 @@ fn bao_tree_decode_slice_impl(data: Vec<u8>, range: Range<u64>) {
     let size = ByteNum(data.len() as u64);
     let expected = data;
     let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
-    for item in BaoTree::decode_ranges(root, Cursor::new(encoded), &ranges, 0) {
+    let mut ec = Cursor::new(encoded);
+    let mut scratch = vec![0u8; 2048];
+    for item in BaoTree::decode_ranges_into_chunks(root, 0, &mut ec, &ranges, &mut scratch) {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
@@ -159,11 +161,14 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, chun
     );
     let expected = data;
     let mut all_ranges = RangeSet2::empty();
-    for item in BaoTree::decode_ranges(
+    let mut ec = Cursor::new(encoded);
+    let mut scratch = vec![0u8; 2048 << chunk_group_log];
+    for item in BaoTree::decode_ranges_into_chunks(
         root,
-        Cursor::new(encoded),
-        &RangeSet2::from(range),
         chunk_group_log,
+        &mut ec,
+        &RangeSet2::from(range),
+        &mut scratch,
     ) {
         let (pos, slice) = item.unwrap();
         // compute all data ranges

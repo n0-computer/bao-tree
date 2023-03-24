@@ -255,154 +255,54 @@ impl BaoTree {
         Ok(stack.pop().unwrap())
     }
 
-    /// Decode encoded ranges given the root hash
-    pub fn decode_ranges<'a>(
+    pub fn decode_ranges_into<'a>(
         root: blake3::Hash,
-        mut encoded: impl Read,
-        ranges: &RangeSetRef<ChunkNum>,
         chunk_group_log: u8,
-    ) -> impl Iterator<Item = io::Result<(ByteNum, Vec<u8>)>> + 'a {
-        let mut buffer = vec![0u8; 2048 << (10 + chunk_group_log)];
-        let mut iter =
-            DecodeSliceIter::new(root, &ranges, chunk_group_log, &mut encoded, &mut buffer);
-        let mut res = Vec::new();
-        while let Some(item) = iter.next() {
-            match item {
-                Ok(range) => {
-                    let len = (range.end - range.start).to_usize();
-                    let data = &iter.buffer()[..len];
-                    res.push(Ok((range.start, data.to_vec())));
+        encoded: &'a mut impl Read,
+        ranges: &'a RangeSetRef<ChunkNum>,
+        scratch: &'a mut [u8],
+        target: &'a mut (impl Write + Seek),
+    ) -> impl Iterator<Item = io::Result<Range<ByteNum>>> + 'a {
+        let iter = DecodeSliceIter::new(root, chunk_group_log, encoded, &ranges, scratch);
+        let mut first = true;
+        MapWithRef::new(iter, move |iter, item| match item {
+            Ok(range) => {
+                if first {
+                    let tree = iter.tree().unwrap();
+                    let target_len = ByteNum(target.seek(io::SeekFrom::End(0))?);
+                    if target_len < tree.size {
+                        io_error!("target is too small")
+                    }
+                    first = false;
                 }
-                Err(e) => {
-                    res.push(Err(e.into()));
-                }
+                let len = (range.end - range.start).to_usize();
+                let data = &iter.buffer()[..len];
+                target.seek(io::SeekFrom::Start(range.start.0))?;
+                target.write_all(data)?;
+                Ok(range)
             }
-        }
-        res.into_iter()
+            Err(e) => Err(e.into()),
+        })
     }
 
     /// Decode encoded ranges given the root hash
-    pub fn decode_ranges_old<'a>(
+    #[cfg(test)]
+    pub fn decode_ranges_into_chunks<'a>(
         root: blake3::Hash,
-        mut encoded: impl Read,
-        ranges: &RangeSetRef<ChunkNum>,
         chunk_group_log: u8,
+        encoded: &'a mut impl Read,
+        ranges: &'a RangeSetRef<ChunkNum>,
+        scratch: &'a mut [u8],
     ) -> impl Iterator<Item = io::Result<(ByteNum, Vec<u8>)>> + 'a {
-        let mut buffer = vec![0u8; 2 << (10 + chunk_group_log)];
-        let size = read_len_io(&mut encoded).unwrap();
-        let res = match canonicalize_range(ranges, size.chunks()) {
-            Ok(ranges) => Self::decode_ranges_impl(
-                root,
-                &mut encoded,
-                size,
-                ranges,
-                chunk_group_log,
-                &mut buffer,
-            ),
-            Err(range) => {
-                let ranges = RangeSet2::from(range);
-                // If the range doesn't intersect with the data, ask for the last chunk
-                // this is so it matches the behavior of bao
-                Self::decode_ranges_impl(
-                    root,
-                    &mut encoded,
-                    size,
-                    &ranges,
-                    chunk_group_log,
-                    &mut buffer,
-                )
+        let iter = DecodeSliceIter::new(root, chunk_group_log, encoded, &ranges, scratch);
+        MapWithRef::new(iter, |iter, item| match item {
+            Ok(range) => {
+                let len = (range.end - range.start).to_usize();
+                let data = &iter.buffer()[..len];
+                Ok((range.start, data.to_vec()))
             }
-        };
-        res.into_iter()
-    }
-
-    fn decode_ranges_impl<'a>(
-        root: blake3::Hash,
-        encoded: &mut impl Read,
-        size: ByteNum,
-        ranges: &RangeSetRef<ChunkNum>,
-        chunk_group_log: u8,
-        buffer: &'a mut [u8],
-    ) -> Vec<io::Result<(ByteNum, Vec<u8>)>> {
-        let mut res = Vec::new();
-        let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-        stack.push(root);
-        let tree = Self::new(size, chunk_group_log);
-        let mut is_root = true;
-        for NodeInfo {
-            node,
-            l_range: lr,
-            r_range: rr,
-            ..
-        } in tree.iterate_part_preorder_ref(ranges, 0)
-        {
-            let tl = !lr.is_empty();
-            let tr = !rr.is_empty();
-            if tree.is_persisted(node) {
-                let (l_hash, r_hash) = read_parent_io(encoded).unwrap();
-                let parent_hash = stack.pop().unwrap();
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
-                is_root = false;
-                if parent_hash != actual {
-                    res.push(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Hash mismatch",
-                    )));
-                    break;
-                }
-                // Push the children in reverse order so they are popped in the correct order
-                // only push right if the range intersects with the right child
-                if tr {
-                    stack.push(r_hash);
-                }
-                // only push left if the range intersects with the left child
-                if tl {
-                    stack.push(l_hash);
-                }
-            }
-            if let Some(leaf) = node.as_leaf() {
-                let (start, mid, end) = tree.leaf_byte_ranges3(leaf);
-                let l_start_chunk = tree.chunk_num(leaf);
-                let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
-                let mut offset = 0usize;
-                if tl {
-                    let l_hash = stack.pop().unwrap();
-                    let l_start = start;
-                    let l_data = read_bytes_io(encoded, start..mid, buffer).unwrap();
-                    offset += (mid - start).to_usize();
-                    let actual = hash_block(l_start_chunk, l_data, is_root);
-                    is_root = false;
-                    if l_hash != actual {
-                        res.push(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Hash mismatch",
-                        )));
-                        break;
-                    }
-                    // res.push(Ok((l_start, l_data.to_vec())));
-                }
-                if tr && mid < end {
-                    let r_hash = stack.pop().unwrap();
-                    let r_start = mid;
-                    let r_data = read_bytes_io(encoded, mid..end, &mut buffer[offset..]).unwrap();
-                    offset += (end - mid).to_usize();
-                    let actual = hash_block(r_start_chunk, r_data, is_root);
-                    is_root = false;
-                    if r_hash != actual {
-                        res.push(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Hash mismatch",
-                        )));
-                        break;
-                    }
-                    // res.push(Ok((r_start, r_data.to_vec())));
-                }
-                assert!(tl || tr);
-                let start = if tl { start } else { mid };
-                res.push(Ok((start, buffer[..offset].to_vec())));
-            }
-        }
-        res
+            Err(e) => Err(e.into()),
+        })
     }
 
     /// Given a *post order* outboard, encode a slice of data
@@ -1096,4 +996,20 @@ fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
         span = pspan;
     }
     left - (left.count_ones() as u64) + pc
+}
+
+struct MapWithRef<I, F>(I, F);
+
+impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> MapWithRef<I, F> {
+    fn new(i: I, f: F) -> Self {
+        Self(i, f)
+    }
+}
+
+impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> Iterator for MapWithRef<I, F> {
+    type Item = R;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|x| (self.1)(&self.0, x))
+    }
 }

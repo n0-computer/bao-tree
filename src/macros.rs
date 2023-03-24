@@ -97,3 +97,9 @@ macro_rules! index_newtype {
         }
     }
 }
+
+macro_rules! io_error {
+    ($($arg:tt)*) => {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
+    };
+}

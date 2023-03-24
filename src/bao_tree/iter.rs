@@ -486,19 +486,19 @@ impl From<io::Error> for DecodeSliceError {
 impl<'a, R: Read> DecodeSliceIter<'a, R> {
     pub fn new(
         root: blake3::Hash,
-        range: &'a RangeSetRef<ChunkNum>,
         chunk_group_log: u8,
         encoded: R,
+        ranges: &'a RangeSetRef<ChunkNum>,
         scratch: &'a mut [u8],
     ) -> Self {
         // make sure the buffer is big enough
-        assert!(scratch.len() >= 1024 << chunk_group_log);
+        assert!(scratch.len() >= 2048 << chunk_group_log);
         let mut stack = SmallVec::new();
         stack.push(root);
         Self {
             stack,
             inner: Position::Header {
-                ranges: range,
+                ranges,
                 chunk_group_log,
             },
             encoded,
@@ -508,6 +508,13 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
 
     pub fn buffer(&self) -> &[u8] {
         &self.scratch
+    }
+
+    pub fn tree(&self) -> Option<BaoTree> {
+        match &self.inner {
+            Position::Content { iter } => Some(iter.tree().clone()),
+            Position::Header { .. } => None,
+        }
     }
 
     fn next0(&mut self) -> result::Result<Option<Range<ByteNum>>, DecodeSliceError> {
