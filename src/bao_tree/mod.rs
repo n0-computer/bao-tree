@@ -13,6 +13,8 @@ mod iter;
 #[cfg(test)]
 mod tests;
 use iter::*;
+mod outboard;
+use outboard::*;
 
 /// Defines a Bao tree.
 ///
@@ -118,11 +120,11 @@ impl BaoTree {
         ChunkNum(node.0 << self.chunk_group_log) + self.start_chunk
     }
 
-    /// Compute the post order outboard for the given data, returning a Vec
+    /// Compute the post order outboard for the given data, returning a in mem data structure
     pub fn outboard_post_order_mem(
         data: impl AsRef<[u8]>,
         chunk_group_log: u8,
-    ) -> (Vec<u8>, blake3::Hash) {
+    ) -> PostOrderMemOutboard {
         let data = data.as_ref();
         let tree =
             Self::new_with_start_chunk(ByteNum(data.len() as u64), chunk_group_log, ChunkNum(0));
@@ -132,8 +134,7 @@ impl BaoTree {
         let hash = tree
             .outboard_post_order_sync_impl(&mut Cursor::new(data), &mut res, &mut buffer)
             .unwrap();
-        res.extend_from_slice(&(data.len() as u64).to_le_bytes());
-        (res, hash)
+        PostOrderMemOutboard::new(hash, tree, res)
     }
 
     /// Compute the post order outboard for the given data, writing into a io::Write
@@ -313,130 +314,6 @@ impl BaoTree {
             }
         };
         res.into_iter()
-    }
-
-    /// Decode encoded ranges given the root hash
-    pub fn decode_ranges_into(
-        root: blake3::Hash,
-        encoded: impl Read,
-        into: &mut File,
-        ranges: &RangeSetRef<ChunkNum>,
-        chunk_group_log: u8,
-    ) -> impl Iterator<Item = io::Result<Range<ByteNum>>> {
-        let mut encoded = encoded;
-        let mut buffer = vec![0u8; 1 << (10 + chunk_group_log)];
-        let size = read_len_io(&mut encoded).unwrap();
-        let res = match canonicalize_range(ranges, size.chunks()) {
-            Ok(ranges) => Self::decode_ranges_into_impl(
-                root,
-                &mut encoded,
-                size,
-                ranges,
-                chunk_group_log,
-                &mut buffer,
-                into,
-            ),
-            Err(range) => {
-                let ranges = RangeSet2::from(range);
-                // If the range doesn't intersect with the data, ask for the last chunk
-                // this is so it matches the behavior of bao
-                Self::decode_ranges_into_impl(
-                    root,
-                    &mut encoded,
-                    size,
-                    &ranges,
-                    chunk_group_log,
-                    &mut buffer,
-                    into,
-                )
-            }
-        };
-        res.into_iter()
-    }
-
-    fn decode_ranges_into_impl<'a>(
-        root: blake3::Hash,
-        encoded: &mut impl Read,
-        size: ByteNum,
-        ranges: &RangeSetRef<ChunkNum>,
-        chunk_group_log: u8,
-        buffer: &'a mut [u8],
-        target: &mut (impl Write + Seek),
-    ) -> Vec<io::Result<Range<ByteNum>>> {
-        let mut res = Vec::new();
-        let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-        stack.push(root);
-        let tree = Self::new(size, chunk_group_log);
-        let mut is_root = true;
-        for NodeInfo {
-            node,
-            l_range,
-            r_range,
-            ..
-        } in tree.iterate_part_preorder_ref(ranges, 0)
-        {
-            let tl = !l_range.is_empty();
-            let tr = !r_range.is_empty();
-            if tree.is_persisted(node) {
-                let (l_hash, r_hash) = read_parent_io(encoded).unwrap();
-                let parent_hash = stack.pop().unwrap();
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
-                is_root = false;
-                if parent_hash != actual {
-                    res.push(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Hash mismatch",
-                    )));
-                    break;
-                }
-                // Push the children in reverse order so they are popped in the correct order
-                // only push right if the range intersects with the right child
-                if tr {
-                    stack.push(r_hash);
-                }
-                // only push left if the range intersects with the left child
-                if tl {
-                    stack.push(l_hash);
-                }
-            }
-            if let Some(leaf) = node.as_leaf() {
-                let (l_range, r_range) = tree.leaf_byte_ranges2(leaf);
-                let l_start_chunk = tree.chunk_num(leaf);
-                let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
-                if tl {
-                    let l_hash = stack.pop().unwrap();
-                    let l_data = read_bytes_io(encoded, l_range.clone(), buffer).unwrap();
-                    let actual = hash_block(l_start_chunk, l_data, is_root);
-
-                    is_root = false;
-                    if l_hash != actual {
-                        res.push(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Hash mismatch",
-                        )));
-                        break;
-                    }
-                    write_range_io(l_range.start, l_data, target).unwrap();
-                    res.push(Ok(l_range));
-                }
-                if tr && r_range.start < size {
-                    let r_hash = stack.pop().unwrap();
-                    let r_data = read_bytes_io(encoded, r_range.clone(), buffer).unwrap();
-                    let actual = hash_block(r_start_chunk, r_data, is_root);
-                    is_root = false;
-                    if r_hash != actual {
-                        res.push(Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "Hash mismatch",
-                        )));
-                        break;
-                    }
-                    write_range_io(r_range.start, r_data, target).unwrap();
-                    res.push(Ok(r_range));
-                }
-            }
-        }
-        res
     }
 
     fn decode_ranges_impl<'a>(
@@ -759,8 +636,12 @@ impl BaoTree {
         ByteNum(blocks.0 << (10 + self.chunk_group_log))
     }
 
-    fn pre_order_offset(&self, node: TreeNode) -> u64 {
-        pre_order_offset_slow(node.0, self.filled_size().0)
+    fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
+        if self.is_persisted(node) {
+            Some(pre_order_offset_slow(node.0, self.filled_size().0))
+        } else {
+            None
+        }
     }
 
     fn post_order_offset(&self, node: TreeNode) -> PostOrderOffset {
@@ -877,6 +758,12 @@ fn parse_hash_pair(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     (l_hash, r_hash)
 }
 
+fn parse_hash_pair2(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {
+    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
+    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
+    (l_hash, r_hash)
+}
+
 /// read the bytes for the range from the source
 ///
 /// note that this will read start-end bytes from the current position, not seek to start
@@ -933,11 +820,6 @@ fn is_odd(x: usize) -> bool {
 }
 
 type Parent = (blake3::Hash, blake3::Hash);
-
-struct Outboard {
-    stable: Vec<Parent>,
-    unstable: Vec<Parent>,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TreeNode(u64);
@@ -1182,20 +1064,6 @@ pub(crate) fn hash_block(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> b
     let data_len = ByteNum(data.len() as u64);
     let data = Cursor::new(data);
     BaoTree::blake3_hash_inner(data, data_len, start_chunk, is_root, &mut buffer).unwrap()
-}
-
-impl Outboard {
-    fn new() -> Outboard {
-        Outboard {
-            stable: Vec::new(),
-            unstable: Vec::new(),
-        }
-    }
-
-    // total number of hashes, always chunks * 2 - 1
-    fn len(&self) -> u64 {
-        self.stable.len() as u64 + self.unstable.len() as u64
-    }
 }
 
 /// Slow iterative way to find the offset of a node in a pre-order traversal.

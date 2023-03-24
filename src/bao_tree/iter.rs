@@ -14,7 +14,10 @@ use crate::{
     BaoTree, ByteNum, ChunkNum,
 };
 
-use super::{parse_hash_pair, read_len_io, read_parent_io, read_range_io};
+use super::{
+    outboard::{self, Outboard},
+    parse_hash_pair, read_len_io, read_parent_io, read_range_io,
+};
 
 /// Extended node info.
 ///
@@ -271,44 +274,32 @@ macro_rules! io_error {
 
 /// Encode the relevant part for a range set given an outboard in post-order and the corresponding data.
 /// chunk_group_log is for the outboard.
-pub fn encode_ranges<D: Read + Seek, W: Write>(
+pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
     data: D,
-    outboard: &[u8],
-    chunk_group_log: u8,
+    outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
 ) -> io::Result<()> {
     let mut data = data;
     let mut encoded = encoded;
     // validate roughly that the outboard is correct
-    if outboard.len() < 8 {
-        io_error!("outboard must be at least 8 bytes");
-    };
-    let len = u64::from_le_bytes(outboard[outboard.len() - 8..].try_into().unwrap());
-    let len2 = data.seek(SeekFrom::End(0))?;
-    if len != len2 {
+    let tree = outboard.tree();
+    let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
+    let ob_len = tree.size;
+    if file_len != ob_len {
         io_error!(
-            "length from outboard does not match actual file length: {} != {}",
-            len,
-            len2
+            "length from outboard does not match actual file length: {:?} != {:?}",
+            ob_len,
+            file_len
         );
     }
-    let tree = BaoTree::new(ByteNum(len), chunk_group_log);
     if !range_ok(ranges, tree.chunks()) {
         io_error!("ranges are not valid for this tree");
     }
-    let expected_outboard_len = tree.outboard_hash_pairs() * 64 + 8;
-    if outboard.len() as u64 != expected_outboard_len {
-        io_error!(
-            "outboard length does not match expected outboard length: {} != {}",
-            outboard.len(),
-            expected_outboard_len
-        );
-    }
-    let mut buffer = vec![0u8; 1024 << chunk_group_log];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
     let buf = &mut buffer;
     // write header
-    encoded.write_all(len.to_le_bytes().as_slice())?;
+    encoded.write_all(ob_len.0.to_le_bytes().as_slice())?;
     // traverse tree and write encoded from outboard and data
     for NodeInfo {
         node,
@@ -320,9 +311,8 @@ pub fn encode_ranges<D: Read + Seek, W: Write>(
         let tl = !lr.is_empty();
         let tr = !rr.is_empty();
         // each node corresponds to 64 bytes we have to write
-        if let Some(offset) = tree.post_order_offset(node).value() {
-            let hash_offset = (offset * 64).to_usize();
-            encoded.write_all(&outboard[hash_offset..hash_offset + 64])?;
+        if let Some(pair) = outboard.load_raw(node)? {
+            encoded.write_all(pair.as_slice())?;
         }
         // each leaf corresponds to 2 ranges we have to write
         if let Some(leaf) = node.as_leaf() {
@@ -340,49 +330,49 @@ pub fn encode_ranges<D: Read + Seek, W: Write>(
     Ok(())
 }
 
+// pub struct Outboard<'a> {
+//     len: ByteNum,
+//     data: &'a [u8],
+//     chunk_group_log: u8,
+// }
+
+// impl<'a> Outboard<'a> {
+//     pub fn new(data: &'a [u8], chunk_group_log: u8) -> anyhow::Result<Self> {
+//         Self {
+//             data,
+//             chunk_group_log,
+//             len,
+//         }
+//     }
+// }
+
 /// Encode the relevant part for a range set given an outboard in post-order and the corresponding data.
 /// chunk_group_log is for the outboard.
-pub fn encode_ranges_validated<D: Read + Seek, W: Write>(
+pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
     data: D,
-    outboard: &[u8],
-    chunk_group_log: u8,
-    root: blake3::Hash,
+    outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
 ) -> io::Result<()> {
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    stack.push(root);
+    stack.push(outboard.root());
     let mut data = data;
     let mut encoded = encoded;
-    // validate roughly that the outboard is correct
-    if outboard.len() < 8 {
-        io_error!("outboard must be at least 8 bytes");
-    };
-    let len = u64::from_le_bytes(outboard[outboard.len() - 8..].try_into().unwrap());
-    let len2 = data.seek(SeekFrom::End(0))?;
-    if len != len2 {
+    let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
+    let tree = outboard.tree();
+    let ob_len = tree.size;
+    if file_len != ob_len {
         io_error!(
-            "length from outboard does not match actual file length: {} != {}",
-            len,
-            len2
+            "length from outboard does not match actual file length: {ob_len:?} != {file_len:?}",
         );
     }
-    let tree = BaoTree::new(ByteNum(len), chunk_group_log);
     if !range_ok(ranges, tree.chunks()) {
         io_error!("ranges are not valid for this tree");
     }
-    let expected_outboard_len = tree.outboard_hash_pairs() * 64 + 8;
-    if outboard.len() as u64 != expected_outboard_len {
-        io_error!(
-            "outboard length does not match expected outboard length: {} != {}",
-            outboard.len(),
-            expected_outboard_len
-        );
-    }
-    let mut buffer = vec![0u8; 1024 << chunk_group_log];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
     let buf = &mut buffer;
     // write header
-    encoded.write_all(len.to_le_bytes().as_slice())?;
+    encoded.write_all(ob_len.0.to_le_bytes().as_slice())?;
     // traverse tree and write encoded from outboard and data
     for NodeInfo {
         node,
@@ -395,11 +385,7 @@ pub fn encode_ranges_validated<D: Read + Seek, W: Write>(
         let tl = !l_range.is_empty();
         let tr = !r_range.is_empty();
         // each node corresponds to 64 bytes we have to write
-        let post_order_offset = tree.post_order_offset(node).value();
-        if let Some(offset) = post_order_offset {
-            let hash_offset = (offset * 64).to_usize();
-            let hashes = &outboard[hash_offset..hash_offset + 64];
-            let (l_hash, r_hash) = parse_hash_pair(hashes);
+        if let Some((l_hash, r_hash)) = outboard.load(node)? {
             let actual = parent_cv(&l_hash, &r_hash, is_root);
             let expected = stack.pop().unwrap();
             if actual != expected {
@@ -411,7 +397,8 @@ pub fn encode_ranges_validated<D: Read + Seek, W: Write>(
             if tl {
                 stack.push(l_hash);
             }
-            encoded.write_all(&outboard[hash_offset..hash_offset + 64])?;
+            encoded.write_all(l_hash.as_bytes())?;
+            encoded.write_all(r_hash.as_bytes())?;
         }
         // each leaf corresponds to 2 ranges we have to write
         if let Some(leaf) = node.as_leaf() {
