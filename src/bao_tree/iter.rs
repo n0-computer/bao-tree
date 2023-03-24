@@ -537,17 +537,18 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     continue;
                 }
             };
-            let tree = inner.tree();
+            let info = match inner.next() {
+                Some(node) => node,
+                None => break Ok(None),
+            };
             let NodeInfo {
                 node,
                 l_range,
                 r_range,
                 is_root,
                 ..
-            } = match inner.next() {
-                Some(node) => node,
-                None => break Ok(None),
-            };
+            } = info;
+            let tree = &inner.tree();
             let tl = !l_range.is_empty();
             let tr = !r_range.is_empty();
             let is_half_leaf = !tree.is_persisted(node);

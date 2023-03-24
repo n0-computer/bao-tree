@@ -50,6 +50,24 @@ impl<'a> PostOrderMemOutboardRef<'a> {
         }
         Ok(Self { root, tree, data })
     }
+
+    pub fn flip(&self) -> PreOrderMemOutboard {
+        let tree = self.tree;
+        let mut data = vec![0; self.data.len() + 8];
+        data[0..8].copy_from_slice(tree.size.0.to_le_bytes().as_slice());
+        for node in self.tree.iterate() {
+            if let Some(p) = self.load_raw(node).unwrap() {
+                let offset = tree.pre_order_offset(node).unwrap();
+                let offset = (offset as usize) * 64 + 8;
+                data[offset..offset + 64].copy_from_slice(&p);
+            }
+        }
+        PreOrderMemOutboard {
+            root: self.root,
+            tree,
+            data,
+        }
+    }
 }
 
 impl<'a> Outboard for PostOrderMemOutboardRef<'a> {
@@ -64,7 +82,7 @@ impl<'a> Outboard for PostOrderMemOutboardRef<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostOrderMemOutboard {
     /// root hash
     root: blake3::Hash,
@@ -83,6 +101,10 @@ impl PostOrderMemOutboard {
     /// The outboard data, without the length suffix.
     pub fn outboard(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn flip(&self) -> PreOrderMemOutboard {
+        self.as_outboard_ref().flip()
     }
 
     pub fn outboard_with_suffix(&self) -> Vec<u8> {
@@ -141,6 +163,23 @@ impl PreOrderMemOutboard {
     /// The outboard data, including the length prefix.
     pub fn outboard(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn flip(&self) -> PostOrderMemOutboard {
+        let tree = self.tree;
+        let mut data = vec![0; self.data.len() - 8];
+        for node in self.tree.iterate() {
+            if let Some(p) = self.load_raw(node).unwrap() {
+                let offset = tree.post_order_offset(node).value().unwrap();
+                let offset = offset.to_usize() * 64;
+                data[offset..offset + 64].copy_from_slice(&p);
+            }
+        }
+        PostOrderMemOutboard {
+            root: self.root,
+            tree,
+            data,
+        }
     }
 }
 

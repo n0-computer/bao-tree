@@ -7,7 +7,7 @@ use std::{
 use proptest::prelude::*;
 use range_collections::RangeSet2;
 
-use super::{canonicalize_range, canonicalize_range_owned, BaoTree};
+use super::{canonicalize_range, canonicalize_range_owned, BaoTree, outboard::{PreOrderMemOutboard, PostOrderMemOutboard}};
 use crate::{
     bao_tree::{
         iter::{encode_ranges, encode_ranges_validated, NodeInfo},
@@ -31,14 +31,29 @@ fn bao_tree_blake3_impl(data: Vec<u8>) {
     assert_eq!(h1, h2);
 }
 
-fn post_order_outboard_reference(data: &[u8]) -> (Vec<u8>, blake3::Hash) {
-    let mut expected = Vec::new();
-    let cursor = std::io::Cursor::new(&mut expected);
+/// Computes a reference post order outboard using the abao crate (chunk_group_log = 0) and the non-standard finalize_post_order function.
+fn post_order_outboard_reference_2(data: &[u8]) -> PostOrderMemOutboard {
+    let mut outboard = Vec::new();
+    let cursor = std::io::Cursor::new(&mut outboard);
     let mut encoder = abao::encode::Encoder::new_outboard(cursor);
     encoder.write_all(&data).unwrap();
     // requires non standard fn finalize_post_order
-    let expected_hash = encoder.finalize_post_order().unwrap();
-    (expected, expected_hash)
+    let hash = encoder.finalize_post_order().unwrap();
+    // remove the length suffix
+    outboard.truncate(outboard.len() - 8);
+    PostOrderMemOutboard::new(hash, BaoTree::new(ByteNum(data.len() as u64), 0), outboard)
+}
+
+/// Computes a reference pre order outboard using the bao crate (chunk_group_log = 0) and then flips it to a post-order outboard.
+fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
+    let mut outboard = Vec::new();
+    let cursor = Cursor::new(&mut outboard);
+    let mut encoder = bao::encode::Encoder::new_outboard(cursor);
+    encoder.write_all(&data).unwrap();
+    let hash = encoder.finalize().unwrap();
+    let tree = BaoTree::new(ByteNum(data.len() as u64), 0);
+    let pre = PreOrderMemOutboard::new(hash, tree, outboard);
+    pre.flip()
 }
 
 fn encode_slice_reference(data: &[u8], chunk_range: Range<ChunkNum>) -> (Vec<u8>, blake3::Hash) {
@@ -101,13 +116,10 @@ fn bao_tree_decode_slice_impl(data: Vec<u8>, range: Range<u64>) {
 }
 
 fn bao_tree_outboard_comparison_impl(data: Vec<u8>) {
-    let (expected, expected_hash) = post_order_outboard_reference(&data);
-    let ob = BaoTree::outboard_post_order_mem(&data, 0);
-    let actual_hash = ob.root();
-    let actual = ob.outboard_with_suffix();
-    let actual_data = ob.outboard();
-    assert_eq!(expected_hash, actual_hash);
-    assert_eq!(expected, actual);
+    let post1 = post_order_outboard_reference(&data);
+    // let (expected, expected_hash) = post_order_outboard_reference_2(&data);
+    let post2 = BaoTree::outboard_post_order_mem(&data, 0);
+    assert_eq!(post1, post2);
 }
 
 #[test]
@@ -428,6 +440,19 @@ fn pre_post_outboard_cases() {
 }
 
 proptest! {
+
+
+    #[test]
+    fn flip(len in 0usize..32768) {
+        if len == 0 {
+            println!();
+        }
+        let data = make_test_data(len as usize);
+        let post1 = post_order_outboard_reference(&data);
+        let post2 = post_order_outboard_reference_2(&data);
+        prop_assert_eq!(&post1, &post2);
+        prop_assert_eq!(&post1, &post1.flip().flip());
+    }
 
     #[test]
     fn bao_tree_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
