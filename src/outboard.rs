@@ -1,5 +1,5 @@
-use super::{outboard_size, parse_hash_pair, parse_hash_pair2, TreeNode};
-use crate::{BaoTree, ByteNum};
+use super::{outboard_size, parse_hash_pair, TreeNode};
+use crate::{BaoTree, BlockSize, ByteNum};
 use std::io::{self, Read};
 
 macro_rules! io_error {
@@ -19,7 +19,7 @@ pub trait Outboard {
     /// load the hash pair for a node, as a hash pair
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
         let data = self.load_raw(node)?;
-        Ok(data.map(parse_hash_pair2))
+        Ok(data.map(parse_hash_pair))
     }
 }
 
@@ -32,7 +32,11 @@ pub struct PostOrderMemOutboardRef<'a> {
 }
 
 impl<'a> PostOrderMemOutboardRef<'a> {
-    pub fn load(root: blake3::Hash, outboard: &'a [u8], chunk_group_log: u8) -> io::Result<Self> {
+    pub fn load(
+        root: blake3::Hash,
+        outboard: &'a [u8],
+        chunk_group_log: BlockSize,
+    ) -> io::Result<Self> {
         // validate roughly that the outboard is correct
         if outboard.len() < 8 {
             io_error!("outboard must be at least 8 bytes");
@@ -98,7 +102,11 @@ impl PostOrderMemOutboard {
         Self { root, tree, data }
     }
 
-    pub fn load(root: blake3::Hash, mut data: impl Read, chunk_group_log: u8) -> io::Result<Self> {
+    pub fn load(
+        root: blake3::Hash,
+        mut data: impl Read,
+        chunk_group_log: BlockSize,
+    ) -> io::Result<Self> {
         // validate roughly that the outboard is correct
         let mut outboard = Vec::new();
         data.read_to_end(&mut outboard)?;
@@ -176,7 +184,7 @@ pub struct PreOrderMemOutboard {
 }
 
 impl PreOrderMemOutboard {
-    pub fn new(root: blake3::Hash, chunk_group_log: u8, data: Vec<u8>) -> Self {
+    pub fn new(root: blake3::Hash, chunk_group_log: BlockSize, data: Vec<u8>) -> Self {
         assert!(data.len() >= 8);
         let len = ByteNum(u64::from_le_bytes(data[0..8].try_into().unwrap()));
         let tree = BaoTree::new(len, chunk_group_log);

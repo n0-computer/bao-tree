@@ -11,11 +11,11 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
-use crate::{bao_tree::hash_block, BaoTree, ByteNum, ChunkNum};
+use crate::{hash_block, BaoTree, ByteNum};
 
 use super::{
     iter::{DecodeError, ReadItem, ReadItemIterRef},
-    read_parent_mem,
+    read_parent_mem, BlockSize, ChunkNum,
 };
 
 use ouroboros::self_referencing;
@@ -26,7 +26,7 @@ enum DecodeResponseStreamState<'a> {
     /// the fields of the header is the query and the stuff we need to have to create the tree
     Header {
         ranges: &'a RangeSetRef<ChunkNum>,
-        chunk_group_log: u8,
+        block_size: BlockSize,
     },
     /// we are at a node, curr is the node we are at, iter is the iterator for rest
     Node {
@@ -66,21 +66,18 @@ impl<'a, R> DecodeResponseStreamRef<'a, R> {
     pub fn new(
         hash: blake3::Hash,
         ranges: &'a RangeSetRef<ChunkNum>,
-        chunk_group_log: u8,
+        block_size: BlockSize,
         encoded: R,
     ) -> Self {
         let mut stack = SmallVec::new();
         stack.push(hash);
-        let mut buf = BytesMut::with_capacity(1024 << chunk_group_log);
+        let mut buf = BytesMut::with_capacity(block_size.size());
         // first item (header) needs 8 bytes.
         buf.resize(8, 0);
         // offset at 0
         let curr = 0;
         Self {
-            state: DecodeResponseStreamState::Header {
-                ranges,
-                chunk_group_log,
-            },
+            state: DecodeResponseStreamState::Header { ranges, block_size },
             stack,
             encoded,
             buf,
@@ -127,13 +124,10 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
             // fill the buffer if needed
             ready!(self.poll_fill_buffer(cx))?;
             let (buf, curr) = match self.state.take() {
-                DecodeResponseStreamState::Header {
-                    ranges,
-                    chunk_group_log,
-                } => {
+                DecodeResponseStreamState::Header { ranges, block_size } => {
                     // read header and create the iterator
                     let len = ByteNum(u64::from_le_bytes(self.buf[..8].try_into().unwrap()));
-                    let tree = BaoTree::new(len, chunk_group_log);
+                    let tree = BaoTree::new(len, block_size);
                     let iter = Box::new(tree.read_item_iter_ref(ranges, 0));
                     self.set_state(iter);
                     continue;
@@ -198,7 +192,9 @@ struct DecodeResponseStreamInner<R, Q: 'static> {
     inner: DecodeResponseStreamRef<'this, R>,
 }
 
-/// A DecodeSliceStream that owns the query
+/// A DecodeResponseStream that owns the query.
+/// 
+/// This just wraps [DecodeResponseStreamRef] in a self-referencing struct.
 pub struct DecodeResponseStream<R, Q: 'static = RangeSet2<ChunkNum>>(
     DecodeResponseStreamInner<R, Q>,
 );
@@ -212,15 +208,15 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>>> Stream for DecodeRes
 }
 
 impl<R: AsyncRead, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> DecodeResponseStream<R, Q> {
-    /// Create a new PreOrderPartialIter.
+    /// Create a new DecodeResponseStream.
     ///
     /// ranges has to implement AsRef<RangeSetRef<ChunkNum>>, so you can pass e.g. a RangeSet2.
-    pub fn new(hash: blake3::Hash, ranges: Q, chunk_group_log: u8, encoded: R) -> Self {
+    pub fn new(hash: blake3::Hash, ranges: Q, block_size: BlockSize, encoded: R) -> Self {
         Self(
             DecodeResponseStreamInnerBuilder {
                 ranges,
                 inner_builder: |ranges| {
-                    DecodeResponseStreamRef::new(hash, ranges.as_ref(), chunk_group_log, encoded)
+                    DecodeResponseStreamRef::new(hash, ranges.as_ref(), block_size, encoded)
                 },
             }
             .build(),
@@ -231,7 +227,7 @@ impl<R: AsyncRead, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> DecodeResponseStre
 enum AsyncResponseDecoderState<'a> {
     Header {
         ranges: &'a RangeSetRef<ChunkNum>,
-        chunk_group_log: u8,
+        block_size: BlockSize,
     },
     Reading {
         curr: ReadItem,
@@ -261,6 +257,7 @@ impl AsyncResponseDecoderState<'_> {
     }
 }
 
+/// An async decoder that reads from an `AsyncRead` and concatenates the decoded data.
 pub struct AsyncResponseDecoderRef<'a, R> {
     state: AsyncResponseDecoderState<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
@@ -273,18 +270,15 @@ impl<'a, R: AsyncRead + Unpin> AsyncResponseDecoderRef<'a, R> {
     fn new(
         hash: blake3::Hash,
         ranges: &'a RangeSetRef<ChunkNum>,
-        chunk_group_log: u8,
-        buffer: &'a mut [u8],
+        block_size: BlockSize,
+        buf: &'a mut [u8],
         encoded: R,
     ) -> Self {
         let mut stack = SmallVec::new();
         stack.push(hash);
         Self {
-            state: AsyncResponseDecoderState::Header {
-                ranges,
-                chunk_group_log,
-            },
-            buf: buffer,
+            state: AsyncResponseDecoderState::Header { ranges, block_size },
+            buf,
             encoded,
             stack,
             start: 0,
@@ -356,12 +350,9 @@ impl<'a, R: AsyncRead + Unpin> AsyncRead for AsyncResponseDecoderRef<'a, R> {
                 ready!(self.poll_read_buffer(size, cx))?;
             }
             let (curr, iter) = match self.state.take() {
-                AsyncResponseDecoderState::Header {
-                    chunk_group_log,
-                    ranges,
-                } => {
+                AsyncResponseDecoderState::Header { block_size, ranges } => {
                     let size = ByteNum(u64::from_le_bytes(self.buf[..8].try_into().unwrap()));
-                    let tree = BaoTree::new(size, chunk_group_log);
+                    let tree = BaoTree::new(size, block_size);
                     let iter = Box::new(tree.read_item_iter_ref(ranges, 0));
                     self.set_state_reading(iter);
                     continue;
@@ -440,6 +431,9 @@ struct AsyncResponseDecoderInner<R, Q: 'static> {
     inner: Option<AsyncResponseDecoderRef<'this, R>>,
 }
 
+/// An async decoder that reads from an `AsyncRead` and concatenates the decoded data.
+/// 
+/// This just wraps [AsyncResponseDecoderRef] in a self-referencing struct.
 pub struct AsyncResponseDecoder<R, Q: 'static = RangeSet2<ChunkNum>>(
     AsyncResponseDecoderInner<R, Q>,
 );
@@ -451,8 +445,8 @@ impl<R, Q> fmt::Debug for AsyncResponseDecoder<R, Q> {
 }
 
 impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncResponseDecoder<R, Q> {
-    pub fn new(hash: blake3::Hash, ranges: Q, chunk_group_log: u8, encoded: R) -> Self {
-        let buffer = vec![0; 1024 << chunk_group_log];
+    pub fn new(hash: blake3::Hash, ranges: Q, block_size: BlockSize, encoded: R) -> Self {
+        let buffer = vec![0; block_size.size()];
         Self(
             AsyncResponseDecoderInnerBuilder {
                 buffer,
@@ -461,7 +455,7 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncRespo
                     Some(AsyncResponseDecoderRef::new(
                         hash,
                         ranges.as_ref(),
-                        chunk_group_log,
+                        block_size,
                         buffer.as_mut_slice(),
                         encoded,
                     ))
@@ -484,8 +478,9 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncRespo
         self.read_tree().await.map(|x| x.size.0)
     }
 
-    pub fn into_inner(mut self) -> R {
-        self.0
+    pub fn into_inner(self) -> R {
+        let mut this = self;
+        this.0
             .with_inner_mut(|this| this.take().unwrap().into_inner())
     }
 }
@@ -498,7 +493,7 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncRead
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        self.0.with_mut(|mut this| {
+        self.0.with_mut(|this| {
             let inner = this.inner.as_mut().unwrap();
             Pin::new(inner).poll_read(cx, buf)
         })

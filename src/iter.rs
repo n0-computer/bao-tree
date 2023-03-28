@@ -10,8 +10,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
 use crate::{
-    bao_tree::{hash_block, range_ok, TreeNode},
-    BaoTree, ByteNum, ChunkNum,
+    BaoTree, BlockSize, ByteNum, ChunkNum, {hash_block, range_ok, TreeNode},
 };
 
 use super::{outboard::Outboard, read_len_io, read_parent_io, read_range_io};
@@ -80,9 +79,9 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
                 continue;
             }
             // the middle chunk of the node
-            let mid = node.mid().to_chunks(tree.chunk_group_log);
+            let mid = node.mid().to_chunks(tree.block_size);
             // the start chunk of the node
-            let start = node.block_range().start.to_chunks(tree.chunk_group_log);
+            let start = node.block_range().start.to_chunks(tree.block_size);
             // check if the node is fully included
             let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
             // split the ranges into left and right
@@ -131,7 +130,7 @@ pub struct PreOrderPartialIter<R: AsRef<RangeSetRef<ChunkNum>> + 'static>(
 impl<R: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<R> {
     /// Create a new PreOrderPartialIter.
     ///
-    /// ranges has to implement AsRef<RangeSetRef<ChunkNum>>, so you can pass e.g. a RangeSet2.
+    /// ranges has to implement [AsRef<RangeSetRef<ChunkNum>>], so you can pass e.g. a RangeSet2.
     pub fn new(tree: BaoTree, ranges: R) -> Self {
         Self(
             PreOrderPartialIterInnerBuilder {
@@ -321,9 +320,9 @@ pub struct ReadItemIterRef<'a> {
 }
 
 impl<'a> ReadItemIterRef<'a> {
-    pub fn new(tree: BaoTree, query: &'a RangeSetRef<ChunkNum>) -> Self {
+    pub fn new(tree: BaoTree, query: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         Self {
-            inner: PreOrderPartialIterRef::new(tree, query, 0),
+            inner: PreOrderPartialIterRef::new(tree, query, min_level),
             elems: Default::default(),
             index: 0,
         }
@@ -403,8 +402,6 @@ macro_rules! io_error {
     };
 }
 
-/// Encode the relevant part for a range set given an outboard in post-order and the corresponding data.
-/// chunk_group_log is for the outboard.
 pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
     data: D,
     outboard: O,
@@ -461,8 +458,6 @@ pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
     Ok(())
 }
 
-/// Encode the relevant part for a range set given an outboard in post-order and the corresponding data.
-/// chunk_group_log is for the outboard.
 pub fn encode_validated<D: Read + Seek, O: Outboard, W: Write>(
     data: D,
     outboard: O,
@@ -472,8 +467,6 @@ pub fn encode_validated<D: Read + Seek, O: Outboard, W: Write>(
     encode_ranges_validated(data, outboard, &range, encoded)
 }
 
-/// Encode the relevant part for a range set given an outboard in post-order and the corresponding data.
-/// chunk_group_log is for the outboard.
 pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
     data: D,
     outboard: O,
@@ -570,7 +563,7 @@ enum Position<'a> {
     /// so we need to store the ranges and the chunk group log
     Header {
         ranges: &'a RangeSetRef<ChunkNum>,
-        chunk_group_log: u8,
+        block_size: BlockSize,
     },
     /// currently reading the tree, all the info we need is in the iter
     Content { iter: ReadItemIterRef<'a> },
@@ -583,6 +576,9 @@ pub struct DecodeSliceIter<'a, R> {
     scratch: &'a mut [u8],
 }
 
+/// Error when decoding from a reader
+/// 
+/// This can either be a io error or a more specific error like a hash mismatch
 #[derive(Debug)]
 pub enum DecodeError {
     /// There was an error reading from the underlying io
@@ -621,21 +617,18 @@ impl From<io::Error> for DecodeError {
 impl<'a, R: Read> DecodeSliceIter<'a, R> {
     pub fn new(
         root: blake3::Hash,
-        chunk_group_log: u8,
+        block_size: BlockSize,
         encoded: R,
         ranges: &'a RangeSetRef<ChunkNum>,
         scratch: &'a mut [u8],
     ) -> Self {
         // make sure the buffer is big enough
-        assert!(scratch.len() >= 1024 << chunk_group_log);
+        assert!(scratch.len() >= block_size.size());
         let mut stack = SmallVec::new();
         stack.push(root);
         Self {
             stack,
-            inner: Position::Header {
-                ranges,
-                chunk_group_log,
-            },
+            inner: Position::Header { ranges, block_size },
             encoded,
             scratch,
         }
@@ -657,7 +650,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
             let inner = match &mut self.inner {
                 Position::Content { ref mut iter } => iter,
                 Position::Header {
-                    chunk_group_log,
+                    block_size,
                     ranges: range,
                 } => {
                     let size = read_len_io(&mut self.encoded)?;
@@ -665,7 +658,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     if !range_ok(range, size.chunks()) {
                         break Err(DecodeError::InvalidQueryRange);
                     }
-                    let tree = BaoTree::new(size, *chunk_group_log);
+                    let tree = BaoTree::new(size, *block_size);
                     self.inner = Position::Content {
                         iter: tree.read_item_iter_ref(range, 0),
                     };
