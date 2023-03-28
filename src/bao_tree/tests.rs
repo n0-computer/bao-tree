@@ -142,7 +142,7 @@ async fn bao_tree_decode_slice_stream_impl(data: Vec<u8>, range: Range<u64>) {
 async fn encode_all_roundtrip(data: Vec<u8>) {
     let (encoded, hash) = abao::encode::encode(&data);
     let mut ec = std::io::Cursor::new(encoded);
-    let ranges = ChunkNum(0)..ByteNum(data.len() as u64).chunks();
+    let ranges = ChunkNum(0)..;
     let mut decoder = AsyncResponseDecoder::new(hash, RangeSet2::from(ranges), 0, &mut ec);
     let mut res = Vec::new();
     let _n = decoder.read_to_end(&mut res).await.unwrap();
@@ -151,8 +151,7 @@ async fn encode_all_roundtrip(data: Vec<u8>) {
 
 #[tokio::test]
 async fn encode_all_roundtrip_cases() {
-    use make_test_data as td;
-    for case in [0, 1, 1023, 1024, 1025, 2047, 10000, 20000] {
+    for case in [0, 1, 1023, 1024, 1025, 2047, 10000, 20000, 100000] {
         encode_all_roundtrip(make_test_data(case)).await;
     }
 }

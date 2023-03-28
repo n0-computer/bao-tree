@@ -12,7 +12,7 @@ pub mod iter;
 #[cfg(test)]
 mod tests;
 use iter::*;
-mod r#async;
+pub mod r#async;
 pub mod outboard;
 use outboard::*;
 

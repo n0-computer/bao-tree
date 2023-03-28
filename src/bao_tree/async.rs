@@ -1,5 +1,5 @@
 use std::{
-    io,
+    fmt, io,
     ops::Range,
     pin::Pin,
     task::{Context, Poll},
@@ -12,7 +12,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, ReadBuf};
 
-use crate::{bao_tree::hash_chunk, BaoTree, ByteNum, ChunkNum};
+use crate::{bao_tree::hash_block, BaoTree, ByteNum, ChunkNum};
 
 use super::{
     iter::{DecodeError, ReadItem, ReadItemIterRef},
@@ -180,7 +180,7 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                 } => {
                     assert_eq!(buf.len(), size);
                     let leaf_hash = self.stack.pop().unwrap();
-                    let actual = hash_chunk(start_chunk, &buf, is_root);
+                    let actual = hash_block(start_chunk, &buf, is_root);
                     if leaf_hash != actual {
                         break Err(DecodeError::LeafHashMismatch(start_chunk));
                     }
@@ -242,12 +242,15 @@ enum AsyncResponseDecoderState<'a> {
         size: usize,
         iter: Box<ReadItemIterRef<'a>>,
     },
-    Done,
+    Done {
+        tree: BaoTree,
+    },
+    Taken,
 }
 
 impl AsyncResponseDecoderState<'_> {
     fn take(&mut self) -> Self {
-        std::mem::replace(self, Self::Done)
+        std::mem::replace(self, Self::Taken)
     }
 
     fn read_size(&self) -> Option<usize> {
@@ -314,13 +317,27 @@ impl<'a, R: AsyncRead + Unpin> AsyncResponseDecoderRef<'a, R> {
         self.start = 0;
         self.state = match iter.next() {
             Some(curr) => AsyncResponseDecoderState::Reading { curr, iter },
-            None => AsyncResponseDecoderState::Done,
+            None => AsyncResponseDecoderState::Done { tree: *iter.tree() },
         };
     }
 
     fn set_state_writing(&mut self, size: usize, iter: Box<ReadItemIterRef<'a>>) {
         self.start = 0;
         self.state = AsyncResponseDecoderState::Writing { size, iter };
+    }
+
+    pub fn tree(&self) -> Option<&BaoTree> {
+        match &self.state {
+            AsyncResponseDecoderState::Header { .. } => None,
+            AsyncResponseDecoderState::Reading { iter, .. } => Some(iter.tree()),
+            AsyncResponseDecoderState::Writing { iter, .. } => Some(iter.tree()),
+            AsyncResponseDecoderState::Done { tree } => Some(tree),
+            AsyncResponseDecoderState::Taken => None,
+        }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.encoded
     }
 }
 
@@ -352,18 +369,21 @@ impl<'a, R: AsyncRead + Unpin> AsyncRead for AsyncResponseDecoderRef<'a, R> {
                     buf.put_slice(&self.buf[self.start..self.start + n]);
                     self.start += n;
                     if self.start == size {
+                        // become reading
                         self.set_state_reading(iter);
                     } else {
                         // remain writing
                         self.state = AsyncResponseDecoderState::Writing { size, iter };
                     }
-                    if buf.remaining() == 0 {
-                        break Ok(());
-                    }
-                    continue;
-                }
-                AsyncResponseDecoderState::Done => {
+                    // break in any case, since we have written something
                     break Ok(());
+                }
+                AsyncResponseDecoderState::Done { tree } => {
+                    self.state = AsyncResponseDecoderState::Done { tree };
+                    break Ok(());
+                }
+                AsyncResponseDecoderState::Taken => {
+                    unreachable!()
                 }
             };
             match curr {
@@ -373,7 +393,7 @@ impl<'a, R: AsyncRead + Unpin> AsyncRead for AsyncResponseDecoderRef<'a, R> {
                     size,
                 } => {
                     let node_hash = self.stack.pop().unwrap();
-                    let actual = hash_chunk(start_chunk, &self.buf[..size], is_root);
+                    let actual = hash_block(start_chunk, &self.buf[..size], is_root);
                     // first state change, then check, so we can continue if we want
                     self.set_state_writing(size, iter);
                     if node_hash != actual {
@@ -413,12 +433,18 @@ struct AsyncResponseDecoderInner<R, Q: 'static> {
     buffer: Vec<u8>,
     #[borrows(ranges, mut buffer)]
     #[not_covariant]
-    inner: AsyncResponseDecoderRef<'this, R>,
+    inner: Option<AsyncResponseDecoderRef<'this, R>>,
 }
 
 pub struct AsyncResponseDecoder<R, Q: 'static = RangeSet2<ChunkNum>>(
     AsyncResponseDecoderInner<R, Q>,
 );
+
+impl<R, Q> fmt::Debug for AsyncResponseDecoder<R, Q> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("AsyncResponseDecoder").finish()
+    }
+}
 
 impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncResponseDecoder<R, Q> {
     pub fn new(hash: blake3::Hash, ranges: Q, chunk_group_log: u8, encoded: R) -> Self {
@@ -428,17 +454,42 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncRespo
                 buffer,
                 ranges,
                 inner_builder: |ranges, buffer| {
-                    AsyncResponseDecoderRef::new(
+                    Some(AsyncResponseDecoderRef::new(
                         hash,
                         ranges.as_ref(),
                         chunk_group_log,
                         buffer.as_mut_slice(),
                         encoded,
-                    )
+                    ))
                 },
             }
             .build(),
         )
+    }
+
+    /// Read the tree geometry from the encoded stream.
+    ///
+    /// This is useful for determining the size of the decoded stream.
+    pub async fn read_tree(&mut self) -> io::Result<BaoTree> {
+        futures::future::poll_fn(move |cx| {
+            self.0.with_mut(|this| {
+                let mut buf = ReadBuf::uninit(&mut []);
+                let mut inner = this.inner.as_mut().unwrap();
+                ready!(Pin::new(&mut inner).poll_read(cx, &mut buf))?;
+                Poll::Ready(Ok(*inner.tree().unwrap()))
+            })
+        })
+        .await
+    }
+
+    /// Read the header containing the size from the encoded stream.
+    pub async fn read_size(&mut self) -> io::Result<u64> {
+        self.read_tree().await.map(|x| x.size.0)
+    }
+
+    pub fn into_inner(mut self) -> R {
+        self.0
+            .with_inner_mut(|this| this.take().unwrap().into_inner())
     }
 }
 
@@ -450,7 +501,9 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncRead
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        self.0
-            .with_mut(|this| Pin::new(this.inner).poll_read(cx, buf))
+        self.0.with_mut(|mut this| {
+            let inner = this.inner.as_mut().unwrap();
+            Pin::new(inner).poll_read(cx, buf)
+        })
     }
 }
