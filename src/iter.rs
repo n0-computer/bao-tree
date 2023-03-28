@@ -5,7 +5,6 @@ use std::{
 };
 
 use blake3::guts::parent_cv;
-use ouroboros::self_referencing;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
@@ -37,6 +36,8 @@ pub struct NodeInfo<'a> {
 }
 
 /// Iterator over all nodes in a BaoTree in pre-order that overlap with a given chunk range.
+///
+/// This is mostly used internally
 pub struct PreOrderPartialIterRef<'a> {
     /// the tree we want to traverse
     tree: BaoTree,
@@ -114,33 +115,34 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
     }
 }
 
-#[self_referencing]
-struct PreOrderPartialIterInner<R: 'static> {
-    ranges: R,
-    #[borrows(ranges)]
-    #[not_covariant]
-    iter: PreOrderPartialIterRef<'this>,
-}
+// use ouroboros::self_referencing;
+// #[self_referencing]
+// struct PreOrderPartialIterInner<R: 'static> {
+//     ranges: R,
+//     #[borrows(ranges)]
+//     #[not_covariant]
+//     iter: PreOrderPartialIterRef<'this>,
+// }
 
-/// Same as PreOrderPartialIterRef, but owns the ranges so it can be converted into a stream conveniently.
-pub struct PreOrderPartialIter<R: AsRef<RangeSetRef<ChunkNum>> + 'static>(
-    PreOrderPartialIterInner<R>,
-);
+// /// Same as PreOrderPartialIterRef, but owns the ranges so it can be converted into a stream conveniently.
+// pub struct PreOrderPartialIter<R: AsRef<RangeSetRef<ChunkNum>> + 'static>(
+//     PreOrderPartialIterInner<R>,
+// );
 
-impl<R: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<R> {
-    /// Create a new PreOrderPartialIter.
-    ///
-    /// ranges has to implement [AsRef<RangeSetRef<ChunkNum>>], so you can pass e.g. a RangeSet2.
-    pub fn new(tree: BaoTree, ranges: R) -> Self {
-        Self(
-            PreOrderPartialIterInnerBuilder {
-                ranges,
-                iter_builder: |ranges| PreOrderPartialIterRef::new(tree, ranges.as_ref(), 0),
-            }
-            .build(),
-        )
-    }
-}
+// impl<R: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<R> {
+//     /// Create a new PreOrderPartialIter.
+//     ///
+//     /// ranges has to implement `AsRef<RangeSetRef<ChunkNum>>`, so you can pass e.g. a RangeSet2.
+//     pub fn new(tree: BaoTree, ranges: R) -> Self {
+//         Self(
+//             PreOrderPartialIterInnerBuilder {
+//                 ranges,
+//                 iter_builder: |ranges| PreOrderPartialIterRef::new(tree, ranges.as_ref(), 0),
+//             }
+//             .build(),
+//         )
+//     }
+// }
 
 /// Iterator over all nodes in a BaoTree in post-order.
 pub struct PostOrderTreeIter {
@@ -266,9 +268,86 @@ impl Iterator for PostOrderTreeIterStack {
     }
 }
 
+/// Iterator over all chunks in a BaoTree in post-order.
+pub struct PostOrderChunkIter {
+    tree: BaoTree,
+    inner: PostOrderTreeIter,
+    // stack with 2 elements, since we can only have 2 items in flight
+    stack: [BaoChunk; 2],
+    index: usize,
+    root: TreeNode,
+}
+
+impl PostOrderChunkIter {
+    pub fn new(tree: BaoTree) -> Self {
+        Self {
+            tree,
+            inner: PostOrderTreeIter::new(tree),
+            stack: Default::default(),
+            index: 0,
+            root: tree.root(),
+        }
+    }
+
+    fn push(&mut self, item: BaoChunk) {
+        self.stack[self.index] = item;
+        self.index += 1;
+    }
+
+    fn pop(&mut self) -> Option<BaoChunk> {
+        if self.index > 0 {
+            self.index -= 1;
+            Some(self.stack[self.index])
+        } else {
+            None
+        }
+    }
+}
+
+impl Iterator for PostOrderChunkIter {
+    type Item = BaoChunk;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = self.pop() {
+                return Some(item);
+            }
+            let node = self.inner.next()?;
+            let is_root = node == self.root;
+            if self.tree.is_persisted(node) {
+                self.push(BaoChunk::Parent {
+                    node,
+                    is_root,
+                    left: true,
+                    right: true,
+                });
+            }
+            if let Some(leaf) = node.as_leaf() {
+                let tree = &self.tree;
+                let (s, m, e) = tree.leaf_byte_ranges3(leaf);
+                let l_start_chunk = tree.chunk_num(leaf);
+                let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
+                let is_half_leaf = m == e;
+                if !is_half_leaf {
+                    self.push(BaoChunk::Leaf {
+                        is_root: false,
+                        start_chunk: r_start_chunk,
+                        size: (e - m).to_usize(),
+                    });
+                };
+                break Some(BaoChunk::Leaf {
+                    is_root: is_root && is_half_leaf,
+                    start_chunk: l_start_chunk,
+                    size: (m - s).to_usize(),
+                });
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// A read item describes what comes next
-pub enum ReadItem {
+pub enum BaoChunk {
     /// expect a 64 byte parent node.
     ///
     /// To validate, use parent_cv using the is_root value
@@ -292,7 +371,7 @@ pub enum ReadItem {
     },
 }
 
-impl ReadItem {
+impl BaoChunk {
     pub fn size(&self) -> usize {
         match self {
             Self::Parent { .. } => 64,
@@ -301,7 +380,7 @@ impl ReadItem {
     }
 }
 
-impl Default for ReadItem {
+impl Default for BaoChunk {
     fn default() -> Self {
         Self::Leaf {
             is_root: true,
@@ -311,19 +390,20 @@ impl Default for ReadItem {
     }
 }
 
-/// An iterator that produces read items that are convenient to use when reading an encoded query response.
-pub struct ReadItemIterRef<'a> {
+/// An iterator that produces chunks in pre order, but only for the parts of the
+/// tree that are relevant for a query.
+pub struct ChunkIterRef<'a> {
     inner: PreOrderPartialIterRef<'a>,
-    // stack with 3 elements, since we can only have 3 items in flight
-    elems: [ReadItem; 3],
+    // stack with 2 elements, since we can only have 2 items in flight
+    stack: [BaoChunk; 2],
     index: usize,
 }
 
-impl<'a> ReadItemIterRef<'a> {
+impl<'a> ChunkIterRef<'a> {
     pub fn new(tree: BaoTree, query: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         Self {
             inner: PreOrderPartialIterRef::new(tree, query, min_level),
-            elems: Default::default(),
+            stack: Default::default(),
             index: 0,
         }
     }
@@ -332,23 +412,23 @@ impl<'a> ReadItemIterRef<'a> {
         self.inner.tree()
     }
 
-    fn push(&mut self, item: ReadItem) {
-        self.elems[self.index] = item;
+    fn push(&mut self, item: BaoChunk) {
+        self.stack[self.index] = item;
         self.index += 1;
     }
 
-    fn pop(&mut self) -> Option<ReadItem> {
+    fn pop(&mut self) -> Option<BaoChunk> {
         if self.index > 0 {
             self.index -= 1;
-            Some(self.elems[self.index])
+            Some(self.stack[self.index])
         } else {
             None
         }
     }
 }
 
-impl<'a> Iterator for ReadItemIterRef<'a> {
-    type Item = ReadItem;
+impl<'a> Iterator for ChunkIterRef<'a> {
+    type Item = BaoChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -368,15 +448,15 @@ impl<'a> Iterator for ReadItemIterRef<'a> {
                 let (s, m, e) = tree.leaf_byte_ranges3(leaf);
                 let l_start_chunk = tree.chunk_num(leaf);
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
-                if !r_ranges.is_empty() && m < e {
-                    self.push(ReadItem::Leaf {
+                if !r_ranges.is_empty() && !is_half_leaf {
+                    self.push(BaoChunk::Leaf {
                         is_root: false,
                         start_chunk: r_start_chunk,
                         size: (e - m).to_usize(),
                     });
                 };
                 if !l_ranges.is_empty() {
-                    self.push(ReadItem::Leaf {
+                    self.push(BaoChunk::Leaf {
                         is_root: is_root && is_half_leaf,
                         start_chunk: l_start_chunk,
                         size: (m - s).to_usize(),
@@ -385,7 +465,7 @@ impl<'a> Iterator for ReadItemIterRef<'a> {
             }
             // the last leaf is a special case, since it does not have a parent if it is <= half full
             if !is_half_leaf {
-                self.push(ReadItem::Parent {
+                break Some(BaoChunk::Parent {
                     is_root,
                     left: !l_ranges.is_empty(),
                     right: !r_ranges.is_empty(),
@@ -396,75 +476,56 @@ impl<'a> Iterator for ReadItemIterRef<'a> {
     }
 }
 
-macro_rules! io_error {
-    ($($arg:tt)*) => {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
-    };
-}
-
 pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
     data: D,
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
-) -> io::Result<()> {
+) -> result::Result<(), DecodeError> {
     let mut data = data;
     let mut encoded = encoded;
-    // validate roughly that the outboard is correct
-    let tree = outboard.tree();
     let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
+    let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
-        io_error!(
-            "length from outboard does not match actual file length: {:?} != {:?}",
-            ob_len,
-            file_len
-        );
+        return Err(DecodeError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("length from outboard does not match actual file length: {ob_len:?} != {file_len:?}"),
+        )));
     }
     if !range_ok(ranges, tree.chunks()) {
-        io_error!("ranges are not valid for this tree");
+        return Err(DecodeError::InvalidQueryRange);
     }
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
-    let buf = &mut buffer;
     // write header
-    encoded.write_all(ob_len.0.to_le_bytes().as_slice())?;
-    // traverse tree and write encoded from outboard and data
-    for NodeInfo {
-        node,
-        l_ranges: lr,
-        r_ranges: rr,
-        ..
-    } in tree.iterate_part_preorder_ref(ranges, 0)
-    {
-        let tl = !lr.is_empty();
-        let tr = !rr.is_empty();
-        // each node corresponds to 64 bytes we have to write
-        if let Some(pair) = outboard.load_raw(node)? {
-            encoded.write_all(pair.as_slice())?;
-        }
-        // each leaf corresponds to 2 ranges we have to write
-        if let Some(leaf) = node.as_leaf() {
-            let (l, m, r) = tree.leaf_byte_ranges3(leaf);
-            if tl {
-                let ld = read_range_io(&mut data, l..m, buf)?;
-                encoded.write_all(ld)?;
+    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
+    for item in tree.read_item_iter_ref(ranges, 0) {
+        match item {
+            BaoChunk::Parent { node, .. } => {
+                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                encoded.write_all(l_hash.as_bytes())?;
+                encoded.write_all(r_hash.as_bytes())?;
             }
-            if tr {
-                let rd = read_range_io(&mut data, m..r, buf)?;
-                encoded.write_all(rd)?;
+            BaoChunk::Leaf {
+                start_chunk, size, ..
+            } => {
+                let start = start_chunk.to_bytes();
+                let data = read_range_io(&mut data, start..start + (size as u64), &mut buffer)?;
+                encoded.write_all(data)?;
             }
         }
     }
     Ok(())
 }
 
-pub fn encode_validated<D: Read + Seek, O: Outboard, W: Write>(
-    data: D,
+pub fn encode_validated<D: Read + Seek, O: Outboard + Clone, W: Write>(
+    mut data: D,
     outboard: O,
-    encoded: W,
+    mut encoded: W,
 ) -> io::Result<()> {
     let range = RangeSet2::from(ChunkNum(0)..);
-    encode_ranges_validated(data, outboard, &range, encoded)
+    encode_ranges_validated(&mut data, outboard, &range, &mut encoded)?;
+    Ok(())
 }
 
 pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
@@ -472,7 +533,7 @@ pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
-) -> io::Result<()> {
+) -> result::Result<(), DecodeError> {
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
     let mut data = data;
@@ -481,78 +542,53 @@ pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
-        io_error!(
-            "length from outboard does not match actual file length: {ob_len:?} != {file_len:?}",
-        );
+        return Err(DecodeError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("length from outboard does not match actual file length: {ob_len:?} != {file_len:?}"),
+        )));
     }
     if !range_ok(ranges, tree.chunks()) {
-        io_error!("ranges are not valid for this tree");
+        return Err(DecodeError::InvalidQueryRange);
     }
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
-    let buf = &mut buffer;
     // write header
-    encoded.write_all(ob_len.0.to_le_bytes().as_slice())?;
-    // traverse tree and write encoded from outboard and data
-    for NodeInfo {
-        node,
-        l_ranges,
-        r_ranges,
-        is_root,
-        ..
-    } in tree.iterate_part_preorder_ref(ranges, 0)
-    {
-        let tl = !l_ranges.is_empty();
-        let tr = !r_ranges.is_empty();
-        // each node corresponds to 64 bytes we have to write
-        if let Some((l_hash, r_hash)) = outboard.load(node)? {
-            let actual = parent_cv(&l_hash, &r_hash, is_root);
-            let expected = stack.pop().unwrap();
-            if actual != expected {
-                io_error!("hash mismatch");
-            }
-            if tr {
-                stack.push(r_hash);
-            }
-            if tl {
-                stack.push(l_hash);
-            }
-            encoded.write_all(l_hash.as_bytes())?;
-            encoded.write_all(r_hash.as_bytes())?;
-        }
-        // each leaf corresponds to 2 ranges we have to write
-        if let Some(leaf) = node.as_leaf() {
-            // let (l, m, r) = tree.leaf_byte_ranges3(leaf);
-            let chunk0 = tree.chunk_num(leaf);
-            let chunkm = chunk0 + tree.chunk_group_chunks();
-            match tree.leaf_byte_ranges(leaf) {
-                Ok((l, r)) => {
-                    if tl {
-                        let l_data = read_range_io(&mut data, l, buf)?;
-                        let l_hash = hash_block(chunk0, l_data, false);
-                        if l_hash != stack.pop().unwrap() {
-                            io_error!("hash mismatch");
-                        }
-                        encoded.write_all(l_data)?;
-                    }
-                    if tr {
-                        let r_data = read_range_io(&mut data, r, buf)?;
-                        let r_hash = hash_block(chunkm, r_data, false);
-                        if r_hash != stack.pop().unwrap() {
-                            io_error!("hash mismatch");
-                        }
-                        encoded.write_all(r_data)?;
-                    }
+    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
+    for item in tree.read_item_iter_ref(ranges, 0) {
+        match item {
+            BaoChunk::Parent {
+                is_root,
+                left,
+                right,
+                node,
+            } => {
+                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                let expected = stack.pop().unwrap();
+                if actual != expected {
+                    return Err(DecodeError::ParentHashMismatch(node));
                 }
-                Err(l) => {
-                    if tl {
-                        let l_data = read_range_io(&mut data, l, buf)?;
-                        let l_hash = hash_block(chunk0, l_data, is_root);
-                        if l_hash != stack.pop().unwrap() {
-                            io_error!("hash mismatch");
-                        }
-                        encoded.write_all(l_data)?;
-                    }
+                if right {
+                    stack.push(r_hash);
                 }
+                if left {
+                    stack.push(l_hash);
+                }
+                encoded.write_all(l_hash.as_bytes())?;
+                encoded.write_all(r_hash.as_bytes())?;
+            }
+            BaoChunk::Leaf {
+                start_chunk,
+                size,
+                is_root,
+            } => {
+                let expected = stack.pop().unwrap();
+                let start = start_chunk.to_bytes();
+                let data = read_range_io(&mut data, start..start + (size as u64), &mut buffer)?;
+                let actual = hash_block(start_chunk, data, is_root);
+                if actual != expected {
+                    return Err(DecodeError::LeafHashMismatch(start_chunk));
+                }
+                encoded.write_all(data)?;
             }
         }
     }
@@ -566,7 +602,7 @@ enum Position<'a> {
         block_size: BlockSize,
     },
     /// currently reading the tree, all the info we need is in the iter
-    Content { iter: ReadItemIterRef<'a> },
+    Content { iter: ChunkIterRef<'a> },
 }
 
 pub struct DecodeSliceIter<'a, R> {
@@ -577,7 +613,7 @@ pub struct DecodeSliceIter<'a, R> {
 }
 
 /// Error when decoding from a reader
-/// 
+///
 /// This can either be a io error or a more specific error like a hash mismatch
 #[derive(Debug)]
 pub enum DecodeError {
@@ -596,7 +632,7 @@ impl From<DecodeError> for io::Error {
         match e {
             DecodeError::Io(e) => e,
             DecodeError::ParentHashMismatch(_) => {
-                io::Error::new(io::ErrorKind::InvalidData, "hash mismatch")
+                io::Error::new(io::ErrorKind::InvalidData, "parent hash mismatch")
             }
             DecodeError::LeafHashMismatch(_) => {
                 io::Error::new(io::ErrorKind::InvalidData, "leaf hash mismatch")
@@ -666,7 +702,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                 }
             };
             match inner.next() {
-                Some(ReadItem::Parent {
+                Some(BaoChunk::Parent {
                     is_root,
                     left,
                     right,
@@ -685,7 +721,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                         self.stack.push(l_hash);
                     }
                 }
-                Some(ReadItem::Leaf {
+                Some(BaoChunk::Leaf {
                     size,
                     is_root,
                     start_chunk,

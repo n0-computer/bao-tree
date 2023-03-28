@@ -7,7 +7,7 @@ use range_collections::range_set::RangeSetEntry;
 
 index_newtype! {
     /// A number of blake3 chunks
-    /// 
+    ///
     /// The blake3 chunk size is 1024 bytes.
     pub struct ChunkNum(pub u64);
 }
@@ -42,7 +42,6 @@ index_newtype! {
 pub struct BlockSize(pub(crate) u8);
 
 impl BlockSize {
-
     /// The default block size, 1024 bytes
     ///
     /// This means that blocks and blake3 chunks are the same size.

@@ -16,7 +16,7 @@ use super::{
     BaoTree,
 };
 use crate::{
-    iter::{encode_ranges, encode_ranges_validated, NodeInfo},
+    iter::{encode_ranges, encode_ranges_validated},
     outboard::{Outboard, PostOrderMemOutboardRef},
     pre_order_offset_slow,
     tree::{ByteNum, ChunkNum},
@@ -565,34 +565,5 @@ proptest! {
     #[test]
     fn pre_post_outboard(n in 0usize..1000000) {
         compare_pre_order_outboard(n);
-    }
-}
-
-#[test]
-fn bao_tree_iterate_all() {
-    let tree = BaoTree::new(ByteNum(1024 * 15), BlockSize::DEFAULT);
-    println!("{}", tree.outboard_hash_pairs());
-    for node in tree.iterate() {
-        println!(
-            "{:#?}\t{}\t{:?}",
-            node,
-            tree.is_sealed(node),
-            tree.post_order_offset(node)
-        );
-    }
-}
-
-#[test]
-fn bao_tree_iterate_part() {
-    let tree = BaoTree::new(ByteNum(1024 * 5), BlockSize::DEFAULT);
-    println!();
-    let spec = RangeSet2::from(ChunkNum(2)..ChunkNum(3));
-    for NodeInfo { node, .. } in tree.iterate_part_preorder_ref(&spec, 0) {
-        println!(
-            "{:#?}\t{}\t{:?}",
-            node,
-            tree.is_sealed(node),
-            tree.post_order_offset(node)
-        );
     }
 }

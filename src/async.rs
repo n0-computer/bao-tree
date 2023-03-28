@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use crate::{hash_block, BaoTree, ByteNum};
 
 use super::{
-    iter::{DecodeError, ReadItem, ReadItemIterRef},
+    iter::{BaoChunk, ChunkIterRef, DecodeError},
     read_parent_mem, BlockSize, ChunkNum,
 };
 
@@ -30,8 +30,8 @@ enum DecodeResponseStreamState<'a> {
     },
     /// we are at a node, curr is the node we are at, iter is the iterator for rest
     Node {
-        iter: Box<ReadItemIterRef<'a>>,
-        curr: ReadItem,
+        iter: Box<ChunkIterRef<'a>>,
+        curr: BaoChunk,
     },
     /// we are at the end of the tree. Still need to store the tree somewhere
     Done,
@@ -98,13 +98,13 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
         Poll::Ready(Ok(()))
     }
 
-    fn set_state(&mut self, mut iter: Box<ReadItemIterRef<'a>>) {
+    fn set_state(&mut self, mut iter: Box<ChunkIterRef<'a>>) {
         self.curr = 0;
         self.state = match iter.next() {
             Some(curr) => {
                 let size = match curr {
-                    ReadItem::Parent { .. } => 64,
-                    ReadItem::Leaf { size, .. } => size,
+                    BaoChunk::Parent { .. } => 64,
+                    BaoChunk::Leaf { size, .. } => size,
                 };
                 self.buf.resize(size, 0);
                 DecodeResponseStreamState::Node { curr, iter }
@@ -142,7 +142,7 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
             };
 
             match curr {
-                ReadItem::Parent {
+                BaoChunk::Parent {
                     is_root,
                     right,
                     left,
@@ -166,7 +166,7 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                         break Err(DecodeError::ParentHashMismatch(node));
                     }
                 }
-                ReadItem::Leaf {
+                BaoChunk::Leaf {
                     size,
                     is_root,
                     start_chunk,
@@ -193,7 +193,7 @@ struct DecodeResponseStreamInner<R, Q: 'static> {
 }
 
 /// A DecodeResponseStream that owns the query.
-/// 
+///
 /// This just wraps [DecodeResponseStreamRef] in a self-referencing struct.
 pub struct DecodeResponseStream<R, Q: 'static = RangeSet2<ChunkNum>>(
     DecodeResponseStreamInner<R, Q>,
@@ -210,7 +210,7 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>>> Stream for DecodeRes
 impl<R: AsyncRead, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> DecodeResponseStream<R, Q> {
     /// Create a new DecodeResponseStream.
     ///
-    /// ranges has to implement AsRef<RangeSetRef<ChunkNum>>, so you can pass e.g. a RangeSet2.
+    /// ranges has to implement `AsRef<RangeSetRef<ChunkNum>>`, so you can pass e.g. a RangeSet2.
     pub fn new(hash: blake3::Hash, ranges: Q, block_size: BlockSize, encoded: R) -> Self {
         Self(
             DecodeResponseStreamInnerBuilder {
@@ -230,12 +230,12 @@ enum AsyncResponseDecoderState<'a> {
         block_size: BlockSize,
     },
     Reading {
-        curr: ReadItem,
-        iter: Box<ReadItemIterRef<'a>>,
+        curr: BaoChunk,
+        iter: Box<ChunkIterRef<'a>>,
     },
     Writing {
         size: usize,
-        iter: Box<ReadItemIterRef<'a>>,
+        iter: Box<ChunkIterRef<'a>>,
     },
     Done {
         tree: BaoTree,
@@ -306,7 +306,7 @@ impl<'a, R: AsyncRead + Unpin> AsyncResponseDecoderRef<'a, R> {
         Poll::Ready(Ok(()))
     }
 
-    fn set_state_reading(&mut self, mut iter: Box<ReadItemIterRef<'a>>) {
+    fn set_state_reading(&mut self, mut iter: Box<ChunkIterRef<'a>>) {
         self.start = 0;
         self.state = match iter.next() {
             Some(curr) => AsyncResponseDecoderState::Reading { curr, iter },
@@ -314,7 +314,7 @@ impl<'a, R: AsyncRead + Unpin> AsyncResponseDecoderRef<'a, R> {
         };
     }
 
-    fn set_state_writing(&mut self, size: usize, iter: Box<ReadItemIterRef<'a>>) {
+    fn set_state_writing(&mut self, size: usize, iter: Box<ChunkIterRef<'a>>) {
         self.start = 0;
         self.state = AsyncResponseDecoderState::Writing { size, iter };
     }
@@ -382,7 +382,7 @@ impl<'a, R: AsyncRead + Unpin> AsyncRead for AsyncResponseDecoderRef<'a, R> {
                 }
             };
             match curr {
-                ReadItem::Leaf {
+                BaoChunk::Leaf {
                     is_root,
                     start_chunk,
                     size,
@@ -395,7 +395,7 @@ impl<'a, R: AsyncRead + Unpin> AsyncRead for AsyncResponseDecoderRef<'a, R> {
                         break Err(DecodeError::LeafHashMismatch(start_chunk).into());
                     }
                 }
-                ReadItem::Parent {
+                BaoChunk::Parent {
                     is_root,
                     node,
                     left,
@@ -432,7 +432,7 @@ struct AsyncResponseDecoderInner<R, Q: 'static> {
 }
 
 /// An async decoder that reads from an `AsyncRead` and concatenates the decoded data.
-/// 
+///
 /// This just wraps [AsyncResponseDecoderRef] in a self-referencing struct.
 pub struct AsyncResponseDecoder<R, Q: 'static = RangeSet2<ChunkNum>>(
     AsyncResponseDecoderInner<R, Q>,

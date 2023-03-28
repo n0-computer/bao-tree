@@ -155,37 +155,59 @@ impl BaoTree {
         // do not allocate for small trees
         let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
         debug_assert!(buffer.len() == self.chunk_group_bytes().to_usize());
-        let root = self.root();
-        for node in self.iterate() {
-            let is_root = node == root;
-            let hash = if let Some(leaf) = node.as_leaf() {
-                let chunk0 = self.chunk_num(leaf);
-                let cgc = self.chunk_group_chunks();
-                match self.leaf_byte_ranges(leaf) {
-                    Ok((l, r)) => {
-                        let l_data = read_bytes_io(data, l, buffer)?;
-                        let l_hash = hash_block(chunk0, l_data, false);
-                        let r_data = read_bytes_io(data, r, buffer)?;
-                        let r_hash = hash_block(chunk0 + cgc, r_data, false);
-                        outboard.write_all(l_hash.as_bytes())?;
-                        outboard.write_all(r_hash.as_bytes())?;
-                        parent_cv(&l_hash, &r_hash, is_root)
-                    }
-                    Err(l) => {
-                        let l_data = read_bytes_io(data, l, buffer)?;
-                        let l_hash = hash_block(chunk0, l_data, is_root);
-                        l_hash
-                    }
+        for item in PostOrderChunkIter::new(*self) {
+            match item {
+                BaoChunk::Parent { is_root, .. } => {
+                    let right_hash = stack.pop().unwrap();
+                    let left_hash = stack.pop().unwrap();
+                    outboard.write_all(left_hash.as_bytes())?;
+                    outboard.write_all(right_hash.as_bytes())?;
+                    let parent = parent_cv(&left_hash, &right_hash, is_root);
+                    stack.push(parent);
                 }
-            } else {
-                let right_hash = stack.pop().unwrap();
-                let left_hash = stack.pop().unwrap();
-                outboard.write_all(left_hash.as_bytes())?;
-                outboard.write_all(right_hash.as_bytes())?;
-                parent_cv(&left_hash, &right_hash, is_root)
-            };
-            stack.push(hash);
+                BaoChunk::Leaf {
+                    size,
+                    is_root,
+                    start_chunk,
+                } => {
+                    let buf = &mut buffer[..size];
+                    data.read_exact(buf)?;
+                    let hash = hash_block(start_chunk, buf, is_root);
+                    stack.push(hash);
+                }
+            }
         }
+        // let root = self.root();
+        // for node in self.iterate() {
+        //     let is_root = node == root;
+        //     let hash = if let Some(leaf) = node.as_leaf() {
+        //         let chunk0 = self.chunk_num(leaf);
+        //         let cgc = self.chunk_group_chunks();
+        //         match self.leaf_byte_ranges(leaf) {
+        //             Ok((l, r)) => {
+        //                 let l_data = read_bytes_io(data, l, buffer)?;
+        //                 let l_hash = hash_block(chunk0, l_data, false);
+        //                 let r_data = read_bytes_io(data, r, buffer)?;
+        //                 let r_hash = hash_block(chunk0 + cgc, r_data, false);
+        //                 outboard.write_all(l_hash.as_bytes())?;
+        //                 outboard.write_all(r_hash.as_bytes())?;
+        //                 parent_cv(&l_hash, &r_hash, is_root)
+        //             }
+        //             Err(l) => {
+        //                 let l_data = read_bytes_io(data, l, buffer)?;
+        //                 let l_hash = hash_block(chunk0, l_data, is_root);
+        //                 l_hash
+        //             }
+        //         }
+        //     } else {
+        //         let right_hash = stack.pop().unwrap();
+        //         let left_hash = stack.pop().unwrap();
+        //         outboard.write_all(left_hash.as_bytes())?;
+        //         outboard.write_all(right_hash.as_bytes())?;
+        //         parent_cv(&left_hash, &right_hash, is_root)
+        //     };
+        //     stack.push(hash);
+        // }
         debug_assert_eq!(stack.len(), 1);
         let hash = stack.pop().unwrap();
         Ok(hash)
@@ -214,34 +236,28 @@ impl BaoTree {
         is_root: bool,
         buf: &mut [u8],
     ) -> io::Result<blake3::Hash> {
+        let can_be_root = is_root;
         let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
         let tree = Self::new_with_start_chunk(data_len, BlockSize(0), start_chunk);
-        let root = tree.root();
-        let can_be_root = is_root;
-        for node in tree.iterate() {
-            // if our is_root is not set, this can never be true
-            let is_root = can_be_root && node == root;
-            let hash = if let Some(leaf) = node.as_leaf() {
-                let chunk0 = tree.chunk_num(leaf);
-                match tree.leaf_byte_ranges(leaf) {
-                    Ok((l, r)) => {
-                        let ld = read_bytes_io(&mut data, l, buf)?;
-                        let left_hash = hash_chunk(chunk0, ld, false);
-                        let rd = read_bytes_io(&mut data, r, buf)?;
-                        let right_hash = hash_chunk(chunk0 + tree.chunk_group_chunks(), rd, false);
-                        parent_cv(&left_hash, &right_hash, is_root)
-                    }
-                    Err(l) => {
-                        let ld = read_bytes_io(&mut data, l, buf)?;
-                        hash_chunk(chunk0, ld, is_root)
-                    }
+        for item in PostOrderChunkIter::new(tree) {
+            match item {
+                BaoChunk::Leaf {
+                    size,
+                    is_root,
+                    start_chunk,
+                } => {
+                    let buf = &mut buf[..size];
+                    data.read_exact(buf)?;
+                    let hash = hash_chunk(start_chunk, buf, can_be_root && is_root);
+                    stack.push(hash);
                 }
-            } else {
-                let right = stack.pop().unwrap();
-                let left = stack.pop().unwrap();
-                parent_cv(&left, &right, is_root)
-            };
-            stack.push(hash);
+                BaoChunk::Parent { is_root, .. } => {
+                    let right_hash = stack.pop().unwrap();
+                    let left_hash = stack.pop().unwrap();
+                    let hash = parent_cv(&left_hash, &right_hash, can_be_root && is_root);
+                    stack.push(hash);
+                }
+            }
         }
         debug_assert_eq!(stack.len(), 1);
         Ok(stack.pop().unwrap())
@@ -348,67 +364,22 @@ impl BaoTree {
         let mut res = Vec::new();
         let tree = Self::new(ByteNum(data.len() as u64), block_size);
         res.extend_from_slice(&tree.size.0.to_le_bytes());
-        for NodeInfo {
-            node,
-            l_ranges: lr,
-            r_ranges: rr,
-            ..
-        } in tree.iterate_part_preorder_ref(ranges, 0)
-        {
-            let tl = !lr.is_empty();
-            let tr = !rr.is_empty();
-            if let Some(offset) = tree.post_order_offset(node) {
-                let offset = offset.value();
-                let hash_offset = usize::try_from(offset * 64).unwrap();
-                res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
-            }
-            if let Some(leaf) = node.as_leaf() {
-                let (l, r) = tree.leaf_byte_ranges2(leaf);
-                if tl {
-                    res.extend_from_slice(&data[l.start.to_usize()..l.end.to_usize()]);
+        for item in tree.read_item_iter_ref(ranges, 0) {
+            match item {
+                BaoChunk::Parent { node, .. } => {
+                    let offset = tree.post_order_offset(node).unwrap();
+                    let hash_offset = usize::try_from(offset.value() * 64).unwrap();
+                    res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
                 }
-                if tr {
-                    res.extend_from_slice(&data[r.start.to_usize()..r.end.to_usize()]);
+                BaoChunk::Leaf {
+                    size, start_chunk, ..
+                } => {
+                    let start = start_chunk.to_bytes().to_usize();
+                    res.extend_from_slice(&data[start..start + size]);
                 }
             }
         }
         res
-    }
-
-    /// Compute the byte ranges for a leaf node
-    ///
-    /// Returns Ok((left, right)) if the leaf is fully contained in the tree
-    /// Returns Err(left) if the leaf is partially contained in the tree
-    fn leaf_byte_ranges(
-        &self,
-        leaf: LeafNode,
-    ) -> std::result::Result<(Range<ByteNum>, Range<ByteNum>), Range<ByteNum>> {
-        let chunk_group_bytes = self.chunk_group_bytes();
-        let start = chunk_group_bytes * leaf.0;
-        let mid = start + chunk_group_bytes;
-        let end = start + chunk_group_bytes * 2;
-        debug_assert!(start < self.size || (start == 0 && self.size == 0));
-        if mid >= self.size {
-            Err(start..self.size)
-        } else {
-            Ok((start..mid, mid..end.min(self.size)))
-        }
-    }
-
-    /// Compute the byte ranges for a leaf node
-    ///
-    /// Returns two ranges, the first is the left range, the second is the right range
-    /// If the leaf is partially contained in the tree, the right range will be empty
-    fn leaf_byte_ranges2(&self, leaf: LeafNode) -> (Range<ByteNum>, Range<ByteNum>) {
-        let chunk_group_bytes = self.chunk_group_bytes();
-        let start = chunk_group_bytes * leaf.0;
-        let mid = start + chunk_group_bytes;
-        let end = start + chunk_group_bytes * 2;
-        debug_assert!(start < self.size || (start == 0 && self.size == 0));
-        (
-            start..mid.min(self.size),
-            mid.min(self.size)..end.min(self.size),
-        )
     }
 
     /// Compute the byte ranges for a leaf node
@@ -440,8 +411,8 @@ impl BaoTree {
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
         min_level: u8,
-    ) -> ReadItemIterRef<'a> {
-        ReadItemIterRef::new(*self, ranges, min_level)
+    ) -> ChunkIterRef<'a> {
+        ChunkIterRef::new(*self, ranges, min_level)
     }
 
     /// Total number of nodes in the tree
@@ -670,20 +641,6 @@ fn parse_hash_pair(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
     (l_hash, r_hash)
-}
-
-/// read the bytes for the range from the source
-///
-/// note that this will read start-end bytes from the current position, not seek to start
-fn read_bytes_io<'a>(
-    from: &mut impl Read,
-    range: Range<ByteNum>,
-    buf: &'a mut [u8],
-) -> io::Result<&'a [u8]> {
-    let len = (range.end - range.start).to_usize();
-    let mut buf = &mut buf[..len];
-    from.read_exact(&mut buf)?;
-    Ok(buf)
 }
 
 /// seeks read the bytes for the range from the source

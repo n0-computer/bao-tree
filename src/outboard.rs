@@ -165,7 +165,7 @@ impl Outboard for PostOrderMemOutboard {
 
 fn load_raw_post_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 64]> {
     let offset = tree.post_order_offset(node)?.value();
-    let offset = usize::try_from(offset* 64).unwrap();
+    let offset = usize::try_from(offset * 64).unwrap();
     let slice = &data[offset..offset + 64];
     Some(slice.try_into().unwrap())
 }
