@@ -1,6 +1,5 @@
 use std::{
     fmt, io,
-    ops::Range,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -10,7 +9,7 @@ use bytes::{Bytes, BytesMut};
 use futures::{ready, Stream, StreamExt};
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
-use tokio::io::{AsyncRead, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
 use crate::{bao_tree::hash_block, BaoTree, ByteNum, ChunkNum};
 
@@ -336,6 +335,11 @@ impl<'a, R: AsyncRead + Unpin> AsyncResponseDecoderRef<'a, R> {
         }
     }
 
+    pub async fn read_tree(&mut self) -> io::Result<&BaoTree> {
+        self.read(&mut []).await?;
+        Ok(self.tree().unwrap())
+    }
+
     pub fn into_inner(self) -> R {
         self.encoded
     }
@@ -471,15 +475,8 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncRespo
     ///
     /// This is useful for determining the size of the decoded stream.
     pub async fn read_tree(&mut self) -> io::Result<BaoTree> {
-        futures::future::poll_fn(move |cx| {
-            self.0.with_mut(|this| {
-                let mut buf = ReadBuf::uninit(&mut []);
-                let mut inner = this.inner.as_mut().unwrap();
-                ready!(Pin::new(&mut inner).poll_read(cx, &mut buf))?;
-                Poll::Ready(Ok(*inner.tree().unwrap()))
-            })
-        })
-        .await
+        self.read(&mut []).await?;
+        Ok(self.0.with_inner(|x| *x.as_ref().unwrap().tree().unwrap()))
     }
 
     /// Read the header containing the size from the encoded stream.
