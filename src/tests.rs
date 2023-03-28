@@ -16,7 +16,7 @@ use super::{
     BaoTree,
 };
 use crate::{
-    iter::{encode_ranges, encode_ranges_validated},
+    io::{encode_ranges, encode_ranges_validated},
     outboard::{Outboard, PostOrderMemOutboardRef},
     pre_order_offset_slow,
     tree::{ByteNum, ChunkNum},
@@ -117,9 +117,13 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
     let mut ec = Cursor::new(encoded);
     let mut scratch = vec![0u8; 2048];
-    for item in
-        BaoTree::decode_ranges_into_chunks(root, BlockSize::DEFAULT, &mut ec, &ranges, &mut scratch)
-    {
+    for item in crate::io::decode_ranges_into_chunks(
+        root,
+        BlockSize::DEFAULT,
+        &mut ec,
+        &ranges,
+        &mut scratch,
+    ) {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
@@ -227,7 +231,7 @@ fn bao_tree_slice_roundtrip_test(
     let mut all_ranges = RangeSet2::empty();
     let mut ec = Cursor::new(encoded);
     let mut scratch = vec![0u8; 2048 << chunk_group_log.0];
-    for item in BaoTree::decode_ranges_into_chunks(
+    for item in crate::io::decode_ranges_into_chunks(
         root,
         chunk_group_log,
         &mut ec,

@@ -1,3 +1,4 @@
+//! Async (tokio) IO functions
 use std::{
     fmt, io,
     pin::Pin,
@@ -11,10 +12,10 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 
-use crate::{hash_block, BaoTree, ByteNum};
+use crate::{hash_block, io::DecodeError, BaoTree, ByteNum};
 
 use super::{
-    iter::{BaoChunk, ChunkIterRef, DecodeError},
+    iter::{BaoChunk, ChunkIterRef},
     read_parent_mem, BlockSize, ChunkNum,
 };
 

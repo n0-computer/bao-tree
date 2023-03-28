@@ -1,9 +1,7 @@
-use blake3::guts::parent_cv;
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
-use smallvec::SmallVec;
 use std::{
     fmt::{self, Debug},
-    io::{self, Cursor, Read, Seek, Write},
+    io::Cursor,
     ops::{Range, RangeFrom},
     result,
 };
@@ -15,6 +13,7 @@ use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 pub mod r#async;
+pub mod io;
 pub mod outboard;
 use outboard::*;
 
@@ -123,94 +122,10 @@ impl BaoTree {
         let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
         let mut res = Vec::with_capacity(outboard_len);
         let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-        let hash = tree
-            .outboard_post_order_sync_impl(&mut Cursor::new(data), &mut res, &mut buffer)
-            .unwrap();
+        let hash =
+            io::outboard_post_order_sync_impl(tree, &mut Cursor::new(data), &mut res, &mut buffer)
+                .unwrap();
         PostOrderMemOutboard::new(hash, tree, res)
-    }
-
-    /// Compute the post order outboard for the given data, writing into a io::Write
-    pub fn outboard_post_order_io(
-        data: &mut impl Read,
-        size: u64,
-        block_size: BlockSize,
-        outboard: &mut impl Write,
-    ) -> io::Result<blake3::Hash> {
-        let tree = Self::new_with_start_chunk(ByteNum(size), block_size, ChunkNum(0));
-        let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-        let hash = tree.outboard_post_order_sync_impl(data, outboard, &mut buffer)?;
-        outboard.write_all(&size.to_le_bytes())?;
-        Ok(hash)
-    }
-
-    /// Compute the post order outboard for the given data
-    ///
-    /// This is the internal version that takes a start chunk and does not append the size!
-    fn outboard_post_order_sync_impl(
-        &self,
-        data: &mut impl Read,
-        outboard: &mut impl Write,
-        buffer: &mut [u8],
-    ) -> io::Result<blake3::Hash> {
-        // do not allocate for small trees
-        let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-        debug_assert!(buffer.len() == self.chunk_group_bytes().to_usize());
-        for item in PostOrderChunkIter::new(*self) {
-            match item {
-                BaoChunk::Parent { is_root, .. } => {
-                    let right_hash = stack.pop().unwrap();
-                    let left_hash = stack.pop().unwrap();
-                    outboard.write_all(left_hash.as_bytes())?;
-                    outboard.write_all(right_hash.as_bytes())?;
-                    let parent = parent_cv(&left_hash, &right_hash, is_root);
-                    stack.push(parent);
-                }
-                BaoChunk::Leaf {
-                    size,
-                    is_root,
-                    start_chunk,
-                } => {
-                    let buf = &mut buffer[..size];
-                    data.read_exact(buf)?;
-                    let hash = hash_block(start_chunk, buf, is_root);
-                    stack.push(hash);
-                }
-            }
-        }
-        // let root = self.root();
-        // for node in self.iterate() {
-        //     let is_root = node == root;
-        //     let hash = if let Some(leaf) = node.as_leaf() {
-        //         let chunk0 = self.chunk_num(leaf);
-        //         let cgc = self.chunk_group_chunks();
-        //         match self.leaf_byte_ranges(leaf) {
-        //             Ok((l, r)) => {
-        //                 let l_data = read_bytes_io(data, l, buffer)?;
-        //                 let l_hash = hash_block(chunk0, l_data, false);
-        //                 let r_data = read_bytes_io(data, r, buffer)?;
-        //                 let r_hash = hash_block(chunk0 + cgc, r_data, false);
-        //                 outboard.write_all(l_hash.as_bytes())?;
-        //                 outboard.write_all(r_hash.as_bytes())?;
-        //                 parent_cv(&l_hash, &r_hash, is_root)
-        //             }
-        //             Err(l) => {
-        //                 let l_data = read_bytes_io(data, l, buffer)?;
-        //                 let l_hash = hash_block(chunk0, l_data, is_root);
-        //                 l_hash
-        //             }
-        //         }
-        //     } else {
-        //         let right_hash = stack.pop().unwrap();
-        //         let left_hash = stack.pop().unwrap();
-        //         outboard.write_all(left_hash.as_bytes())?;
-        //         outboard.write_all(right_hash.as_bytes())?;
-        //         parent_cv(&left_hash, &right_hash, is_root)
-        //     };
-        //     stack.push(hash);
-        // }
-        debug_assert_eq!(stack.len(), 1);
-        let hash = stack.pop().unwrap();
-        Ok(hash)
     }
 
     /// Compute the blake3 hash for the given data
@@ -218,7 +133,7 @@ impl BaoTree {
         let data = data.as_ref();
         let cursor = Cursor::new(data);
         let mut buffer = [0u8; 1024];
-        Self::blake3_hash_inner(
+        io::blake3_hash_inner(
             cursor,
             ByteNum(data.len() as u64),
             ChunkNum(0),
@@ -227,114 +142,6 @@ impl BaoTree {
         )
         .unwrap()
     }
-
-    /// Internal hash computation. This allows to also compute a non root hash, e.g. for a block
-    pub fn blake3_hash_inner(
-        mut data: impl Read,
-        data_len: ByteNum,
-        start_chunk: ChunkNum,
-        is_root: bool,
-        buf: &mut [u8],
-    ) -> io::Result<blake3::Hash> {
-        let can_be_root = is_root;
-        let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-        let tree = Self::new_with_start_chunk(data_len, BlockSize(0), start_chunk);
-        for item in PostOrderChunkIter::new(tree) {
-            match item {
-                BaoChunk::Leaf {
-                    size,
-                    is_root,
-                    start_chunk,
-                } => {
-                    let buf = &mut buf[..size];
-                    data.read_exact(buf)?;
-                    let hash = hash_chunk(start_chunk, buf, can_be_root && is_root);
-                    stack.push(hash);
-                }
-                BaoChunk::Parent { is_root, .. } => {
-                    let right_hash = stack.pop().unwrap();
-                    let left_hash = stack.pop().unwrap();
-                    let hash = parent_cv(&left_hash, &right_hash, can_be_root && is_root);
-                    stack.push(hash);
-                }
-            }
-        }
-        debug_assert_eq!(stack.len(), 1);
-        Ok(stack.pop().unwrap())
-    }
-
-    pub fn decode_ranges_into<'a>(
-        root: blake3::Hash,
-        block_size: BlockSize,
-        encoded: &'a mut impl Read,
-        ranges: &'a RangeSetRef<ChunkNum>,
-        scratch: &'a mut [u8],
-        target: &'a mut (impl Write + Seek),
-    ) -> impl Iterator<Item = io::Result<Range<ByteNum>>> + 'a {
-        let iter = DecodeSliceIter::new(root, block_size, encoded, &ranges, scratch);
-        let mut first = true;
-        MapWithRef::new(iter, move |iter, item| match item {
-            Ok(range) => {
-                if first {
-                    let tree = iter.tree().unwrap();
-                    let target_len = ByteNum(target.seek(io::SeekFrom::End(0))?);
-                    if target_len < tree.size {
-                        io_error!("target is too small")
-                    }
-                    first = false;
-                }
-                let len = (range.end - range.start).to_usize();
-                let data = &iter.buffer()[..len];
-                target.seek(io::SeekFrom::Start(range.start.0))?;
-                target.write_all(data)?;
-                Ok(range)
-            }
-            Err(e) => Err(e.into()),
-        })
-    }
-
-    /// Decode encoded ranges given the root hash
-    #[cfg(test)]
-    pub fn decode_ranges_into_chunks<'a>(
-        root: blake3::Hash,
-        block_size: BlockSize,
-        encoded: &'a mut impl Read,
-        ranges: &'a RangeSetRef<ChunkNum>,
-        scratch: &'a mut [u8],
-    ) -> impl Iterator<Item = io::Result<(ByteNum, Vec<u8>)>> + 'a {
-        let iter = DecodeSliceIter::new(root, block_size, encoded, &ranges, scratch);
-        MapWithRef::new(iter, |iter, item| match item {
-            Ok(range) => {
-                let len = (range.end - range.start).to_usize();
-                let data = &iter.buffer()[..len];
-                Ok((range.start, data.to_vec()))
-            }
-            Err(e) => Err(e.into()),
-        })
-    }
-
-    /// Decode encoded ranges given the root hash
-    // #[cfg(test)]
-    // pub fn decode_ranges_into_bytes<R, Q>(
-    //     root: blake3::Hash,
-    //     chunk_group_log: u8,
-    //     encoded: R,
-    //     ranges: Q,
-    // ) -> impl Stream<Item = io::Result<(ByteNum, Bytes)>>
-    // where
-    //     R: AsyncRead + Unpin + Send + 'static,
-    //     Q: AsRef<RangeSetRef<ChunkNum>> + Send + 'static,
-    // {
-    //     let iter = DecodeSliceIter::new(root, chunk_group_log, encoded, &ranges, scratch);
-    //     MapWithRef::new(iter, |iter, item| match item {
-    //         Ok(range) => {
-    //             let len = (range.end - range.start).to_usize();
-    //             let data = &iter.buffer()[..len];
-    //             Ok((range.start, data.to_vec()))
-    //         }
-    //         Err(e) => Err(e.into()),
-    //     })
-    // }
 
     /// Given a *post order* outboard, encode a slice of data
     ///
@@ -607,6 +414,8 @@ fn range_ok(range: &RangeSetRef<ChunkNum>, end: ChunkNum) -> bool {
 
 #[cfg(test)]
 fn canonicalize_range_owned(range: &RangeSetRef<ChunkNum>, end: ByteNum) -> RangeSet2<ChunkNum> {
+    use smallvec::SmallVec;
+
     match canonicalize_range(range, end.chunks()) {
         Ok(range) => {
             let t = SmallVec::from(range.boundaries());
@@ -616,44 +425,16 @@ fn canonicalize_range_owned(range: &RangeSetRef<ChunkNum>, end: ByteNum) -> Rang
     }
 }
 
-fn read_len_io(from: &mut impl Read) -> io::Result<ByteNum> {
-    let mut buf = [0; 8];
-    from.read_exact(&mut buf)?;
-    let len = ByteNum(u64::from_le_bytes(buf));
-    Ok(len)
-}
-
 fn read_parent_mem(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
     (l_hash, r_hash)
 }
 
-fn read_parent_io(from: &mut impl Read) -> io::Result<(blake3::Hash, blake3::Hash)> {
-    let mut buf = [0; 64];
-    from.read_exact(&mut buf)?;
-    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
-    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
-    Ok((l_hash, r_hash))
-}
-
 fn parse_hash_pair(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
     (l_hash, r_hash)
-}
-
-/// seeks read the bytes for the range from the source
-fn read_range_io<'a>(
-    from: &mut (impl Read + Seek),
-    range: Range<ByteNum>,
-    buf: &'a mut [u8],
-) -> io::Result<&'a [u8]> {
-    let len = (range.end - range.start).to_usize();
-    from.seek(io::SeekFrom::Start(range.start.0))?;
-    let mut buf = &mut buf[..len];
-    from.read_exact(&mut buf)?;
-    Ok(buf)
 }
 
 /// An u64 that defines a node in a bao tree.
@@ -896,7 +677,7 @@ pub(crate) fn hash_block(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> b
     let mut buffer = [0u8; 1024];
     let data_len = ByteNum(data.len() as u64);
     let data = Cursor::new(data);
-    BaoTree::blake3_hash_inner(data, data_len, start_chunk, is_root, &mut buffer).unwrap()
+    io::blake3_hash_inner(data, data_len, start_chunk, is_root, &mut buffer).unwrap()
 }
 
 /// Slow iterative way to find the offset of a node in a pre-order traversal.

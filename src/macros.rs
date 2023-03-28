@@ -100,6 +100,6 @@ macro_rules! index_newtype {
 
 macro_rules! io_error {
     ($($arg:tt)*) => {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!($($arg)*)))
     };
 }
