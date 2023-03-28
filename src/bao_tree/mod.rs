@@ -4,16 +4,16 @@ use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
     fmt::{self, Debug},
-    fs::File,
     io::{self, Cursor, Read, Seek, Write},
     ops::{Range, RangeFrom},
     result,
 };
-mod iter;
+pub mod iter;
 #[cfg(test)]
 mod tests;
 use iter::*;
-mod outboard;
+pub mod outboard;
+mod stream;
 use outboard::*;
 
 /// Defines a Bao tree.
@@ -114,10 +114,10 @@ impl BaoTree {
         TreeNode(n + n.saturating_sub(1))
     }
 
-    pub fn chunk_num(&self, node: LeafNode) -> ChunkNum {
+    pub const fn chunk_num(&self, node: LeafNode) -> ChunkNum {
         // block number of a leaf node is just the node number
         // multiply by chunk_group_size to get the chunk number
-        ChunkNum(node.0 << self.chunk_group_log) + self.start_chunk
+        ChunkNum((node.0 << self.chunk_group_log) + self.start_chunk.0)
     }
 
     /// Compute the post order outboard for the given data, returning a in mem data structure
@@ -305,6 +305,29 @@ impl BaoTree {
         })
     }
 
+    /// Decode encoded ranges given the root hash
+    // #[cfg(test)]
+    // pub fn decode_ranges_into_bytes<R, Q>(
+    //     root: blake3::Hash,
+    //     chunk_group_log: u8,
+    //     encoded: R,
+    //     ranges: Q,
+    // ) -> impl Stream<Item = io::Result<(ByteNum, Bytes)>>
+    // where
+    //     R: AsyncRead + Unpin + Send + 'static,
+    //     Q: AsRef<RangeSetRef<ChunkNum>> + Send + 'static,
+    // {
+    //     let iter = DecodeSliceIter::new(root, chunk_group_log, encoded, &ranges, scratch);
+    //     MapWithRef::new(iter, |iter, item| match item {
+    //         Ok(range) => {
+    //             let len = (range.end - range.start).to_usize();
+    //             let data = &iter.buffer()[..len];
+    //             Ok((range.start, data.to_vec()))
+    //         }
+    //         Err(e) => Err(e.into()),
+    //     })
+    // }
+
     /// Given a *post order* outboard, encode a slice of data
     ///
     /// Todo: validate on read option
@@ -335,8 +358,8 @@ impl BaoTree {
         res.extend_from_slice(&tree.size.0.to_le_bytes());
         for NodeInfo {
             node,
-            l_range: lr,
-            r_range: rr,
+            l_ranges: lr,
+            r_ranges: rr,
             ..
         } in tree.iterate_part_preorder_ref(ranges, 0)
         {
@@ -495,14 +518,16 @@ impl BaoTree {
             let (l_ranges, r_ranges) = ranges.split(mid);
 
             let query_leaf = node.is_leaf() || (full && node.level() < min_level as u32);
+            let is_half_leaf = !tree.is_persisted(node);
             // push no matter if leaf or not
             res.push(NodeInfo {
                 node,
-                l_range: l_ranges,
-                r_range: r_ranges,
+                l_ranges,
+                r_ranges,
                 full,
                 query_leaf,
                 is_root,
+                is_half_leaf,
             });
             // if not leaf, recurse
             if !query_leaf {
@@ -641,6 +666,12 @@ fn read_hash_io(from: &mut impl Read) -> io::Result<blake3::Hash> {
     from.read_exact(&mut buf)?;
     let hash = blake3::Hash::from(buf);
     Ok(hash)
+}
+
+fn read_parent_mem(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
+    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
+    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
+    (l_hash, r_hash)
 }
 
 fn read_parent_io(from: &mut impl Read) -> io::Result<(blake3::Hash, blake3::Hash)> {

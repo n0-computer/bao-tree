@@ -78,7 +78,7 @@ impl<'a> Outboard for PostOrderMemOutboardRef<'a> {
         self.tree
     }
     fn load_raw(&self, node: TreeNode) -> io::Result<Option<[u8; 64]>> {
-        Ok(load_raw_post(&self.tree, self.data, node))
+        Ok(load_raw_post_mem(&self.tree, self.data, node))
     }
 }
 
@@ -130,11 +130,11 @@ impl Outboard for PostOrderMemOutboard {
         self.tree
     }
     fn load_raw(&self, node: TreeNode) -> io::Result<Option<[u8; 64]>> {
-        Ok(load_raw_post(&self.tree, &self.data, node))
+        Ok(load_raw_post_mem(&self.tree, &self.data, node))
     }
 }
 
-fn load_raw_post(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 64]> {
+fn load_raw_post_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 64]> {
     let offset = tree.post_order_offset(node).value()?;
     let offset = offset.to_usize() * 64;
     let slice = &data[offset..offset + 64];
@@ -155,7 +155,10 @@ pub struct PreOrderMemOutboard {
 }
 
 impl PreOrderMemOutboard {
-    pub fn new(root: blake3::Hash, tree: BaoTree, data: Vec<u8>) -> Self {
+    pub fn new(root: blake3::Hash, chunk_group_log: u8, data: Vec<u8>) -> Self {
+        assert!(data.len() >= 8);
+        let len = ByteNum(u64::from_le_bytes(data[0..8].try_into().unwrap()));
+        let tree = BaoTree::new(len, chunk_group_log);
         assert!(data.len() as u64 == tree.outboard_hash_pairs() * 64 + 8);
         Self { root, tree, data }
     }
@@ -191,11 +194,13 @@ impl Outboard for PreOrderMemOutboard {
         self.tree
     }
     fn load_raw(&self, node: TreeNode) -> io::Result<Option<[u8; 64]>> {
-        Ok(load_raw_pre(&self.tree, &self.data, node))
+        Ok(load_raw_pre_mem(&self.tree, &self.data, node))
     }
 }
 
-fn load_raw_pre(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 64]> {
+fn load_raw_pre_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 64]> {
+    // this is slow because pre_order_offset uses a loop.
+    // pretty sure there is a way to write it as a single expression if you spend the time.
     let offset = tree.pre_order_offset(node)?;
     let offset = (offset as usize) * 64 + 8;
     let slice = &data[offset..offset + 64];

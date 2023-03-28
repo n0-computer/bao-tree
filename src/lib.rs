@@ -3,6 +3,6 @@ pub mod errors;
 mod macros;
 mod tree;
 
-mod bao_tree;
+pub mod bao_tree;
 pub use crate::bao_tree::BaoTree;
 pub use tree::{BlockLevel, ByteNum, ChunkNum, NodeNum, PONum};
