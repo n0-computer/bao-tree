@@ -1052,3 +1052,17 @@ impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> Iterator for MapWithRef<I, F> {
         self.0.next().map(|x| (self.1)(&self.0, x))
     }
 }
+
+pub fn outboard_size(size: u64, chunk_group_log: u8) -> u64 {
+    BaoTree::outboard_size(ByteNum(size), chunk_group_log).0
+}
+
+pub fn outboard(input: impl AsRef<[u8]>, chunk_group_log: u8) -> (Vec<u8>, blake3::Hash) {
+    let outboard = BaoTree::outboard_post_order_mem(input, chunk_group_log).flip();
+    let hash = *outboard.hash();
+    (outboard.into_inner(), hash)
+}
+
+pub fn encoded_size(size: u64, chunk_group_log: u8) -> u64 {
+    outboard_size(size, chunk_group_log) + size
+}

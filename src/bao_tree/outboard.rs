@@ -1,6 +1,6 @@
-use super::{parse_hash_pair, parse_hash_pair2, TreeNode};
+use super::{outboard_size, parse_hash_pair, parse_hash_pair2, TreeNode};
 use crate::{BaoTree, ByteNum};
-use std::io;
+use std::io::{self, Read};
 
 macro_rules! io_error {
     ($($arg:tt)*) => {
@@ -98,6 +98,27 @@ impl PostOrderMemOutboard {
         Self { root, tree, data }
     }
 
+    pub fn load(root: blake3::Hash, mut data: impl Read, chunk_group_log: u8) -> io::Result<Self> {
+        // validate roughly that the outboard is correct
+        let mut outboard = Vec::new();
+        data.read_to_end(&mut outboard)?;
+        if outboard.len() < 8 {
+            io_error!("outboard must be at least 8 bytes");
+        };
+        let suffix = &outboard[outboard.len() - 8..];
+        let len = u64::from_le_bytes(suffix.try_into().unwrap());
+        let expected_outboard_size = outboard_size(len, chunk_group_log);
+        let outboard_size = outboard.len() as u64;
+        if outboard_size != expected_outboard_size {
+            io_error!(
+                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"                
+            );
+        }
+        let tree = BaoTree::new(ByteNum(len), chunk_group_log);
+        outboard.truncate(outboard.len() - 8);
+        Ok(Self::new(root, tree, outboard))
+    }
+
     /// The outboard data, without the length suffix.
     pub fn outboard(&self) -> &[u8] {
         &self.data
@@ -166,6 +187,14 @@ impl PreOrderMemOutboard {
     /// The outboard data, including the length prefix.
     pub fn outboard(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn hash(&self) -> &blake3::Hash {
+        &self.root
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.data
     }
 
     pub fn flip(&self) -> PostOrderMemOutboard {
