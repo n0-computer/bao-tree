@@ -50,7 +50,7 @@ pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
                 start_chunk, size, ..
             } => {
                 let start = start_chunk.to_bytes();
-                let data = read_range_io(&mut data, start..start + (size as u64), &mut buffer)?;
+                let data = read_range(&mut data, start..start + (size as u64), &mut buffer)?;
                 encoded.write_all(data)?;
             }
         }
@@ -123,7 +123,7 @@ pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
-                let data = read_range_io(&mut data, start..start + (size as u64), &mut buffer)?;
+                let data = read_range(&mut data, start..start + (size as u64), &mut buffer)?;
                 let actual = hash_block(start_chunk, data, is_root);
                 if actual != expected {
                     return Err(DecodeError::LeafHashMismatch(start_chunk));
@@ -229,7 +229,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     block_size,
                     ranges: range,
                 } => {
-                    let size = read_len_io(&mut self.encoded)?;
+                    let size = read_len(&mut self.encoded)?;
                     // make sure the range is valid and canonical
                     if !range_ok(range, size.chunks()) {
                         break Err(DecodeError::InvalidQueryRange);
@@ -248,7 +248,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     right,
                     node,
                 }) => {
-                    let (l_hash, r_hash) = read_parent_io(&mut self.encoded)?;
+                    let (l_hash, r_hash) = read_parent(&mut self.encoded)?;
                     let parent_hash = self.stack.pop().unwrap();
                     let actual = parent_cv(&l_hash, &r_hash, is_root);
                     if parent_hash != actual {
@@ -292,7 +292,7 @@ impl<'a, R: Read> Iterator for DecodeSliceIter<'a, R> {
 }
 
 /// Compute the post order outboard for the given data, writing into a io::Write
-pub fn outboard_post_order_io(
+pub fn outboard_post_order(
     data: &mut impl Read,
     size: u64,
     block_size: BlockSize,
@@ -429,14 +429,14 @@ pub fn decode_ranges_into_chunks<'a>(
     })
 }
 
-fn read_len_io(from: &mut impl Read) -> std::io::Result<ByteNum> {
+fn read_len(from: &mut impl Read) -> std::io::Result<ByteNum> {
     let mut buf = [0; 8];
     from.read_exact(&mut buf)?;
     let len = ByteNum(u64::from_le_bytes(buf));
     Ok(len)
 }
 
-fn read_parent_io(from: &mut impl Read) -> std::io::Result<(blake3::Hash, blake3::Hash)> {
+fn read_parent(from: &mut impl Read) -> std::io::Result<(blake3::Hash, blake3::Hash)> {
     let mut buf = [0; 64];
     from.read_exact(&mut buf)?;
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
@@ -445,7 +445,7 @@ fn read_parent_io(from: &mut impl Read) -> std::io::Result<(blake3::Hash, blake3
 }
 
 /// seeks read the bytes for the range from the source
-fn read_range_io<'a>(
+fn read_range<'a>(
     from: &mut (impl Read + Seek),
     range: Range<ByteNum>,
     buf: &'a mut [u8],
