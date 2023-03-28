@@ -10,7 +10,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
 use crate::{
-    bao_tree::{hash_block, range_ok, read_bytes_io, TreeNode},
+    bao_tree::{hash_block, range_ok, TreeNode},
     BaoTree, ByteNum, ChunkNum,
 };
 
@@ -267,6 +267,7 @@ impl Iterator for PostOrderTreeIterStack {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// A read item describes what comes next
 pub enum ReadItem {
     /// expect a 64 byte parent node.
@@ -279,6 +280,8 @@ pub enum ReadItem {
         right: bool,
         /// Push the left hash to the stack, since it will be needed later
         left: bool,
+        /// The tree node, useful for error reporting
+        node: TreeNode,
     },
     Leaf {
         /// Size of the data to expect. Will be chunk_group_bytes for all but the last block.
@@ -290,17 +293,57 @@ pub enum ReadItem {
     },
 }
 
+impl ReadItem {
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Parent { .. } => 64,
+            Self::Leaf { size, .. } => *size,
+        }
+    }
+}
+
+impl Default for ReadItem {
+    fn default() -> Self {
+        Self::Leaf {
+            is_root: true,
+            size: 0,
+            start_chunk: ChunkNum(0),
+        }
+    }
+}
+
 /// An iterator that produces read items that are convenient to use when reading an encoded query response.
 pub struct ReadItemIterRef<'a> {
     inner: PreOrderPartialIterRef<'a>,
-    elems: SmallVec<[ReadItem; 3]>,
+    // stack with 3 elements, since we can only have 3 items in flight
+    elems: [ReadItem; 3],
+    index: usize,
 }
 
 impl<'a> ReadItemIterRef<'a> {
     pub fn new(tree: BaoTree, query: &'a RangeSetRef<ChunkNum>) -> Self {
         Self {
             inner: PreOrderPartialIterRef::new(tree, query, 0),
-            elems: SmallVec::new(),
+            elems: Default::default(),
+            index: 0,
+        }
+    }
+
+    pub fn tree(&self) -> &BaoTree {
+        self.inner.tree()
+    }
+
+    fn push(&mut self, item: ReadItem) {
+        self.elems[self.index] = item;
+        self.index += 1;
+    }
+
+    fn pop(&mut self) -> Option<ReadItem> {
+        if self.index > 0 {
+            self.index -= 1;
+            Some(self.elems[self.index])
+        } else {
+            None
         }
     }
 }
@@ -310,7 +353,7 @@ impl<'a> Iterator for ReadItemIterRef<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(item) = self.elems.pop() {
+            if let Some(item) = self.pop() {
                 return Some(item);
             }
             let NodeInfo {
@@ -321,33 +364,34 @@ impl<'a> Iterator for ReadItemIterRef<'a> {
                 r_ranges,
                 ..
             } = self.inner.next()?;
-            // the last leaf is a special case, since it does not have a parent if it is <= half full
-            if !is_half_leaf {
-                self.elems.push(ReadItem::Parent {
-                    is_root,
-                    left: !l_ranges.is_empty(),
-                    right: !r_ranges.is_empty(),
-                });
-            }
             if let Some(leaf) = node.as_leaf() {
                 let tree = &self.inner.tree;
                 let (s, m, e) = tree.leaf_byte_ranges3(leaf);
                 let l_start_chunk = tree.chunk_num(leaf);
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
-                if !r_ranges.is_empty() {
-                    self.elems.push(ReadItem::Leaf {
+                if !r_ranges.is_empty() && m < e {
+                    self.push(ReadItem::Leaf {
                         is_root: false,
                         start_chunk: r_start_chunk,
                         size: (e - m).to_usize(),
                     });
                 };
-                if !l_ranges.is_empty() && m < e {
-                    self.elems.push(ReadItem::Leaf {
+                if !l_ranges.is_empty() {
+                    self.push(ReadItem::Leaf {
                         is_root: is_root && is_half_leaf,
                         start_chunk: l_start_chunk,
                         size: (m - s).to_usize(),
                     });
                 };
+            }
+            // the last leaf is a special case, since it does not have a parent if it is <= half full
+            if !is_half_leaf {
+                self.push(ReadItem::Parent {
+                    is_root,
+                    left: !l_ranges.is_empty(),
+                    right: !r_ranges.is_empty(),
+                    node,
+                });
             }
         }
     }
@@ -529,7 +573,7 @@ enum Position<'a> {
         chunk_group_log: u8,
     },
     /// currently reading the tree, all the info we need is in the iter
-    Content { iter: PreOrderPartialIterRef<'a> },
+    Content { iter: ReadItemIterRef<'a> },
 }
 
 pub struct DecodeSliceIter<'a, R> {
@@ -540,31 +584,40 @@ pub struct DecodeSliceIter<'a, R> {
 }
 
 #[derive(Debug)]
-pub enum DecodeSliceError {
+pub enum DecodeError {
+    /// There was an error reading from the underlying io
     Io(io::Error),
-    HashMismatch(TreeNode),
+    /// The hash of a parent did not match the expected hash
+    ParentHashMismatch(TreeNode),
+    /// The hash of a leaf did not match the expected hash
+    LeafHashMismatch(ChunkNum),
+    /// The query range was invalid
     InvalidQueryRange,
 }
 
-impl From<DecodeSliceError> for io::Error {
-    fn from(e: DecodeSliceError) -> Self {
+impl From<DecodeError> for io::Error {
+    fn from(e: DecodeError) -> Self {
         match e {
-            DecodeSliceError::Io(e) => e,
-            DecodeSliceError::HashMismatch(_) => {
+            DecodeError::Io(e) => e,
+            DecodeError::ParentHashMismatch(_) => {
                 io::Error::new(io::ErrorKind::InvalidData, "hash mismatch")
             }
-            DecodeSliceError::InvalidQueryRange => {
+            DecodeError::LeafHashMismatch(_) => {
+                io::Error::new(io::ErrorKind::InvalidData, "leaf hash mismatch")
+            }
+            DecodeError::InvalidQueryRange => {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
             }
         }
     }
 }
 
-impl From<io::Error> for DecodeSliceError {
+impl From<io::Error> for DecodeError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
     }
 }
+
 impl<'a, R: Read> DecodeSliceIter<'a, R> {
     pub fn new(
         root: blake3::Hash,
@@ -574,7 +627,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
         scratch: &'a mut [u8],
     ) -> Self {
         // make sure the buffer is big enough
-        assert!(scratch.len() >= 2048 << chunk_group_log);
+        assert!(scratch.len() >= 1024 << chunk_group_log);
         let mut stack = SmallVec::new();
         stack.push(root);
         Self {
@@ -592,14 +645,14 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
         &self.scratch
     }
 
-    pub fn tree(&self) -> Option<BaoTree> {
+    pub fn tree(&self) -> Option<&BaoTree> {
         match &self.inner {
-            Position::Content { iter } => Some(iter.tree().clone()),
+            Position::Content { iter } => Some(iter.tree()),
             Position::Header { .. } => None,
         }
     }
 
-    fn next0(&mut self) -> result::Result<Option<Range<ByteNum>>, DecodeSliceError> {
+    fn next0(&mut self) -> result::Result<Option<Range<ByteNum>>, DecodeError> {
         loop {
             let inner = match &mut self.inner {
                 Position::Content { ref mut iter } => iter,
@@ -610,90 +663,59 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     let size = read_len_io(&mut self.encoded)?;
                     // make sure the range is valid and canonical
                     if !range_ok(range, size.chunks()) {
-                        break Err(DecodeSliceError::InvalidQueryRange);
+                        break Err(DecodeError::InvalidQueryRange);
                     }
                     let tree = BaoTree::new(size, *chunk_group_log);
                     self.inner = Position::Content {
-                        iter: tree.iterate_part_preorder_ref(range, 0),
+                        iter: tree.read_item_iter_ref(range, 0),
                     };
                     continue;
                 }
             };
-            let info = match inner.next() {
-                Some(node) => node,
+            match inner.next() {
+                Some(ReadItem::Parent {
+                    is_root,
+                    left,
+                    right,
+                    node,
+                }) => {
+                    let (l_hash, r_hash) = read_parent_io(&mut self.encoded)?;
+                    let parent_hash = self.stack.pop().unwrap();
+                    let actual = parent_cv(&l_hash, &r_hash, is_root);
+                    if parent_hash != actual {
+                        break Err(DecodeError::ParentHashMismatch(node));
+                    }
+                    if right {
+                        self.stack.push(r_hash);
+                    }
+                    if left {
+                        self.stack.push(l_hash);
+                    }
+                }
+                Some(ReadItem::Leaf {
+                    size,
+                    is_root,
+                    start_chunk,
+                }) => {
+                    let buf = &mut self.scratch[..size];
+                    self.encoded.read_exact(buf)?;
+                    let actual = hash_block(start_chunk, buf, is_root);
+                    let leaf_hash = self.stack.pop().unwrap();
+                    if leaf_hash != actual {
+                        break Err(DecodeError::LeafHashMismatch(start_chunk));
+                    }
+                    let start = start_chunk.to_bytes();
+                    let end = start + (size as u64);
+                    break Ok(Some(start..end));
+                }
                 None => break Ok(None),
-            };
-            let NodeInfo {
-                node,
-                l_ranges: l_range,
-                r_ranges: r_range,
-                is_root,
-                is_half_leaf,
-                ..
-            } = info;
-            let tl = !l_range.is_empty();
-            let tr = !r_range.is_empty();
-            // do not expect a parent pair for a half leaf
-            if !is_half_leaf {
-                let (l_hash, r_hash) = read_parent_io(&mut self.encoded)?;
-                let parent_hash = self.stack.pop().unwrap();
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
-                // Push the children in reverse order so they are popped in the correct order
-                // only push right if the range intersects with the right child
-                if tr {
-                    self.stack.push(r_hash);
-                }
-                // only push left if the range intersects with the left child
-                if tl {
-                    self.stack.push(l_hash);
-                }
-                // Validate after pushing the children so that we could in principle continue
-                if parent_hash != actual {
-                    break Err(DecodeSliceError::HashMismatch(node));
-                }
-            }
-            if let Some(leaf) = node.as_leaf() {
-                let tree = &inner.tree();
-                let (start, mid, end) = tree.leaf_byte_ranges3(leaf);
-                let l_start_chunk = tree.chunk_num(leaf);
-                let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
-                let mut offset = 0usize;
-                let buf = &mut self.scratch;
-                if tl {
-                    let l_hash = self.stack.pop().unwrap();
-                    let l_data = read_bytes_io(&mut self.encoded, start..mid, buf)?;
-                    offset += (mid - start).to_usize();
-                    // if is_persisted is true, this is just the left child of a leaf with 2 children
-                    // and therefore not the root. Only if it is a half full leaf can it be root
-                    let l_is_root = is_root && is_half_leaf;
-                    let actual = hash_block(l_start_chunk, l_data, l_is_root);
-                    if l_hash != actual {
-                        break Err(DecodeSliceError::HashMismatch(node));
-                    }
-                }
-                if tr && mid < end {
-                    let r_hash = self.stack.pop().unwrap();
-                    let r_data = read_bytes_io(&mut self.encoded, mid..end, &mut buf[offset..])?;
-                    offset += (end - mid).to_usize();
-                    // right side can never be root, sorry
-                    let r_is_root = false;
-                    let actual = hash_block(r_start_chunk, r_data, r_is_root);
-                    if r_hash != actual {
-                        break Err(DecodeSliceError::HashMismatch(node));
-                    }
-                }
-                let start = if tl { start } else { mid };
-                let end = if tr { end } else { mid };
-                assert!(tl || tr);
-                assert!(offset == (end - start).to_usize());
-                break Ok(Some(start..end));
             }
         }
     }
 }
 
 impl<'a, R: Read> Iterator for DecodeSliceIter<'a, R> {
-    type Item = result::Result<Range<ByteNum>, DecodeSliceError>;
+    type Item = result::Result<Range<ByteNum>, DecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next0().transpose()

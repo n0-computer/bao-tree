@@ -7,10 +7,12 @@ use std::{
 use futures::StreamExt;
 use proptest::prelude::*;
 use range_collections::RangeSet2;
+use tokio::io::AsyncReadExt;
 
 use super::{
     canonicalize_range, canonicalize_range_owned,
     outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
+    r#async::AsyncResponseDecoder,
     BaoTree,
 };
 use crate::{
@@ -127,11 +129,31 @@ async fn bao_tree_decode_slice_stream_impl(data: Vec<u8>, range: Range<u64>) {
     let expected = data;
     let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
     let mut ec = Cursor::new(encoded);
-    let mut stream = crate::bao_tree::stream::DecodeSliceStream::new(root, &ranges, 0, &mut ec);
+    let mut stream =
+        crate::bao_tree::r#async::DecodeResponseStreamRef::new(root, &ranges, 0, &mut ec);
     while let Some(item) = stream.next().await {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
+    }
+}
+
+/// range is a range of chunks. Just using u64 for convenience in tests
+async fn encode_all_roundtrip(data: Vec<u8>) {
+    let (encoded, hash) = abao::encode::encode(&data);
+    let mut ec = std::io::Cursor::new(encoded);
+    let ranges = ChunkNum(0)..ByteNum(data.len() as u64).chunks();
+    let mut decoder = AsyncResponseDecoder::new(hash, RangeSet2::from(ranges), 0, &mut ec);
+    let mut res = Vec::new();
+    let _n = decoder.read_to_end(&mut res).await.unwrap();
+    assert_eq!(data, res);
+}
+
+#[tokio::test]
+async fn encode_all_roundtrip_cases() {
+    use make_test_data as td;
+    for case in [0, 1, 1023, 1024, 1025, 2047, 10000, 20000] {
+        encode_all_roundtrip(make_test_data(case)).await;
     }
 }
 
@@ -245,21 +267,21 @@ fn bao_tree_slice_roundtrip_cases() {
 fn bao_tree_encode_slice_0() {
     use make_test_data as td;
     let cases = [
-        // (0, 0..1),
-        // (1, 0..1),
-        // (1023, 0..1),
-        // (1024, 0..1),
+        (0, 0..1),
+        (1, 0..1),
+        (1023, 0..1),
+        (1024, 0..1),
         (1025, 0..1),
-        // (2047, 0..1),
-        // (2048, 0..1),
-        // (10000, 0..1),
-        // (20000, 0..1),
-        // (24 * 1024 + 1, 0..25),
-        // (1025, 1..2),
-        // (2047, 1..2),
-        // (2048, 1..2),
-        // (10000, 1..2),
-        // (20000, 1..2),
+        (2047, 0..1),
+        (2048, 0..1),
+        (10000, 0..1),
+        (20000, 0..1),
+        (24 * 1024 + 1, 0..25),
+        (1025, 1..2),
+        (2047, 1..2),
+        (2048, 1..2),
+        (10000, 1..2),
+        (20000, 1..2),
     ];
     for (count, range) in cases {
         bao_tree_encode_slice_comparison_impl(

@@ -12,8 +12,8 @@ pub mod iter;
 #[cfg(test)]
 mod tests;
 use iter::*;
+mod r#async;
 pub mod outboard;
-mod stream;
 use outboard::*;
 
 /// Defines a Bao tree.
@@ -464,6 +464,14 @@ impl BaoTree {
         min_level: u8,
     ) -> PreOrderPartialIterRef<'a> {
         PreOrderPartialIterRef::new(*self, ranges, min_level)
+    }
+
+    pub fn read_item_iter_ref<'a>(
+        &self,
+        ranges: &'a RangeSetRef<ChunkNum>,
+        min_level: u8,
+    ) -> ReadItemIterRef<'a> {
+        ReadItemIterRef::new(*self, ranges)
     }
 
     /// iterate over all nodes in the tree in depth first, left to right, post order
