@@ -164,8 +164,8 @@ impl Outboard for PostOrderMemOutboard {
 }
 
 fn load_raw_post_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 64]> {
-    let offset = tree.post_order_offset(node).value()?;
-    let offset = offset.to_usize() * 64;
+    let offset = tree.post_order_offset(node)?.value();
+    let offset = usize::try_from(offset* 64).unwrap();
     let slice = &data[offset..offset + 64];
     Some(slice.try_into().unwrap())
 }
@@ -210,8 +210,8 @@ impl PreOrderMemOutboard {
         let mut data = vec![0; self.data.len() - 8];
         for node in self.tree.iterate() {
             if let Some(p) = self.load_raw(node).unwrap() {
-                let offset = tree.post_order_offset(node).value().unwrap();
-                let offset = offset.to_usize() * 64;
+                let offset = tree.post_order_offset(node).unwrap().value();
+                let offset = usize::try_from(offset * 64).unwrap();
                 data[offset..offset + 64].copy_from_slice(&p);
             }
         }
@@ -239,7 +239,7 @@ fn load_raw_pre_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 
     // this is slow because pre_order_offset uses a loop.
     // pretty sure there is a way to write it as a single expression if you spend the time.
     let offset = tree.pre_order_offset(node)?;
-    let offset = (offset as usize) * 64 + 8;
+    let offset = usize::try_from(offset * 64 + 8).unwrap();
     let slice = &data[offset..offset + 64];
     Some(slice.try_into().unwrap())
 }

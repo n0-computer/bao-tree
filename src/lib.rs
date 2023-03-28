@@ -12,7 +12,7 @@ mod macros;
 pub mod iter;
 mod tree;
 use iter::*;
-use tree::{BlockNum, PONum};
+use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 pub mod r#async;
 pub mod outboard;
@@ -37,20 +37,18 @@ pub struct BaoTree {
 /// An offset of a node in a post-order outboard
 #[derive(Debug, Clone, Copy)]
 pub enum PostOrderOffset {
-    /// the node should not be considered
-    Skip,
-    /// the node is stable
-    Stable(PONum),
-    /// the node is unstable
-    Unstable(PONum),
+    /// the node is stable and won't change when appending data
+    Stable(u64),
+    /// the node is unstable and will change when appending data
+    Unstable(u64),
 }
 
 impl PostOrderOffset {
-    pub fn value(self) -> Option<PONum> {
+    /// Just get the offset value, ignoring whether it's stable or unstable
+    pub fn value(self) -> u64 {
         match self {
-            Self::Skip => None,
-            Self::Stable(n) => Some(n),
-            Self::Unstable(n) => Some(n),
+            Self::Stable(n) => n,
+            Self::Unstable(n) => n,
         }
     }
 }
@@ -359,8 +357,9 @@ impl BaoTree {
         {
             let tl = !lr.is_empty();
             let tr = !rr.is_empty();
-            if let Some(offset) = tree.post_order_offset(node).value() {
-                let hash_offset = (offset * 64).to_usize();
+            if let Some(offset) = tree.post_order_offset(node) {
+                let offset = offset.value();
+                let hash_offset = usize::try_from(offset * 64).unwrap();
                 res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
             }
             if let Some(leaf) = node.as_leaf() {
@@ -560,19 +559,18 @@ impl BaoTree {
         }
     }
 
-    fn post_order_offset(&self, node: TreeNode) -> PostOrderOffset {
+    fn post_order_offset(&self, node: TreeNode) -> Option<PostOrderOffset> {
         if self.is_sealed(node) {
-            PostOrderOffset::Stable(node.post_order_offset())
+            Some(PostOrderOffset::Stable(node.post_order_offset()))
         } else {
             // a leaf node that only has data on the left is not persisted
             if !self.is_persisted(node) {
-                PostOrderOffset::Skip
+                None
             } else {
                 // compute the offset based on the total size and the height of the node
                 self.outboard_hash_pairs()
                     .checked_sub(u64::from(node.right_count()) + 1)
-                    .map(|i| PostOrderOffset::Unstable(PONum(i)))
-                    .unwrap_or(PostOrderOffset::Skip)
+                    .map(|i| PostOrderOffset::Unstable(i))
             }
         }
     }
@@ -877,8 +875,8 @@ impl TreeNode {
         mid - span..mid + span
     }
 
-    pub fn post_order_offset(&self) -> PONum {
-        PONum(self.post_order_offset0())
+    pub fn post_order_offset(&self) -> u64 {
+        self.post_order_offset0()
     }
 
     /// the number of times you have to go right from the root to get to this node
@@ -901,9 +899,8 @@ impl TreeNode {
         offset
     }
 
-    pub fn post_order_range(&self) -> Range<PONum> {
-        let Range { start, end } = self.post_order_range0();
-        PONum(start)..PONum(end)
+    pub fn post_order_range(&self) -> Range<u64> {
+        self.post_order_range0()
     }
 
     const fn post_order_range0(&self) -> Range<u64> {

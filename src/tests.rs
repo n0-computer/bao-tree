@@ -394,8 +394,8 @@ fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
     let mut res = Vec::new();
     for c in 0..tree.filled_size().0 {
         let node = TreeNode(c);
-        if let Some(offset) = tree.post_order_offset(node).value() {
-            let offset = offset.to_usize();
+        if let Some(offset) = tree.post_order_offset(node) {
+            let offset = usize::try_from(offset.value()).unwrap();
             let hash = post[offset * 64..offset * 64 + 64].to_vec();
             let index = *map.get(hash.as_slice()).unwrap();
             res.push((node, index));

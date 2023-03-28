@@ -6,10 +6,6 @@ use std::ops::{Add, Div, Mul, Sub};
 use range_collections::range_set::RangeSetEntry;
 
 index_newtype! {
-    pub struct PONum(pub u64);
-}
-
-index_newtype! {
     /// A number of blake3 chunks
     /// 
     /// The blake3 chunk size is 1024 bytes.
