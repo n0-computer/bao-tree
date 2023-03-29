@@ -13,7 +13,7 @@ use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 #[cfg(feature = "tokio_io")]
-pub mod r#async;
+pub mod tokio_io;
 pub mod error;
 pub mod io;
 pub mod outboard;

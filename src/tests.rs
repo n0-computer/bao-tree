@@ -13,7 +13,7 @@ use tokio::io::AsyncReadExt;
 use super::{
     canonicalize_range_owned,
     outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
-    r#async::AsyncResponseDecoder,
+    tokio_io::AsyncResponseDecoder,
     BaoTree,
 };
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
     outboard::{Outboard, PostOrderMemOutboardRef},
     pre_order_offset_slow,
     tree::{ByteNum, ChunkNum},
-    BlockSize, PostOrderNodeIter, TreeNode,
+    BlockSize, PostOrderNodeIter, TreeNode, tokio_io::DecodeResponseStreamRef,
 };
 
 fn make_test_data(n: usize) -> Vec<u8> {
@@ -135,8 +135,7 @@ async fn bao_tree_decode_slice_stream_impl(data: Vec<u8>, range: Range<u64>) {
     let expected = data;
     let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
     let mut ec = Cursor::new(encoded);
-    let mut stream =
-        crate::r#async::DecodeResponseStreamRef::new(root, &ranges, BlockSize::DEFAULT, &mut ec);
+    let mut stream = DecodeResponseStreamRef::new(root, &ranges, BlockSize::DEFAULT, &mut ec);
     while let Some(item) = stream.next().await {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
