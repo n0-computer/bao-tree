@@ -1,4 +1,4 @@
-use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
+use range_collections::{range_set::RangeSetEntry, RangeSetRef};
 use std::{
     fmt::{self, Debug},
     io::Cursor,
@@ -13,12 +13,16 @@ use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 pub mod r#async;
+pub mod error;
 pub mod io;
 pub mod outboard;
 use outboard::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+use range_collections::RangeSet2;
 
 /// Defines a Bao tree.
 ///
@@ -58,62 +62,8 @@ impl BaoTree {
         Self::new_with_start_chunk(size, block_size, ChunkNum(0))
     }
 
-    pub fn new_with_start_chunk(
-        size: ByteNum,
-        block_size: BlockSize,
-        start_chunk: ChunkNum,
-    ) -> BaoTree {
-        BaoTree {
-            size,
-            block_size,
-            start_chunk,
-        }
-    }
-
-    /// Root of the tree
-    pub fn root(&self) -> TreeNode {
-        TreeNode::root(self.blocks())
-    }
-
-    /// number of blocks in the tree
-    ///
-    /// At chunk group size 1, this is the same as the number of chunks
-    /// Even a tree with 0 bytes size has a single block
-    ///
-    /// This is used very frequently, so init it on creation?
-    pub fn blocks(&self) -> BlockNum {
-        // handle the case of an empty tree having 1 block
-        self.size.blocks(self.block_size).max(BlockNum(1))
-    }
-
-    pub fn chunks(&self) -> ChunkNum {
-        self.size.chunks()
-    }
-
-    /// Number of hash pairs in the outboard
-    fn outboard_hash_pairs(&self) -> u64 {
-        self.blocks().0 - 1
-    }
-
-    pub fn outboard_size(size: ByteNum, block_size: BlockSize) -> ByteNum {
-        let tree = Self::new(size, block_size);
-        ByteNum(tree.outboard_hash_pairs() * 64 + 8)
-    }
-
-    fn filled_size(&self) -> TreeNode {
-        let blocks = self.blocks();
-        let n = (blocks.0 + 1) / 2;
-        TreeNode(n + n.saturating_sub(1))
-    }
-
-    pub const fn chunk_num(&self, node: LeafNode) -> ChunkNum {
-        // block number of a leaf node is just the node number
-        // multiply by chunk_group_size to get the chunk number
-        ChunkNum((node.0 << self.block_size.0) + self.start_chunk.0)
-    }
-
     /// Compute the post order outboard for the given data, returning a in mem data structure
-    pub fn outboard_post_order_mem(
+    pub(crate) fn outboard_post_order_mem(
         data: impl AsRef<[u8]>,
         block_size: BlockSize,
     ) -> PostOrderMemOutboard {
@@ -123,13 +73,14 @@ impl BaoTree {
         let mut res = Vec::with_capacity(outboard_len);
         let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
         let hash =
-            io::outboard_post_order_sync_impl(tree, &mut Cursor::new(data), &mut res, &mut buffer)
+            io::outboard_post_order_impl(tree, &mut Cursor::new(data), &mut res, &mut buffer)
                 .unwrap();
         PostOrderMemOutboard::new(hash, tree, res)
     }
 
     /// Compute the blake3 hash for the given data
-    pub fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
+    #[cfg(test)]
+    pub(crate) fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
         let data = data.as_ref();
         let cursor = Cursor::new(data);
         let mut buffer = [0u8; 1024];
@@ -144,8 +95,7 @@ impl BaoTree {
     }
 
     /// Given a *post order* outboard, encode a slice of data
-    ///
-    /// Todo: validate on read option
+    #[cfg(test)]
     pub fn encode_ranges(
         data: &[u8],
         outboard: &[u8],
@@ -162,6 +112,7 @@ impl BaoTree {
         }
     }
 
+    #[cfg(test)]
     fn encode_ranges_impl(
         data: &[u8],
         outboard: &[u8],
@@ -171,7 +122,7 @@ impl BaoTree {
         let mut res = Vec::new();
         let tree = Self::new(ByteNum(data.len() as u64), block_size);
         res.extend_from_slice(&tree.size.0.to_le_bytes());
-        for item in tree.read_item_iter_ref(ranges, 0) {
+        for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
             match item {
                 BaoChunk::Parent { node, .. } => {
                     let offset = tree.post_order_offset(node).unwrap();
@@ -202,11 +153,39 @@ impl BaoTree {
         (start, mid.min(self.size), end.min(self.size))
     }
 
-    pub fn iterate(&self) -> PostOrderTreeIter {
-        PostOrderTreeIter::new(*self)
+    /// Traverse the entire tree in post order as [BaoChunk]s
+    /// 
+    /// This iterator is used by both the sync and async io code for computing
+    /// an outboard from existing data
+    pub fn post_order_chunks_iter(&self) -> PostOrderChunkIter {
+        PostOrderChunkIter::new(*self)
     }
 
-    pub fn iterate_part_preorder_ref<'a>(
+    /// Traverse the part of the tree that is relevant for a ranges querys
+    /// in pre order as [BaoChunk]s
+    /// 
+    /// This iterator is used by both the sync and async io code for encoding
+    /// from an outboard and ranges as well as decoding an encoded stream.
+    pub fn ranges_pre_order_chunks_ref<'a>(
+        &self,
+        ranges: &'a RangeSetRef<ChunkNum>,
+        min_level: u8,
+    ) -> PreOrderChunkIterRef<'a> {
+        PreOrderChunkIterRef::new(*self, ranges, min_level)
+    }
+
+    /// Traverse the entire tree in post order as [TreeNode]s
+    /// 
+    /// This is mostly used internally by the [PostOrderChunkIter]
+    pub fn post_order_nodes_iter(&self) -> PostOrderNodeIter {
+        PostOrderNodeIter::new(*self)
+    }
+
+    /// Traverse the part of the tree that is relevant for a ranges querys
+    /// in pre order as [NodeInfo]s
+    /// 
+    /// This is mostly used internally by the [PreOrderChunkIterRef]
+    pub fn ranges_pre_order_nodes_iter<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
         min_level: u8,
@@ -214,14 +193,65 @@ impl BaoTree {
         PreOrderPartialIterRef::new(*self, ranges, min_level)
     }
 
-    pub fn read_item_iter_ref<'a>(
-        &self,
-        ranges: &'a RangeSetRef<ChunkNum>,
-        min_level: u8,
-    ) -> ChunkIterRef<'a> {
-        ChunkIterRef::new(*self, ranges, min_level)
+    /// Create a new BaoTree with a start chunk
+    /// 
+    /// This is used for trees that are part of a larger file.
+    /// The start chunk is the chunk number of the first chunk in the tree.
+    ///
+    /// This is mostly used internally.
+    pub fn new_with_start_chunk(
+        size: ByteNum,
+        block_size: BlockSize,
+        start_chunk: ChunkNum,
+    ) -> BaoTree {
+        BaoTree {
+            size,
+            block_size,
+            start_chunk,
+        }
     }
 
+    /// Root of the tree
+    pub fn root(&self) -> TreeNode {
+        TreeNode::root(self.blocks())
+    }
+
+    /// Number of blocks in the tree
+    ///
+    /// At chunk group size 1, this is the same as the number of chunks
+    /// Even a tree with 0 bytes size has a single block
+    pub fn blocks(&self) -> BlockNum {
+        // handle the case of an empty tree having 1 block
+        self.size.blocks(self.block_size).max(BlockNum(1))
+    }
+
+    /// Number of chunks in the tree
+    pub fn chunks(&self) -> ChunkNum {
+        self.size.chunks()
+    }
+
+    /// Number of hash pairs in the outboard
+    fn outboard_hash_pairs(&self) -> u64 {
+        self.blocks().0 - 1
+    }
+
+    pub(crate) fn outboard_size(size: ByteNum, block_size: BlockSize) -> ByteNum {
+        let tree = Self::new(size, block_size);
+        ByteNum(tree.outboard_hash_pairs() * 64 + 8)
+    }
+
+    fn filled_size(&self) -> TreeNode {
+        let blocks = self.blocks();
+        let n = (blocks.0 + 1) / 2;
+        TreeNode(n + n.saturating_sub(1))
+    }
+
+    /// Given a leaf node of this tree, return its start chunk number
+    pub const fn chunk_num(&self, node: LeafNode) -> ChunkNum {
+        // block number of a leaf node is just the node number
+        // multiply by chunk_group_size to get the chunk number
+        ChunkNum((node.0 << self.block_size.0) + self.start_chunk.0)
+    }
     /// Total number of nodes in the tree
     ///
     /// Each leaf node contains up to 2 blocks, and for n leaf nodes there will
@@ -372,9 +402,9 @@ impl ByteNum {
     }
 
     /// number of blocks that this number of bytes covers,
-    /// given a block size of `2^chunk_group_log` chunks
-    pub const fn blocks(&self, chunk_group_log: BlockSize) -> BlockNum {
-        let chunk_group_log = chunk_group_log.0;
+    /// given a block size
+    pub const fn blocks(&self, block_size: BlockSize) -> BlockNum {
+        let chunk_group_log = block_size.0;
         let size = self.0;
         let block_bits = chunk_group_log + 10;
         let block_mask = (1 << block_bits) - 1;
@@ -423,18 +453,6 @@ fn canonicalize_range_owned(range: &RangeSetRef<ChunkNum>, end: ByteNum) -> Rang
         }
         Err(range) => RangeSet2::from(range),
     }
-}
-
-fn read_parent_mem(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
-    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
-    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
-    (l_hash, r_hash)
-}
-
-fn parse_hash_pair(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {
-    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
-    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
-    (l_hash, r_hash)
 }
 
 /// An u64 that defines a node in a bao tree.
@@ -508,9 +526,9 @@ impl TreeNode {
         self.level() == 0
     }
 
-    pub fn byte_range(&self, chunk_group_log: BlockSize) -> Range<ByteNum> {
+    pub fn byte_range(&self, block_size: BlockSize) -> Range<ByteNum> {
         let range = self.block_range();
-        let shift = 10 + chunk_group_log.0;
+        let shift = 10 + block_size.0;
         ByteNum(range.start.0 << shift)..ByteNum(range.end.0 << shift)
     }
 
@@ -712,32 +730,19 @@ fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
     left - (left.count_ones() as u64) + pc
 }
 
-struct MapWithRef<I, F>(I, F);
-
-impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> MapWithRef<I, F> {
-    fn new(i: I, f: F) -> Self {
-        Self(i, f)
-    }
+/// The outboard size of a file of size `size` with a blogk size of `block_size`
+pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
+    BaoTree::outboard_size(ByteNum(size), block_size).0
 }
 
-impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> Iterator for MapWithRef<I, F> {
-    type Item = R;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|x| (self.1)(&self.0, x))
-    }
+/// The encoded size of a file of size `size` with a blogk size of `block_size`
+pub fn encoded_size(size: u64, block_size: BlockSize) -> u64 {
+    outboard_size(size, block_size) + size
 }
 
-pub fn outboard_size(size: u64, chunk_group_log: BlockSize) -> u64 {
-    BaoTree::outboard_size(ByteNum(size), chunk_group_log).0
-}
-
-pub fn outboard(input: impl AsRef<[u8]>, chunk_group_log: BlockSize) -> (Vec<u8>, blake3::Hash) {
-    let outboard = BaoTree::outboard_post_order_mem(input, chunk_group_log).flip();
+/// Computes the  pre order outboard of a file in memory.
+pub fn outboard(input: impl AsRef<[u8]>, block_size: BlockSize) -> (Vec<u8>, blake3::Hash) {
+    let outboard = BaoTree::outboard_post_order_mem(input, block_size).flip();
     let hash = *outboard.hash();
     (outboard.into_inner(), hash)
-}
-
-pub fn encoded_size(size: u64, chunk_group_log: BlockSize) -> u64 {
-    outboard_size(size, chunk_group_log) + size
 }

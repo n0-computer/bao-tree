@@ -1,3 +1,7 @@
+//! Iterators over BaoTree nodes
+//! 
+//! Range iterators take a reference to the ranges, and therefore require a lifetime parameter.
+//! They can be used without lifetime parameters using self referecning structs.
 use range_collections::RangeSetRef;
 use smallvec::SmallVec;
 
@@ -27,6 +31,7 @@ pub struct NodeInfo<'a> {
 /// Iterator over all nodes in a BaoTree in pre-order that overlap with a given chunk range.
 ///
 /// This is mostly used internally
+#[derive(Debug)]
 pub struct PreOrderPartialIterRef<'a> {
     /// the tree we want to traverse
     tree: BaoTree,
@@ -134,7 +139,8 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
 // }
 
 /// Iterator over all nodes in a BaoTree in post-order.
-pub struct PostOrderTreeIter {
+#[derive(Debug)]
+pub struct PostOrderNodeIter {
     /// the overall number of nodes in the tree
     len: TreeNode,
     /// the current node, None if we are done
@@ -143,7 +149,7 @@ pub struct PostOrderTreeIter {
     prev: Prev,
 }
 
-impl PostOrderTreeIter {
+impl PostOrderNodeIter {
     pub fn new(tree: BaoTree) -> Self {
         Self {
             len: tree.filled_size(),
@@ -169,7 +175,7 @@ impl PostOrderTreeIter {
     }
 }
 
-impl Iterator for PostOrderTreeIter {
+impl Iterator for PostOrderNodeIter {
     type Item = TreeNode;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -205,6 +211,7 @@ impl Iterator for PostOrderTreeIter {
     }
 }
 
+#[derive(Debug)]
 enum Prev {
     Parent,
     Left,
@@ -212,55 +219,40 @@ enum Prev {
     Done,
 }
 
-#[cfg(test)]
-pub struct PostOrderTreeIterStack {
-    len: TreeNode,
-    // stack of (node, done) pairs
-    // done=true means we immediately return the node
-    //
-    // this is not big enough for the worst case, but it's fine to allocate
-    // for a giant tree
-    //
-    // todo: figure out how to get rid of the done flag
-    stack: SmallVec<[(TreeNode, bool); 8]>,
-}
-
-#[cfg(test)]
-impl PostOrderTreeIterStack {
-    pub(crate) fn new(tree: BaoTree) -> Self {
-        let mut stack = SmallVec::new();
-        stack.push((tree.root(), false));
-        let len = tree.filled_size();
-        Self { len, stack }
-    }
-}
-
-#[cfg(test)]
-impl Iterator for PostOrderTreeIterStack {
-    type Item = TreeNode;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let (node, done) = self.stack.pop()?;
-            if done || node.is_leaf() {
-                return Some(node);
-            } else {
-                // push node back on stack, with done=true
-                self.stack.push((node, true));
-                // push right child on stack first, with done=false
-                self.stack
-                    .push((node.right_descendant(self.len).unwrap(), false));
-                // push left child on stack, with done=false
-                self.stack.push((node.left_child().unwrap(), false));
-            }
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A chunk describeds what to read or write next
+pub enum BaoChunk {
+    /// expect a 64 byte parent node.
+    ///
+    /// To validate, use parent_cv using the is_root value
+    Parent {
+        /// This is the root, to be passed to parent_cv
+        is_root: bool,
+        /// Push the right hash to the stack, since it will be needed later
+        right: bool,
+        /// Push the left hash to the stack, since it will be needed later
+        left: bool,
+        /// The tree node, useful for error reporting
+        node: TreeNode,
+    },
+    /// expect data of size `size`
+    ///
+    /// To validate, use hash_block using the is_root and start_chunk values
+    Leaf {
+        /// Size of the data to expect. Will be chunk_group_bytes for all but the last block.
+        size: usize,
+        /// This is the root, to be passed to hash_block
+        is_root: bool,
+        /// Start chunk, to be passed to hash_block
+        start_chunk: ChunkNum,
+    },
 }
 
 /// Iterator over all chunks in a BaoTree in post-order.
+#[derive(Debug)]
 pub struct PostOrderChunkIter {
     tree: BaoTree,
-    inner: PostOrderTreeIter,
+    inner: PostOrderNodeIter,
     // stack with 2 elements, since we can only have 2 items in flight
     stack: [BaoChunk; 2],
     index: usize,
@@ -271,7 +263,7 @@ impl PostOrderChunkIter {
     pub fn new(tree: BaoTree) -> Self {
         Self {
             tree,
-            inner: PostOrderTreeIter::new(tree),
+            inner: PostOrderNodeIter::new(tree),
             stack: Default::default(),
             index: 0,
             root: tree.root(),
@@ -334,32 +326,6 @@ impl Iterator for PostOrderChunkIter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// A read item describes what comes next
-pub enum BaoChunk {
-    /// expect a 64 byte parent node.
-    ///
-    /// To validate, use parent_cv using the is_root value
-    Parent {
-        /// This is the root, to be passed to parent_cv
-        is_root: bool,
-        /// Push the right hash to the stack, since it will be needed later
-        right: bool,
-        /// Push the left hash to the stack, since it will be needed later
-        left: bool,
-        /// The tree node, useful for error reporting
-        node: TreeNode,
-    },
-    Leaf {
-        /// Size of the data to expect. Will be chunk_group_bytes for all but the last block.
-        size: usize,
-        /// This is the root, to be passed to hash_block
-        is_root: bool,
-        /// Start chunk, to be passed to hash_block
-        start_chunk: ChunkNum,
-    },
-}
-
 impl BaoChunk {
     pub fn size(&self) -> usize {
         match self {
@@ -381,14 +347,15 @@ impl Default for BaoChunk {
 
 /// An iterator that produces chunks in pre order, but only for the parts of the
 /// tree that are relevant for a query.
-pub struct ChunkIterRef<'a> {
+#[derive(Debug)]
+pub struct PreOrderChunkIterRef<'a> {
     inner: PreOrderPartialIterRef<'a>,
     // stack with 2 elements, since we can only have 2 items in flight
     stack: [BaoChunk; 2],
     index: usize,
 }
 
-impl<'a> ChunkIterRef<'a> {
+impl<'a> PreOrderChunkIterRef<'a> {
     pub fn new(tree: BaoTree, query: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         Self {
             inner: PreOrderPartialIterRef::new(tree, query, min_level),
@@ -416,7 +383,7 @@ impl<'a> ChunkIterRef<'a> {
     }
 }
 
-impl<'a> Iterator for ChunkIterRef<'a> {
+impl<'a> Iterator for PreOrderChunkIterRef<'a> {
     type Item = BaoChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -462,5 +429,24 @@ impl<'a> Iterator for ChunkIterRef<'a> {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct MapWithRef<I, F>(I, F);
+
+#[cfg(test)]
+impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> MapWithRef<I, F> {
+    pub fn new(i: I, f: F) -> Self {
+        Self(i, f)
+    }
+}
+
+#[cfg(test)]
+impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> Iterator for MapWithRef<I, F> {
+    type Item = R;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|x| (self.1)(&self.0, x))
     }
 }

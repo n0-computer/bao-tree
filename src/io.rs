@@ -1,4 +1,4 @@
-//! Syncronous IO functions
+//! Syncronous IO
 use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     ops::Range,
@@ -6,134 +6,18 @@ use std::{
 };
 
 use blake3::guts::parent_cv;
-use range_collections::{RangeSet2, RangeSetRef};
+use range_collections::RangeSetRef;
 use smallvec::SmallVec;
 
 use crate::{
+    error::{DecodeError, EncodeError},
     hash_block, hash_chunk,
-    iter::{BaoChunk, ChunkIterRef, PostOrderChunkIter},
+    iter::{BaoChunk, PreOrderChunkIterRef},
     outboard::Outboard,
-    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, MapWithRef, TreeNode,
+    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
 };
 
-pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
-    data: D,
-    outboard: O,
-    ranges: &RangeSetRef<ChunkNum>,
-    encoded: W,
-) -> result::Result<(), DecodeError> {
-    let mut data = data;
-    let mut encoded = encoded;
-    let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
-    let tree = outboard.tree();
-    let ob_len = tree.size;
-    if file_len != ob_len {
-        return Err(DecodeError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("length from outboard does not match actual file length: {ob_len:?} != {file_len:?}"),
-        )));
-    }
-    if !range_ok(ranges, tree.chunks()) {
-        return Err(DecodeError::InvalidQueryRange);
-    }
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
-    // write header
-    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
-    for item in tree.read_item_iter_ref(ranges, 0) {
-        match item {
-            BaoChunk::Parent { node, .. } => {
-                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
-                encoded.write_all(l_hash.as_bytes())?;
-                encoded.write_all(r_hash.as_bytes())?;
-            }
-            BaoChunk::Leaf {
-                start_chunk, size, ..
-            } => {
-                let start = start_chunk.to_bytes();
-                let data = read_range(&mut data, start..start + (size as u64), &mut buffer)?;
-                encoded.write_all(data)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub fn encode_validated<D: Read + Seek, O: Outboard + Clone, W: Write>(
-    mut data: D,
-    outboard: O,
-    mut encoded: W,
-) -> io::Result<()> {
-    let range = RangeSet2::from(ChunkNum(0)..);
-    encode_ranges_validated(&mut data, outboard, &range, &mut encoded)?;
-    Ok(())
-}
-
-pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
-    data: D,
-    outboard: O,
-    ranges: &RangeSetRef<ChunkNum>,
-    encoded: W,
-) -> result::Result<(), DecodeError> {
-    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    stack.push(outboard.root());
-    let mut data = data;
-    let mut encoded = encoded;
-    let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
-    let tree = outboard.tree();
-    let ob_len = tree.size;
-    if file_len != ob_len {
-        return Err(DecodeError::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("length from outboard does not match actual file length: {ob_len:?} != {file_len:?}"),
-        )));
-    }
-    if !range_ok(ranges, tree.chunks()) {
-        return Err(DecodeError::InvalidQueryRange);
-    }
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
-    // write header
-    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
-    for item in tree.read_item_iter_ref(ranges, 0) {
-        match item {
-            BaoChunk::Parent {
-                is_root,
-                left,
-                right,
-                node,
-            } => {
-                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
-                let expected = stack.pop().unwrap();
-                if actual != expected {
-                    return Err(DecodeError::ParentHashMismatch(node));
-                }
-                if right {
-                    stack.push(r_hash);
-                }
-                if left {
-                    stack.push(l_hash);
-                }
-                encoded.write_all(l_hash.as_bytes())?;
-                encoded.write_all(r_hash.as_bytes())?;
-            }
-            BaoChunk::Leaf {
-                start_chunk,
-                size,
-                is_root,
-            } => {
-                let expected = stack.pop().unwrap();
-                let start = start_chunk.to_bytes();
-                let data = read_range(&mut data, start..start + (size as u64), &mut buffer)?;
-                let actual = hash_block(start_chunk, data, is_root);
-                if actual != expected {
-                    return Err(DecodeError::LeafHashMismatch(start_chunk));
-                }
-                encoded.write_all(data)?;
-            }
-        }
-    }
-    Ok(())
-}
+#[derive(Debug)]
 enum Position<'a> {
     /// currently reading the header, so don't know how big the tree is
     /// so we need to store the ranges and the chunk group log
@@ -142,52 +26,15 @@ enum Position<'a> {
         block_size: BlockSize,
     },
     /// currently reading the tree, all the info we need is in the iter
-    Content { iter: ChunkIterRef<'a> },
+    Content { iter: PreOrderChunkIterRef<'a> },
 }
 
+#[derive(Debug)]
 pub struct DecodeSliceIter<'a, R> {
     inner: Position<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
     scratch: &'a mut [u8],
-}
-
-/// Error when decoding from a reader
-///
-/// This can either be a io error or a more specific error like a hash mismatch
-#[derive(Debug)]
-pub enum DecodeError {
-    /// There was an error reading from the underlying io
-    Io(io::Error),
-    /// The hash of a parent did not match the expected hash
-    ParentHashMismatch(TreeNode),
-    /// The hash of a leaf did not match the expected hash
-    LeafHashMismatch(ChunkNum),
-    /// The query range was invalid
-    InvalidQueryRange,
-}
-
-impl From<DecodeError> for io::Error {
-    fn from(e: DecodeError) -> Self {
-        match e {
-            DecodeError::Io(e) => e,
-            DecodeError::ParentHashMismatch(_) => {
-                io::Error::new(io::ErrorKind::InvalidData, "parent hash mismatch")
-            }
-            DecodeError::LeafHashMismatch(_) => {
-                io::Error::new(io::ErrorKind::InvalidData, "leaf hash mismatch")
-            }
-            DecodeError::InvalidQueryRange => {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
-            }
-        }
-    }
-}
-
-impl From<io::Error> for DecodeError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
 }
 
 impl<'a, R: Read> DecodeSliceIter<'a, R> {
@@ -236,7 +83,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     }
                     let tree = BaoTree::new(size, *block_size);
                     self.inner = Position::Content {
-                        iter: tree.read_item_iter_ref(range, 0),
+                        iter: tree.ranges_pre_order_chunks_ref(range, 0),
                     };
                     continue;
                 }
@@ -291,6 +138,115 @@ impl<'a, R: Read> Iterator for DecodeSliceIter<'a, R> {
     }
 }
 
+/// Encode ranges relevant to a query from a reader and outboard to a writer
+///
+/// This will not validate on writing, so data corruption will be detected on reading
+pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
+    data: D,
+    outboard: O,
+    ranges: &RangeSetRef<ChunkNum>,
+    encoded: W,
+) -> result::Result<(), EncodeError> {
+    let mut data = data;
+    let mut encoded = encoded;
+    let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
+    let tree = outboard.tree();
+    let ob_len = tree.size;
+    if file_len != ob_len {
+        return Err(EncodeError::SizeMismatch);
+    }
+    if !range_ok(ranges, tree.chunks()) {
+        return Err(EncodeError::InvalidQueryRange);
+    }
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    // write header
+    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
+    for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
+        match item {
+            BaoChunk::Parent { node, .. } => {
+                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                encoded.write_all(l_hash.as_bytes())?;
+                encoded.write_all(r_hash.as_bytes())?;
+            }
+            BaoChunk::Leaf {
+                start_chunk, size, ..
+            } => {
+                let start = start_chunk.to_bytes();
+                let data = read_range(&mut data, start..start + (size as u64), &mut buffer)?;
+                encoded.write_all(data)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Encode ranges relevant to a query from a reader and outboard to a writer
+///
+/// This function validates the data before writing
+pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
+    data: D,
+    outboard: O,
+    ranges: &RangeSetRef<ChunkNum>,
+    encoded: W,
+) -> result::Result<(), EncodeError> {
+    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+    stack.push(outboard.root());
+    let mut data = data;
+    let mut encoded = encoded;
+    let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
+    let tree = outboard.tree();
+    let ob_len = tree.size;
+    if file_len != ob_len {
+        return Err(EncodeError::SizeMismatch);
+    }
+    if !range_ok(ranges, tree.chunks()) {
+        return Err(EncodeError::InvalidQueryRange);
+    }
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    // write header
+    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
+    for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
+        match item {
+            BaoChunk::Parent {
+                is_root,
+                left,
+                right,
+                node,
+            } => {
+                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                let expected = stack.pop().unwrap();
+                if actual != expected {
+                    return Err(EncodeError::ParentHashMismatch(node));
+                }
+                if right {
+                    stack.push(r_hash);
+                }
+                if left {
+                    stack.push(l_hash);
+                }
+                encoded.write_all(l_hash.as_bytes())?;
+                encoded.write_all(r_hash.as_bytes())?;
+            }
+            BaoChunk::Leaf {
+                start_chunk,
+                size,
+                is_root,
+            } => {
+                let expected = stack.pop().unwrap();
+                let start = start_chunk.to_bytes();
+                let data = read_range(&mut data, start..start + (size as u64), &mut buffer)?;
+                let actual = hash_block(start_chunk, data, is_root);
+                if actual != expected {
+                    return Err(EncodeError::LeafHashMismatch(start_chunk));
+                }
+                encoded.write_all(data)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Compute the post order outboard for the given data, writing into a io::Write
 pub fn outboard_post_order(
     data: &mut impl Read,
@@ -300,7 +256,7 @@ pub fn outboard_post_order(
 ) -> io::Result<blake3::Hash> {
     let tree = BaoTree::new_with_start_chunk(ByteNum(size), block_size, ChunkNum(0));
     let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-    let hash = outboard_post_order_sync_impl(tree, data, outboard, &mut buffer)?;
+    let hash = outboard_post_order_impl(tree, data, outboard, &mut buffer)?;
     outboard.write_all(&size.to_le_bytes())?;
     Ok(hash)
 }
@@ -308,7 +264,7 @@ pub fn outboard_post_order(
 /// Compute the post order outboard for the given data
 ///
 /// This is the internal version that takes a start chunk and does not append the size!
-pub(crate) fn outboard_post_order_sync_impl(
+pub(crate) fn outboard_post_order_impl(
     tree: BaoTree,
     data: &mut impl Read,
     outboard: &mut impl Write,
@@ -317,7 +273,7 @@ pub(crate) fn outboard_post_order_sync_impl(
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
-    for item in PostOrderChunkIter::new(tree) {
+    for item in tree.post_order_chunks_iter() {
         match item {
             BaoChunk::Parent { is_root, .. } => {
                 let right_hash = stack.pop().unwrap();
@@ -345,6 +301,8 @@ pub(crate) fn outboard_post_order_sync_impl(
 }
 
 /// Internal hash computation. This allows to also compute a non root hash, e.g. for a block
+///
+/// Todo: maybe this should be just done recursively?
 pub(crate) fn blake3_hash_inner(
     mut data: impl Read,
     data_len: ByteNum,
@@ -355,7 +313,7 @@ pub(crate) fn blake3_hash_inner(
     let can_be_root = is_root;
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     let tree = BaoTree::new_with_start_chunk(data_len, BlockSize(0), start_chunk);
-    for item in PostOrderChunkIter::new(tree) {
+    for item in tree.post_order_chunks_iter() {
         match item {
             BaoChunk::Leaf {
                 size,
@@ -379,14 +337,16 @@ pub(crate) fn blake3_hash_inner(
     Ok(stack.pop().unwrap())
 }
 
+#[cfg(test)]
 pub fn decode_ranges_into<'a>(
     root: blake3::Hash,
+    ranges: &'a RangeSetRef<ChunkNum>,
     block_size: BlockSize,
     encoded: &'a mut impl Read,
-    ranges: &'a RangeSetRef<ChunkNum>,
     scratch: &'a mut [u8],
     target: &'a mut (impl Write + Seek),
 ) -> impl Iterator<Item = std::io::Result<Range<ByteNum>>> + 'a {
+    use crate::iter::MapWithRef;
     let iter = DecodeSliceIter::new(root, block_size, encoded, &ranges, scratch);
     let mut first = true;
     MapWithRef::new(iter, move |iter, item| match item {
@@ -395,7 +355,7 @@ pub fn decode_ranges_into<'a>(
                 let tree = iter.tree().unwrap();
                 let target_len = ByteNum(target.seek(std::io::SeekFrom::End(0))?);
                 if target_len < tree.size {
-                    io_error!("target is too small")
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target file too short"))
                 }
                 first = false;
             }
@@ -404,26 +364,6 @@ pub fn decode_ranges_into<'a>(
             target.seek(std::io::SeekFrom::Start(range.start.0))?;
             target.write_all(data)?;
             Ok(range)
-        }
-        Err(e) => Err(e.into()),
-    })
-}
-
-/// Decode encoded ranges given the root hash
-#[cfg(test)]
-pub fn decode_ranges_into_chunks<'a>(
-    root: blake3::Hash,
-    block_size: BlockSize,
-    encoded: &'a mut impl Read,
-    ranges: &'a RangeSetRef<ChunkNum>,
-    scratch: &'a mut [u8],
-) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
-    let iter = DecodeSliceIter::new(root, block_size, encoded, &ranges, scratch);
-    MapWithRef::new(iter, |iter, item| match item {
-        Ok(range) => {
-            let len = (range.end - range.start).to_usize();
-            let data = &iter.buffer()[..len];
-            Ok((range.start, data.to_vec()))
         }
         Err(e) => Err(e.into()),
     })
