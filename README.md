@@ -1,5 +1,7 @@
 # bao-tree
 
+[![Actions Status](https://github.com/n0-computer/bao-tree/workflows/tests/badge.svg)](https://github.com/n0-computer/bao-tree/actions) [![docs.rs](https://docs.rs/bao-tree/badge.svg)](https://docs.rs/bao-tree) [![crates.io](https://img.shields.io/crates/v/bao-tree.svg)](https://crates.io/crates/bao-tree)
+
 The merkle tree used for blake3 verified streaming.
 
 This is a slightly different take on blake3 verified streaming than the 
