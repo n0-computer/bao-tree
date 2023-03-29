@@ -1,10 +1,13 @@
 [package]
 name = "bao-tree"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/n0-computer/bao-tree"
 edition = "2021"
+keywords = ["hashing"]
+categories = ["data-structures"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
