@@ -173,6 +173,67 @@ fn load_raw_post_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8;
 /// Pre-order outboard, stored in memory.
 ///
 /// Mostly for compat with bao, not very fast.
+#[derive(Debug, Clone, Copy)]
+pub struct PreOrderMemOutboardRef<'a> {
+    /// root hash
+    root: blake3::Hash,
+    /// tree defining the data
+    tree: BaoTree,
+    /// hashes with length prefix
+    data: &'a [u8],
+}
+
+impl<'a> PreOrderMemOutboardRef<'a> {
+    pub fn new(root: blake3::Hash, block_size: BlockSize, data: &'a [u8]) -> Self {
+        assert!(data.len() >= 8);
+        let len = ByteNum(u64::from_le_bytes(data[0..8].try_into().unwrap()));
+        let tree = BaoTree::new(len, block_size);
+        assert!(data.len() as u64 == tree.outboard_hash_pairs() * 64 + 8);
+        Self { root, tree, data }
+    }
+
+    /// The outboard data, including the length prefix.
+    pub fn outboard(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn hash(&self) -> &blake3::Hash {
+        &self.root
+    }
+
+    pub fn flip(&self) -> PostOrderMemOutboard {
+        let tree = self.tree;
+        let mut data = vec![0; self.data.len() - 8];
+        for node in self.tree.post_order_nodes_iter() {
+            if let Some(p) = self.load_raw(node).unwrap() {
+                let offset = tree.post_order_offset(node).unwrap().value();
+                let offset = usize::try_from(offset * 64).unwrap();
+                data[offset..offset + 64].copy_from_slice(&p);
+            }
+        }
+        PostOrderMemOutboard {
+            root: self.root,
+            tree,
+            data,
+        }
+    }
+}
+
+impl<'a> Outboard for PreOrderMemOutboardRef<'a> {
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+    fn load_raw(&self, node: TreeNode) -> io::Result<Option<[u8; 64]>> {
+        Ok(load_raw_pre_mem(&self.tree, &self.data, node))
+    }
+}
+
+/// Pre-order outboard, stored in memory.
+///
+/// Mostly for compat with bao, not very fast.
 #[derive(Debug, Clone)]
 pub struct PreOrderMemOutboard {
     /// root hash

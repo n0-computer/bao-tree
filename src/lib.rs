@@ -12,11 +12,11 @@ mod tree;
 use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
-#[cfg(feature = "tokio_io")]
-pub mod tokio_io;
 pub mod error;
 pub mod io;
 pub mod outboard;
+#[cfg(feature = "tokio_io")]
+pub mod tokio_io;
 use outboard::*;
 
 #[cfg(test)]

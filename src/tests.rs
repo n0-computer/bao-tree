@@ -21,8 +21,9 @@ use crate::{
     iter::MapWithRef,
     outboard::{Outboard, PostOrderMemOutboardRef},
     pre_order_offset_slow,
+    tokio_io::DecodeResponseStreamRef,
     tree::{ByteNum, ChunkNum},
-    BlockSize, PostOrderNodeIter, TreeNode, tokio_io::DecodeResponseStreamRef,
+    BlockSize, PostOrderNodeIter, TreeNode,
 };
 
 fn make_test_data(n: usize) -> Vec<u8> {

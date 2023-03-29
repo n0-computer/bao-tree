@@ -6,7 +6,7 @@ use std::{
 };
 
 use blake3::guts::parent_cv;
-use range_collections::RangeSetRef;
+use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     hash_block, hash_chunk,
     iter::{BaoChunk, PreOrderChunkIterRef},
     outboard::Outboard,
-    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
+    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 
 #[derive(Debug)]
@@ -245,6 +245,53 @@ pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
         }
     }
     Ok(())
+}
+
+pub fn validate_outboard<O>(outboard: O) -> io::Result<RangeSet2<ChunkNum>>
+where
+    O: Outboard,
+{
+    struct RecursiveValidator<O: Outboard> {
+        tree: BaoTree,
+        valid_nodes: TreeNode,
+        stack: SmallVec<[blake3::Hash; 10]>,
+        res: RangeSet2<ChunkNum>,
+        outboard: O,
+    }
+
+    impl<O: Outboard> RecursiveValidator<O> {
+        fn validate_rec(&mut self, nn: TreeNode, is_root: bool) -> io::Result<()> {
+            let (l_hash, r_hash) = self.outboard.load(nn)?.unwrap();
+            let actual = parent_cv(&l_hash, &r_hash, is_root);
+            let expected = self.stack.pop().unwrap();
+            if actual != expected {
+                // we got a validation error. Simply continue without adding the range
+                return Ok(());
+            } else if let Some(leaf) = nn.as_leaf() {
+                let start = self.tree.chunk_num(leaf);
+                let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
+                self.res |= RangeSet2::from(start..end);
+            } else {
+                let left = nn.left_child().unwrap();
+                let right = nn.right_descendant(self.valid_nodes).unwrap();
+                self.stack.push(l_hash);
+                self.validate_rec(right, false)?;
+                self.stack.push(r_hash);
+                self.validate_rec(left, false)?;
+            }
+            Ok(())
+        }
+    }
+    let tree = outboard.tree();
+    let mut validator = RecursiveValidator {
+        tree,
+        valid_nodes: tree.filled_size(),
+        stack: SmallVec::new(),
+        res: RangeSet2::empty(),
+        outboard,
+    };
+    validator.validate_rec(tree.root(), true)?;
+    Ok(validator.res)
 }
 
 /// Compute the post order outboard for the given data, writing into a io::Write
