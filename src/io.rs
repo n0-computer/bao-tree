@@ -355,7 +355,10 @@ pub fn decode_ranges_into<'a>(
                 let tree = iter.tree().unwrap();
                 let target_len = ByteNum(target.seek(std::io::SeekFrom::End(0))?);
                 if target_len < tree.size {
-                    return Err(io::Error::new(io::ErrorKind::InvalidInput, "Target file too short"))
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Target file too short",
+                    ));
                 }
                 first = false;
             }

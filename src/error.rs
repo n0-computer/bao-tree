@@ -1,5 +1,5 @@
 //! Errors when encoding or decoding
-//! 
+//!
 //! These erros contain more specific information about e.g. where a hash mismatch occured
 use crate::{ChunkNum, TreeNode};
 use std::{fmt, io};

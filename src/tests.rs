@@ -18,9 +18,9 @@ use super::{
 };
 use crate::{
     io::{encode_ranges, encode_ranges_validated, DecodeSliceIter},
+    iter::MapWithRef,
     outboard::{Outboard, PostOrderMemOutboardRef},
     pre_order_offset_slow,
-    iter::MapWithRef,
     tree::{ByteNum, ChunkNum},
     BlockSize, PostOrderNodeIter, TreeNode,
 };
@@ -206,11 +206,7 @@ fn bao_tree_outboard_levels() {
 
 /// encodes the data as outboard with the given chunk_group_log, then uses that outboard to
 /// encode a slice of the data, and compares the result to the original data
-fn bao_tree_slice_roundtrip_test(
-    data: Vec<u8>,
-    mut range: Range<ChunkNum>,
-    block_size: BlockSize,
-) {
+fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, block_size: BlockSize) {
     let ob = BaoTree::outboard_post_order_mem(&data, block_size);
     let root = ob.root();
     let outboard = ob.outboard_with_suffix();

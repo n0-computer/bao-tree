@@ -33,11 +33,7 @@ pub struct PostOrderMemOutboardRef<'a> {
 }
 
 impl<'a> PostOrderMemOutboardRef<'a> {
-    pub fn load(
-        root: blake3::Hash,
-        outboard: &'a [u8],
-        block_size: BlockSize,
-    ) -> io::Result<Self> {
+    pub fn load(root: blake3::Hash, outboard: &'a [u8], block_size: BlockSize) -> io::Result<Self> {
         // validate roughly that the outboard is correct
         if outboard.len() < 8 {
             io_error!("outboard must be at least 8 bytes");

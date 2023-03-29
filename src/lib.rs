@@ -12,6 +12,7 @@ mod tree;
 use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
+#[cfg(feature = "tokio_io")]
 pub mod r#async;
 pub mod error;
 pub mod io;
@@ -154,7 +155,7 @@ impl BaoTree {
     }
 
     /// Traverse the entire tree in post order as [BaoChunk]s
-    /// 
+    ///
     /// This iterator is used by both the sync and async io code for computing
     /// an outboard from existing data
     pub fn post_order_chunks_iter(&self) -> PostOrderChunkIter {
@@ -163,7 +164,7 @@ impl BaoTree {
 
     /// Traverse the part of the tree that is relevant for a ranges querys
     /// in pre order as [BaoChunk]s
-    /// 
+    ///
     /// This iterator is used by both the sync and async io code for encoding
     /// from an outboard and ranges as well as decoding an encoded stream.
     pub fn ranges_pre_order_chunks_ref<'a>(
@@ -175,7 +176,7 @@ impl BaoTree {
     }
 
     /// Traverse the entire tree in post order as [TreeNode]s
-    /// 
+    ///
     /// This is mostly used internally by the [PostOrderChunkIter]
     pub fn post_order_nodes_iter(&self) -> PostOrderNodeIter {
         PostOrderNodeIter::new(*self)
@@ -183,7 +184,7 @@ impl BaoTree {
 
     /// Traverse the part of the tree that is relevant for a ranges querys
     /// in pre order as [NodeInfo]s
-    /// 
+    ///
     /// This is mostly used internally by the [PreOrderChunkIterRef]
     pub fn ranges_pre_order_nodes_iter<'a>(
         &self,
@@ -194,7 +195,7 @@ impl BaoTree {
     }
 
     /// Create a new BaoTree with a start chunk
-    /// 
+    ///
     /// This is used for trees that are part of a larger file.
     /// The start chunk is the chunk number of the first chunk in the tree.
     ///
