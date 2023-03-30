@@ -22,9 +22,6 @@ use outboard::*;
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-use range_collections::RangeSet2;
-
 /// Defines a Bao tree.
 ///
 /// This is just the specification of the tree, it does not contain any actual data
@@ -79,68 +76,6 @@ impl BaoTree {
         PostOrderMemOutboard::new(hash, tree, res)
     }
 
-    /// Compute the blake3 hash for the given data
-    #[cfg(test)]
-    pub(crate) fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
-        let data = data.as_ref();
-        let cursor = Cursor::new(data);
-        let mut buffer = [0u8; 1024];
-        io::blake3_hash_inner(
-            cursor,
-            ByteNum(data.len() as u64),
-            ChunkNum(0),
-            true,
-            &mut buffer,
-        )
-        .unwrap()
-    }
-
-    /// Given a *post order* outboard, encode a slice of data
-    #[cfg(test)]
-    pub fn encode_ranges(
-        data: &[u8],
-        outboard: &[u8],
-        ranges: &RangeSetRef<ChunkNum>,
-        block_size: BlockSize,
-    ) -> Vec<u8> {
-        let size = ByteNum(data.len() as u64);
-        match canonicalize_range(ranges, size.chunks()) {
-            Ok(ranges) => Self::encode_ranges_impl(data, outboard, &ranges, block_size),
-            Err(range) => {
-                let ranges = RangeSet2::from(range);
-                Self::encode_ranges_impl(data, outboard, &ranges, block_size)
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn encode_ranges_impl(
-        data: &[u8],
-        outboard: &[u8],
-        ranges: &RangeSetRef<ChunkNum>,
-        block_size: BlockSize,
-    ) -> Vec<u8> {
-        let mut res = Vec::new();
-        let tree = Self::new(ByteNum(data.len() as u64), block_size);
-        res.extend_from_slice(&tree.size.0.to_le_bytes());
-        for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
-            match item {
-                BaoChunk::Parent { node, .. } => {
-                    let offset = tree.post_order_offset(node).unwrap();
-                    let hash_offset = usize::try_from(offset.value() * 64).unwrap();
-                    res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
-                }
-                BaoChunk::Leaf {
-                    size, start_chunk, ..
-                } => {
-                    let start = start_chunk.to_bytes().to_usize();
-                    res.extend_from_slice(&data[start..start + size]);
-                }
-            }
-        }
-        res
-    }
-
     /// Compute the byte ranges for a leaf node
     ///
     /// Returns two ranges, the first is the left range, the second is the right range
@@ -180,6 +115,11 @@ impl BaoTree {
     /// This is mostly used internally by the [PostOrderChunkIter]
     pub fn post_order_nodes_iter(&self) -> PostOrderNodeIter {
         PostOrderNodeIter::new(*self)
+    }
+
+    /// Traverse the entire tree in pre order as [TreeNode]s
+    pub fn pre_order_nodes_iter(&self) -> PreOrderNodeIter {
+        PreOrderNodeIter::new(*self)
     }
 
     /// Traverse the part of the tree that is relevant for a ranges querys
@@ -252,95 +192,6 @@ impl BaoTree {
         // block number of a leaf node is just the node number
         // multiply by chunk_group_size to get the chunk number
         ChunkNum((node.0 << self.block_size.0) + self.start_chunk.0)
-    }
-    /// Total number of nodes in the tree
-    ///
-    /// Each leaf node contains up to 2 blocks, and for n leaf nodes there will
-    /// be n-1 branch nodes
-    ///
-    /// Note that this is not the same as the number of hashes in the outboard.
-    #[cfg(test)]
-    fn node_count(&self) -> u64 {
-        let blocks = self.blocks().0 - 1;
-        blocks.saturating_sub(1).max(1)
-    }
-
-    /// iterate over all nodes in the tree in depth first, left to right, post order
-    ///
-    /// Recursive reference implementation, just used in tests
-    #[cfg(test)]
-    fn iterate_reference(&self) -> Vec<TreeNode> {
-        fn iterate_rec(valid_nodes: TreeNode, nn: TreeNode, res: &mut Vec<TreeNode>) {
-            if !nn.is_leaf() {
-                let l = nn.left_child().unwrap();
-                let r = nn.right_descendant(valid_nodes).unwrap();
-                iterate_rec(valid_nodes, l, res);
-                iterate_rec(valid_nodes, r, res);
-            }
-            res.push(nn);
-        }
-        // todo: make this a proper iterator
-        let nodes = self.node_count();
-        let mut res = Vec::with_capacity(nodes.try_into().unwrap());
-        iterate_rec(self.filled_size(), self.root(), &mut res);
-        res
-    }
-
-    /// iterate over all nodes in the tree in depth first, left to right, pre order
-    /// that are required to validate the given ranges
-    ///
-    /// Recursive reference implementation, just used in tests
-    #[cfg(test)]
-    fn iterate_part_preorder_reference<'a>(
-        &self,
-        ranges: &'a RangeSetRef<ChunkNum>,
-        min_level: u8,
-    ) -> Vec<NodeInfo<'a>> {
-        fn iterate_part_rec<'a>(
-            tree: &BaoTree,
-            node: TreeNode,
-            ranges: &'a RangeSetRef<ChunkNum>,
-            min_level: u8,
-            is_root: bool,
-            res: &mut Vec<NodeInfo<'a>>,
-        ) {
-            if ranges.is_empty() {
-                return;
-            }
-            // the middle chunk of the node
-            let mid = node.mid().to_chunks(tree.block_size);
-            // the start chunk of the node
-            let start = node.block_range().start.to_chunks(tree.block_size);
-            // check if the node is fully included
-            let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
-            // split the ranges into left and right
-            let (l_ranges, r_ranges) = ranges.split(mid);
-
-            let query_leaf = node.is_leaf() || (full && node.level() < min_level as u32);
-            let is_half_leaf = !tree.is_persisted(node);
-            // push no matter if leaf or not
-            res.push(NodeInfo {
-                node,
-                l_ranges,
-                r_ranges,
-                full,
-                query_leaf,
-                is_root,
-                is_half_leaf,
-            });
-            // if not leaf, recurse
-            if !query_leaf {
-                let valid_nodes = tree.filled_size();
-                let l = node.left_child().unwrap();
-                let r = node.right_descendant(valid_nodes).unwrap();
-                iterate_part_rec(tree, l, l_ranges, min_level, false, res);
-                iterate_part_rec(tree, r, r_ranges, min_level, false, res);
-            }
-        }
-        let mut res = Vec::new();
-        let can_be_root = self.start_chunk == 0;
-        iterate_part_rec(self, self.root(), ranges, min_level, can_be_root, &mut res);
-        res
     }
 
     /// true if the given node is complete/sealed
@@ -443,19 +294,6 @@ fn range_ok(range: &RangeSetRef<ChunkNum>, end: ChunkNum) -> bool {
     }
 }
 
-#[cfg(test)]
-fn canonicalize_range_owned(range: &RangeSetRef<ChunkNum>, end: ByteNum) -> RangeSet2<ChunkNum> {
-    use smallvec::SmallVec;
-
-    match canonicalize_range(range, end.chunks()) {
-        Ok(range) => {
-            let t = SmallVec::from(range.boundaries());
-            RangeSet2::new(t).unwrap()
-        }
-        Err(range) => RangeSet2::from(range),
-    }
-}
-
 /// An u64 that defines a node in a bao tree.
 ///
 /// You typically don't have to use this, but it can be useful for debugging
@@ -546,6 +384,7 @@ impl TreeNode {
         (1 << (self.level() + 1)) - 2
     }
 
+    /// Get the next left ancestor of this node, or None if there is none.
     pub fn next_left_ancestor(&self) -> Option<Self> {
         self.next_left_ancestor0().map(Self)
     }
@@ -643,6 +482,7 @@ impl TreeNode {
         (self.0 + 1).count_ones() - 1
     }
 
+    #[inline]
     const fn post_order_offset0(&self) -> u64 {
         // compute number of nodes below me
         let below_me = self.count_below();
@@ -660,6 +500,7 @@ impl TreeNode {
         self.post_order_range0()
     }
 
+    #[inline]
     const fn post_order_range0(&self) -> Range<u64> {
         let offset = self.post_order_offset0();
         let end = offset + 1;
@@ -667,6 +508,7 @@ impl TreeNode {
         start..end
     }
 
+    /// Get the next left ancestor, or None if we don't have one
     #[inline]
     const fn next_left_ancestor0(&self) -> Option<u64> {
         let level = self.level();
@@ -710,25 +552,29 @@ fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
     // nodes to the left of the tree of this node
     let left = node + 1 - span;
     // count the parents with a loop
-    let mut pc = 0;
+    let mut parent_count = 0;
     let mut offset = node;
     let mut span = span;
+    // loop until we reach the root, adding valid parents
     loop {
         let pspan = span * 2;
+        // find parent
         offset = if (offset & pspan) == 0 {
             offset + span
         } else {
             offset - span
         };
+        // if parent is inside the tree, increase parent count
         if offset < len {
-            pc += 1;
+            parent_count += 1;
         }
         if pspan >= len {
+            // we are at the root
             break;
         }
         span = pspan;
     }
-    left - (left.count_ones() as u64) + pc
+    left - (left.count_ones() as u64) + parent_count
 }
 
 /// The outboard size of a file of size `size` with a blogk size of `block_size`

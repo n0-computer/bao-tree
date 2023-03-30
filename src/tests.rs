@@ -11,20 +11,43 @@ use smallvec::SmallVec;
 use tokio::io::AsyncReadExt;
 
 use super::{
-    canonicalize_range_owned,
     outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
     tokio_io::AsyncResponseDecoder,
     BaoTree,
 };
 use crate::{
+    canonicalize_range,
     io::{encode_ranges, encode_ranges_validated, DecodeSliceIter},
-    iter::MapWithRef,
-    outboard::{Outboard, PostOrderMemOutboardRef},
+    iter::{BaoChunk, NodeInfo},
+    outboard::{valid_ranges, Outboard, PostOrderMemOutboardRef},
     pre_order_offset_slow,
     tokio_io::DecodeResponseStreamRef,
     tree::{ByteNum, ChunkNum},
     BlockSize, PostOrderNodeIter, TreeNode,
 };
+
+macro_rules! assert_tuple_eq {
+    ($tuple:expr) => {
+        assert_eq!($tuple.0, $tuple.1);
+    };
+}
+
+macro_rules! prop_assert_tuple_eq {
+    ($tuple:expr) => {
+        let (a, b) = $tuple;
+        prop_assert_eq!(a, b);
+    };
+}
+
+fn canonicalize_range_owned(range: &RangeSetRef<ChunkNum>, end: ByteNum) -> RangeSet2<ChunkNum> {
+    match canonicalize_range(range, end.chunks()) {
+        Ok(range) => {
+            let t = SmallVec::from(range.boundaries());
+            RangeSet2::new(t).unwrap()
+        }
+        Err(range) => RangeSet2::from(range),
+    }
+}
 
 fn make_test_data(n: usize) -> Vec<u8> {
     let mut data = Vec::with_capacity(n);
@@ -34,10 +57,71 @@ fn make_test_data(n: usize) -> Vec<u8> {
     data
 }
 
-fn bao_tree_blake3_impl(data: Vec<u8>) {
-    let h1 = BaoTree::blake3_hash(&data);
-    let h2 = blake3::hash(&data);
-    assert_eq!(h1, h2);
+/// Compute the blake3 hash for the given data,
+///
+/// using blake3_hash_inner which is used in hash_block.
+fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
+    let data = data.as_ref();
+    let cursor = Cursor::new(data);
+    let mut buffer = [0u8; 1024];
+    crate::io::blake3_hash_inner(
+        cursor,
+        ByteNum(data.len() as u64),
+        ChunkNum(0),
+        true,
+        &mut buffer,
+    )
+    .unwrap()
+}
+
+fn bao_tree_blake3_impl(data: Vec<u8>) -> (blake3::Hash, blake3::Hash) {
+    let expected = blake3::hash(&data);
+    let actual = blake3_hash(&data);
+    (expected, actual)
+}
+
+/// Given a *post order* outboard, encode a slice of data
+fn encode_ranges_2(
+    data: &[u8],
+    outboard: &[u8],
+    ranges: &RangeSetRef<ChunkNum>,
+    block_size: BlockSize,
+) -> Vec<u8> {
+    let size = ByteNum(data.len() as u64);
+    match canonicalize_range(ranges, size.chunks()) {
+        Ok(ranges) => encode_ranges_impl(data, outboard, &ranges, block_size),
+        Err(range) => {
+            let ranges = RangeSet2::from(range);
+            encode_ranges_impl(data, outboard, &ranges, block_size)
+        }
+    }
+}
+
+fn encode_ranges_impl(
+    data: &[u8],
+    outboard: &[u8],
+    ranges: &RangeSetRef<ChunkNum>,
+    block_size: BlockSize,
+) -> Vec<u8> {
+    let mut res = Vec::new();
+    let tree = BaoTree::new(ByteNum(data.len() as u64), block_size);
+    res.extend_from_slice(&tree.size.0.to_le_bytes());
+    for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
+        match item {
+            BaoChunk::Parent { node, .. } => {
+                let offset = tree.post_order_offset(node).unwrap();
+                let hash_offset = usize::try_from(offset.value() * 64).unwrap();
+                res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
+            }
+            BaoChunk::Leaf {
+                size, start_chunk, ..
+            } => {
+                let start = start_chunk.to_bytes().to_usize();
+                res.extend_from_slice(&data[start..start + size]);
+            }
+        }
+    }
+    res
 }
 
 /// Computes a reference post order outboard using the abao crate (chunk_group_log = 0) and the non-standard finalize_post_order function.
@@ -93,7 +177,7 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
         range.end.0 += 1;
     };
     let ranges = RangeSet2::from(range);
-    let actual = BaoTree::encode_ranges(&data, &outboard, &ranges, BlockSize::DEFAULT);
+    let actual = encode_ranges_2(&data, &outboard, &ranges, BlockSize::DEFAULT);
     assert_eq!(expected.len(), actual.len());
     assert_eq!(expected, actual);
 
@@ -156,6 +240,15 @@ async fn encode_all_roundtrip(data: Vec<u8>) {
     assert_eq!(data, res);
 }
 
+/// range is a range of chunks. Just using u64 for convenience in tests
+fn validate_outboard_impl(
+    outboard: &PostOrderMemOutboard,
+) -> (RangeSet2<ChunkNum>, RangeSet2<ChunkNum>) {
+    let expected = RangeSet2::from(..outboard.tree().chunks());
+    let actual = valid_ranges(outboard).unwrap();
+    (expected, actual)
+}
+
 #[tokio::test]
 async fn encode_all_roundtrip_cases() {
     for case in [0, 1, 1023, 1024, 1025, 2047, 10000, 20000, 100000] {
@@ -190,7 +283,7 @@ fn bao_tree_outboard_comparison_cases() {
 fn bao_tree_outboard_levels() {
     use make_test_data as td;
     let td = td(1024 * 32);
-    let expected = BaoTree::blake3_hash(&td);
+    let expected = blake3::hash(&td);
     for chunk_group_log in 0..4 {
         let block_size = BlockSize(chunk_group_log);
         let ob = BaoTree::outboard_post_order_mem(&td, block_size);
@@ -214,7 +307,7 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
     if range.start == range.end {
         range.end.0 += 1;
     };
-    let encoded = BaoTree::encode_ranges(
+    let encoded = encode_ranges_2(
         &data,
         &outboard,
         &RangeSet2::from(range.clone()),
@@ -334,43 +427,15 @@ async fn bao_tree_decode_slice_stream_0() {
 #[test]
 fn bao_tree_blake3_0() {
     use make_test_data as td;
-    bao_tree_blake3_impl(td(0));
-    bao_tree_blake3_impl(td(1));
-    bao_tree_blake3_impl(td(1023));
-    bao_tree_blake3_impl(td(1024));
-    bao_tree_blake3_impl(td(1025));
-    bao_tree_blake3_impl(td(2047));
-    bao_tree_blake3_impl(td(2048));
-    bao_tree_blake3_impl(td(2049));
-    bao_tree_blake3_impl(td(10000));
-}
-
-fn size_and_slice_overlapping() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
-    (0..32768u64).prop_flat_map(|len| {
-        let len = ByteNum(len);
-        let chunks = len.chunks();
-        let slice_start = 0..=chunks.0.saturating_sub(1);
-        let slice_len = 1..=(chunks.0 + 1);
-        (
-            Just(len),
-            slice_start.prop_map(ChunkNum),
-            slice_len.prop_map(ChunkNum),
-        )
-    })
-}
-
-fn size_and_slice() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
-    (0..32768u64).prop_flat_map(|len| {
-        let len = ByteNum(len);
-        let chunks = len.chunks();
-        let slice_start = 0..=chunks.0;
-        let slice_len = 0..=chunks.0;
-        (
-            Just(len),
-            slice_start.prop_map(ChunkNum),
-            slice_len.prop_map(ChunkNum),
-        )
-    })
+    assert_tuple_eq!(bao_tree_blake3_impl(td(0)));
+    assert_tuple_eq!(bao_tree_blake3_impl(td(1)));
+    assert_tuple_eq!(bao_tree_blake3_impl(td(1023)));
+    assert_tuple_eq!(bao_tree_blake3_impl(td(1024)));
+    assert_tuple_eq!(bao_tree_blake3_impl(td(1025)));
+    assert_tuple_eq!(bao_tree_blake3_impl(td(2047)));
+    assert_tuple_eq!(bao_tree_blake3_impl(td(2048)));
+    assert_tuple_eq!(bao_tree_blake3_impl(td(2049)));
+    assert_tuple_eq!(bao_tree_blake3_impl(td(10000)));
 }
 
 // create the mapping from a node number to the offset in the pre order traversal,
@@ -401,72 +466,36 @@ fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
     res
 }
 
-fn parent_count(node: TreeNode, tree: BaoTree, x: u64) -> u64 {
-    let len = tree.filled_size();
-    let root = tree.root();
-    assert!(node < len);
-    let mut node = node;
-    let mut count = 0;
-    while let Some(parent) = node.parent() {
-        if parent < len && parent.0 >= x {
-            count += 1;
-        }
-        node = parent;
-        if parent == root {
-            break;
-        }
-    }
-    count
-}
-
-/// Counts the number of parents that `node` would have if it were in a tree of size `len`
-fn parents_loop(node: u64, len: u64) -> u64 {
-    assert!(node < len);
-    let mut count = 0;
-    let level = (!node).trailing_zeros();
-    let mut span = 1u64 << level;
-    let mut offset = node;
-    loop {
-        let pspan = span * 2;
-        offset = if (offset & pspan) == 0 {
-            offset + span
-        } else {
-            offset - span
-        };
-        if offset < len {
-            count += 1;
-        }
-        if pspan >= len {
-            break;
-        }
-        span = pspan;
-    }
-    count
-}
-
 fn compare_pre_order_outboard(case: usize) {
     let size = ByteNum(case as u64);
     let tree = BaoTree::new(size, BlockSize::DEFAULT);
     let perm = create_permutation_reference(case);
+
+    // print!("{:08b}", perm.len());
     for (k, v) in perm {
-        let preo = k.block_range().start.0;
-        let rpc = parent_count(k, tree, preo);
-        let res = preo + rpc;
-        let pc = parents_loop(k.0, tree.filled_size().0);
-        let corr = preo.count_ones() as u64;
-        let res2 = preo + pc - corr;
-        // println!("{}\t{:b}\t:\t{}\t{}\t{}\t{}", k.0, k.0, v, preo, rpc, ld);
-        // println!("{}\t{:b}\t:\t{}\t{}\t{}\t{}", k.0, k.0, v, preo, pc, res2);
-        // println!("{}\t:\t{}\t{}", k.0, v, res);
-        assert_eq!(v as u64, res);
-        assert_eq!(v as u64, res2);
+        let expected = v as u64;
+        // repr of node number where trailing zeros indicate level
+        let x = k.0 + 1;
+        // clear lowest bit, since we don't want to count left children below the node itself
+        let without_lowest_bit = x & (x - 1);
+        // subtract all nodes that go to the right themselves
+        // this is 0 for every bit where we go left, and left_below for every bit where we go right,
+        // where left_below is the count of the left child of the node
+        let full_lefts = without_lowest_bit - (without_lowest_bit.count_ones() as u64);
+        // add all nodes from the root to the node
+        let actual = full_lefts + (tree.root().level() - k.level()) as u64;
+        // this works for full trees!
+        println!("{:b}\t{}\t{}", k.0, expected, actual);
+        // let depth = tree.root().level() as u64;
+        // println!("{} {}", depth, k.0);
         assert_eq!(v as u64, pre_order_offset_slow(k.0, tree.filled_size().0));
     }
+    println!();
 }
 
 #[test]
 fn pre_post_outboard_cases() {
-    let cases = [20000];
+    let cases = [1024 * 32];
     for case in cases {
         compare_pre_order_outboard(case);
     }
@@ -532,13 +561,125 @@ pub fn decode_ranges_into_chunks<'a>(
     })
 }
 
+/// Total number of nodes in the tree
+///
+/// Each leaf node contains up to 2 blocks, and for n leaf nodes there will
+/// be n-1 branch nodes
+///
+/// Note that this is not the same as the number of hashes in the outboard.
+fn node_count(tree: &BaoTree) -> u64 {
+    let blocks = tree.blocks().0 - 1;
+    blocks.saturating_sub(1).max(1)
+}
+
+/// iterate over all nodes in the tree in depth first, left to right, post order
+///
+/// Recursive reference implementation, just used in tests
+fn iterate_reference(tree: &BaoTree) -> Vec<TreeNode> {
+    fn iterate_rec(valid_nodes: TreeNode, nn: TreeNode, res: &mut Vec<TreeNode>) {
+        if !nn.is_leaf() {
+            let l = nn.left_child().unwrap();
+            let r = nn.right_descendant(valid_nodes).unwrap();
+            iterate_rec(valid_nodes, l, res);
+            iterate_rec(valid_nodes, r, res);
+        }
+        res.push(nn);
+    }
+    // todo: make this a proper iterator
+    let nodes = node_count(tree);
+    let mut res = Vec::with_capacity(nodes.try_into().unwrap());
+    iterate_rec(tree.filled_size(), tree.root(), &mut res);
+    res
+}
+
+/// iterate over all nodes in the tree in depth first, left to right, pre order
+/// that are required to validate the given ranges
+///
+/// Recursive reference implementation, just used in tests
+fn iterate_part_preorder_reference<'a>(
+    tree: &BaoTree,
+    ranges: &'a RangeSetRef<ChunkNum>,
+    min_level: u8,
+) -> Vec<NodeInfo<'a>> {
+    fn iterate_part_rec<'a>(
+        tree: &BaoTree,
+        node: TreeNode,
+        ranges: &'a RangeSetRef<ChunkNum>,
+        min_level: u8,
+        is_root: bool,
+        res: &mut Vec<NodeInfo<'a>>,
+    ) {
+        if ranges.is_empty() {
+            return;
+        }
+        // the middle chunk of the node
+        let mid = node.mid().to_chunks(tree.block_size);
+        // the start chunk of the node
+        let start = node.block_range().start.to_chunks(tree.block_size);
+        // check if the node is fully included
+        let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
+        // split the ranges into left and right
+        let (l_ranges, r_ranges) = ranges.split(mid);
+
+        let query_leaf = node.is_leaf() || (full && node.level() < min_level as u32);
+        let is_half_leaf = !tree.is_persisted(node);
+        // push no matter if leaf or not
+        res.push(NodeInfo {
+            node,
+            l_ranges,
+            r_ranges,
+            full,
+            query_leaf,
+            is_root,
+            is_half_leaf,
+        });
+        // if not leaf, recurse
+        if !query_leaf {
+            let valid_nodes = tree.filled_size();
+            let l = node.left_child().unwrap();
+            let r = node.right_descendant(valid_nodes).unwrap();
+            iterate_part_rec(tree, l, l_ranges, min_level, false, res);
+            iterate_part_rec(tree, r, r_ranges, min_level, false, res);
+        }
+    }
+    let mut res = Vec::new();
+    let can_be_root = tree.start_chunk == 0;
+    iterate_part_rec(tree, tree.root(), ranges, min_level, can_be_root, &mut res);
+    res
+}
+
+fn size_and_slice_overlapping() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
+    (0..32768u64).prop_flat_map(|len| {
+        let len = ByteNum(len);
+        let chunks = len.chunks();
+        let slice_start = 0..=chunks.0.saturating_sub(1);
+        let slice_len = 1..=(chunks.0 + 1);
+        (
+            Just(len),
+            slice_start.prop_map(ChunkNum),
+            slice_len.prop_map(ChunkNum),
+        )
+    })
+}
+
+fn size_and_slice() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
+    (0..32768u64).prop_flat_map(|len| {
+        let len = ByteNum(len);
+        let chunks = len.chunks();
+        let slice_start = 0..=chunks.0;
+        let slice_len = 0..=chunks.0;
+        (
+            Just(len),
+            slice_start.prop_map(ChunkNum),
+            slice_len.prop_map(ChunkNum),
+        )
+    })
+}
+
 proptest! {
 
     #[test]
     fn flip(len in 0usize..32768) {
-        if len == 0 {
-            println!();
-        }
         let data = make_test_data(len as usize);
         let post1 = post_order_outboard_reference(&data);
         let post2 = post_order_outboard_reference_2(&data);
@@ -546,9 +687,19 @@ proptest! {
         prop_assert_eq!(&post1, &post1.flip().flip());
     }
 
+    /// Check that the unrestricted pre-order iterator is the same as the
+    /// restricted pre-order iterator for the entire tree.
+    #[test]
+    fn pre_order_iter_comparison(len in 0..1000000u64, level in 0u8..4) {
+        let tree = BaoTree::new(ByteNum(len), BlockSize::new(level).unwrap());
+        let iter1 = tree.pre_order_nodes_iter().collect::<Vec<_>>();
+        let iter2 = tree.ranges_pre_order_nodes_iter(&RangeSet2::all(), 0).map(|x| x.node).collect::<Vec<_>>();
+        prop_assert_eq!(iter1, iter2);
+    }
+
     #[test]
     fn bao_tree_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
-        bao_tree_blake3_impl(data);
+        prop_assert_tuple_eq!(bao_tree_blake3_impl(data));
     }
 
     #[test]
@@ -599,22 +750,24 @@ proptest! {
         bao_tree_slice_roundtrip_test(data, chunk_range, level);
     }
 
+    /// Compares the PostOrderNodeIter with a simple stack-based reference implementation.
     #[test]
-    fn tree_iterator_comparison(len in 0u64..100000) {
+    fn iterator_reference_comparison(len in 0u64..100000) {
         let tree = BaoTree::new(ByteNum(len), BlockSize::DEFAULT);
-        let iter1 = tree.iterate_reference();
+        let iter1 = iterate_reference(&tree);
         let iter2 = PostOrderTreeIterStack::new(tree).collect::<Vec<_>>();
         let iter3 = PostOrderNodeIter::new(tree).collect::<Vec<_>>();
         prop_assert_eq!(&iter1, &iter2);
         prop_assert_eq!(&iter1, &iter3);
     }
 
+    /// Compares the ranges iter with a recursive reference implementation.
     #[test]
-    fn partial_iterator_comparison((len, start, size) in size_and_slice_overlapping()) {
+    fn partial_iterator_reference_comparison((len, start, size) in size_and_slice_overlapping()) {
         let tree = BaoTree::new(len, BlockSize::DEFAULT);
         let chunk_range = start .. start + size;
         let rs = RangeSet2::from(chunk_range.clone());
-        let iter1 = tree.iterate_part_preorder_reference(&rs, 0);
+        let iter1 = iterate_part_preorder_reference(&tree, &rs, 0);
         let iter2 = tree.ranges_pre_order_nodes_iter(&rs, 0).collect::<Vec<_>>();
         prop_assert_eq!(&iter1, &iter2);
     }
@@ -622,5 +775,41 @@ proptest! {
     #[test]
     fn pre_post_outboard(n in 0usize..1000000) {
         compare_pre_order_outboard(n);
+    }
+
+    #[test]
+    fn validate_outboard_test(size in 0usize..32768, rand in any::<usize>()) {
+        let data = make_test_data(size);
+        let mut outboard = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
+        let (expected, actual) = validate_outboard_impl(&outboard);
+        prop_assert_eq!(expected, actual);
+        if !outboard.data.is_empty() {
+            // flip a random bit in the outboard
+            // this is the post order outboard without the length suffix,
+            // so it's all hashes
+            let bit = rand % outboard.data.len() * 8;
+            let byte = bit / 8;
+            let bit = bit % 8;
+            outboard.data[byte as usize] ^= 1 << bit;
+            // Check that at least one range is invalid
+            let (expected, actual) = validate_outboard_impl(&outboard);
+            prop_assert_ne!(expected, actual);
+        }
+    }
+}
+
+struct MapWithRef<I, F>(I, F);
+
+impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> MapWithRef<I, F> {
+    pub fn new(i: I, f: F) -> Self {
+        Self(i, f)
+    }
+}
+
+impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> Iterator for MapWithRef<I, F> {
+    type Item = R;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|x| (self.1)(&self.0, x))
     }
 }

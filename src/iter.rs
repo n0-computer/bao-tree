@@ -182,17 +182,15 @@ impl Iterator for PostOrderNodeIter {
         loop {
             let curr = self.curr;
             match self.prev {
-                Prev::Done => {
-                    break None;
-                }
                 Prev::Parent => {
-                    if curr.is_leaf() {
+                    if let Some(child) = curr.left_child() {
+                        // go left first when coming from above, don't emit curr
+                        self.curr = child;
+                        self.prev = Prev::Parent;
+                    } else {
+                        // we are a left or right leaf, go up and emit curr
                         self.go_up(curr);
                         break Some(curr);
-                    } else {
-                        // go left first when coming from above, don't emit curr
-                        self.curr = curr.left_child().unwrap();
-                        self.prev = Prev::Parent;
                     }
                 }
                 Prev::Left => {
@@ -205,6 +203,83 @@ impl Iterator for PostOrderNodeIter {
                     // go up in any case, do emit curr
                     self.go_up(curr);
                     break Some(curr);
+                }
+                Prev::Done => {
+                    break None;
+                }
+            }
+        }
+    }
+}
+
+/// Iterator over all nodes in a BaoTree in pre-order.
+#[derive(Debug)]
+pub struct PreOrderNodeIter {
+    /// the overall number of nodes in the tree
+    len: TreeNode,
+    /// the current node, None if we are done
+    curr: TreeNode,
+    /// where we came from, used to determine the next node
+    prev: Prev,
+}
+
+impl PreOrderNodeIter {
+    pub fn new(tree: BaoTree) -> Self {
+        Self {
+            len: tree.filled_size(),
+            curr: tree.root(),
+            prev: Prev::Parent,
+        }
+    }
+
+    fn go_up(&mut self, curr: TreeNode) {
+        let prev = curr;
+        (self.curr, self.prev) = if let Some(parent) = curr.restricted_parent(self.len) {
+            (
+                parent,
+                if prev < parent {
+                    Prev::Left
+                } else {
+                    Prev::Right
+                },
+            )
+        } else {
+            (curr, Prev::Done)
+        };
+    }
+}
+
+impl Iterator for PreOrderNodeIter {
+    type Item = TreeNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let curr = self.curr;
+            match self.prev {
+                Prev::Parent => {
+                    if let Some(child) = curr.left_child() {
+                        // go left first when coming from above
+                        self.curr = child;
+                        self.prev = Prev::Parent;
+                    } else {
+                        // we are a left or right leaf, go up
+                        self.go_up(curr);
+                    }
+                    // emit curr before children (pre-order)
+                    break Some(curr);
+                }
+                Prev::Left => {
+                    // no need to check is_leaf, since we come from a left child
+                    // go right when coming from left, don't emit curr
+                    self.curr = curr.right_descendant(self.len).unwrap();
+                    self.prev = Prev::Parent;
+                }
+                Prev::Right => {
+                    // go up in any case
+                    self.go_up(curr);
+                }
+                Prev::Done => {
+                    break None;
                 }
             }
         }
@@ -358,7 +433,7 @@ pub struct PreOrderChunkIterRef<'a> {
 impl<'a> PreOrderChunkIterRef<'a> {
     pub fn new(tree: BaoTree, query: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         Self {
-            inner: PreOrderPartialIterRef::new(tree, query, min_level),
+            inner: tree.ranges_pre_order_nodes_iter(query, min_level),
             stack: Default::default(),
             index: 0,
         }
@@ -429,24 +504,5 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                 });
             }
         }
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct MapWithRef<I, F>(I, F);
-
-#[cfg(test)]
-impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> MapWithRef<I, F> {
-    pub fn new(i: I, f: F) -> Self {
-        Self(i, f)
-    }
-}
-
-#[cfg(test)]
-impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> Iterator for MapWithRef<I, F> {
-    type Item = R;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|x| (self.1)(&self.0, x))
     }
 }

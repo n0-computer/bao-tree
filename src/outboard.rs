@@ -1,6 +1,9 @@
 //! The [Outboard] trait and implementations
+use blake3::guts::parent_cv;
+use range_collections::RangeSet2;
+
 use super::{outboard_size, TreeNode};
-use crate::{BaoTree, BlockSize, ByteNum};
+use crate::{BaoTree, BlockSize, ByteNum, ChunkNum};
 use std::io::{self, Read};
 
 macro_rules! io_error {
@@ -22,6 +25,61 @@ pub trait Outboard {
         let data = self.load_raw(node)?;
         Ok(data.map(parse_hash_pair))
     }
+}
+
+/// Given an outboard, return a range set of all valid ranges
+pub fn valid_ranges<O>(outboard: &O) -> io::Result<RangeSet2<ChunkNum>>
+where
+    O: Outboard,
+{
+    struct RecursiveValidator<'a, O: Outboard> {
+        tree: BaoTree,
+        valid_nodes: TreeNode,
+        res: RangeSet2<ChunkNum>,
+        outboard: &'a O,
+    }
+
+    impl<'a, O: Outboard> RecursiveValidator<'a, O> {
+        fn validate_rec(
+            &mut self,
+            parent_hash: &blake3::Hash,
+            node: TreeNode,
+            is_root: bool,
+        ) -> io::Result<()> {
+            let (l_hash, r_hash) = if let Some((l_hash, r_hash)) = self.outboard.load(node)? {
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                if &actual != parent_hash {
+                    // we got a validation error. Simply continue without adding the range
+                    return Ok(());
+                }
+                (l_hash, r_hash)
+            } else {
+                (*parent_hash, blake3::Hash::from([0; 32]))
+            };
+            if let Some(leaf) = node.as_leaf() {
+                let start = self.tree.chunk_num(leaf);
+                let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
+                self.res |= RangeSet2::from(start..end);
+            } else {
+                // recurse
+                let left = node.left_child().unwrap();
+                self.validate_rec(&l_hash, left, false)?;
+                let right = node.right_descendant(self.valid_nodes).unwrap();
+                self.validate_rec(&r_hash, right, false)?;
+            }
+            Ok(())
+        }
+    }
+    let tree = outboard.tree();
+    let root_hash = outboard.root();
+    let mut validator = RecursiveValidator {
+        tree,
+        valid_nodes: tree.filled_size(),
+        res: RangeSet2::empty(),
+        outboard,
+    };
+    validator.validate_rec(&root_hash, tree.root(), true)?;
+    Ok(validator.res)
 }
 
 /// An outboard that is stored in memory, in a byte slice.
@@ -89,11 +147,11 @@ impl<'a> Outboard for PostOrderMemOutboardRef<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostOrderMemOutboard {
     /// root hash
-    root: blake3::Hash,
+    pub(crate) root: blake3::Hash,
     /// tree defining the data
     tree: BaoTree,
     /// hashes without length suffix
-    data: Vec<u8>,
+    pub(crate) data: Vec<u8>,
 }
 
 impl PostOrderMemOutboard {
