@@ -12,11 +12,8 @@ mod tree;
 use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
-pub mod error;
 pub mod io;
 pub mod outboard;
-#[cfg(feature = "tokio_io")]
-pub mod tokio_io;
 use outboard::*;
 
 #[cfg(test)]
@@ -55,8 +52,12 @@ impl PostOrderOffset {
 }
 
 impl BaoTree {
+    pub fn empty(block_size: BlockSize) -> Self {
+        Self::new(ByteNum(0), block_size)
+    }
+
     /// Create a new BaoTree
-    pub fn new(size: ByteNum, block_size: BlockSize) -> BaoTree {
+    pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
         Self::new_with_start_chunk(size, block_size, ChunkNum(0))
     }
 
@@ -71,9 +72,13 @@ impl BaoTree {
         let mut res = Vec::with_capacity(outboard_len);
         let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
         let hash =
-            io::outboard_post_order_impl(tree, &mut Cursor::new(data), &mut res, &mut buffer)
+            io::sync::outboard_post_order_impl(tree, &mut Cursor::new(data), &mut res, &mut buffer)
                 .unwrap();
         PostOrderMemOutboard::new(hash, tree, res)
+    }
+
+    pub fn size(&self) -> ByteNum {
+        self.size
     }
 
     /// Compute the byte ranges for a leaf node
@@ -102,7 +107,7 @@ impl BaoTree {
     ///
     /// This iterator is used by both the sync and async io code for encoding
     /// from an outboard and ranges as well as decoding an encoded stream.
-    pub fn ranges_pre_order_chunks_ref<'a>(
+    pub fn ranges_pre_order_chunks_iter_ref<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
         min_level: u8,
@@ -144,8 +149,8 @@ impl BaoTree {
         size: ByteNum,
         block_size: BlockSize,
         start_chunk: ChunkNum,
-    ) -> BaoTree {
-        BaoTree {
+    ) -> Self {
+        Self {
             size,
             block_size,
             start_chunk,
@@ -203,15 +208,17 @@ impl BaoTree {
     ///
     /// the only node that is not persisted is the last leaf node, if it is
     /// less than half full
-    fn is_persisted(&self, node: TreeNode) -> bool {
-        !node.is_leaf() || self.bytes(node.mid()) < self.size.0
+    #[inline]
+    const fn is_persisted(&self, node: TreeNode) -> bool {
+        !node.is_leaf() || self.bytes(node.mid()).0 < self.size.0
     }
 
-    fn bytes(&self, blocks: BlockNum) -> ByteNum {
+    #[inline]
+    const fn bytes(&self, blocks: BlockNum) -> ByteNum {
         ByteNum(blocks.0 << (10 + self.block_size.0))
     }
 
-    fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
+    pub fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
         if self.is_persisted(node) {
             Some(pre_order_offset_slow(node.0, self.filled_size().0))
         } else {
@@ -219,7 +226,7 @@ impl BaoTree {
         }
     }
 
-    fn post_order_offset(&self, node: TreeNode) -> Option<PostOrderOffset> {
+    pub fn post_order_offset(&self, node: TreeNode) -> Option<PostOrderOffset> {
         if self.is_sealed(node) {
             Some(PostOrderOffset::Stable(node.post_order_offset()))
         } else {
@@ -346,7 +353,7 @@ impl TreeNode {
     }
 
     // the middle of the tree node, in blocks
-    pub fn mid(&self) -> BlockNum {
+    pub const fn mid(&self) -> BlockNum {
         BlockNum(self.0 + 1)
     }
 
@@ -381,7 +388,12 @@ impl TreeNode {
 
     #[inline]
     pub const fn count_below(&self) -> u64 {
-        (1 << (self.level() + 1)) - 2
+        // go to representation where trailing zeros are the level
+        let x = self.0 + 1;
+        // isolate the lowest bit
+        let lowest_bit = x & (-(x as i64) as u64);
+        // number of nodes is n * 2 - 1, subtract 1 for the node itself
+        lowest_bit * 2 - 2
     }
 
     /// Get the next left ancestor of this node, or None if there is none.
@@ -511,9 +523,13 @@ impl TreeNode {
     /// Get the next left ancestor, or None if we don't have one
     #[inline]
     const fn next_left_ancestor0(&self) -> Option<u64> {
-        let level = self.level();
-        let i = self.0;
-        ((i + 1) & !(1 << level)).checked_sub(1)
+        // add 1 to go to the representation where trailing zeroes = level
+        let x = self.0 + 1;
+        // clear the lowest bit
+        let without_lowest_bit = x & (x - 1);
+        // go back to the normal representation,
+        // producing None if without_lowest_bit is 0, which means that there is no next left ancestor
+        without_lowest_bit.checked_sub(1)
     }
 }
 
@@ -538,7 +554,7 @@ pub(crate) fn hash_block(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> b
     let mut buffer = [0u8; 1024];
     let data_len = ByteNum(data.len() as u64);
     let data = Cursor::new(data);
-    io::blake3_hash_inner(data, data_len, start_chunk, is_root, &mut buffer).unwrap()
+    io::sync::blake3_hash_inner(data, data_len, start_chunk, is_root, &mut buffer).unwrap()
 }
 
 /// Slow iterative way to find the offset of a node in a pre-order traversal.

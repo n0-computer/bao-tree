@@ -1,4 +1,9 @@
 //! Async (tokio) IO
+use blake3::guts::parent_cv;
+use bytes::BytesMut;
+use futures::{ready, stream::FusedStream, Stream, StreamExt};
+use range_collections::{RangeSet2, RangeSetRef};
+use smallvec::SmallVec;
 use std::{
     fmt,
     io::{self, SeekFrom},
@@ -7,29 +12,21 @@ use std::{
     result,
     task::{Context, Poll},
 };
-
-use blake3::guts::parent_cv;
-use bytes::{Bytes, BytesMut};
-use futures::{ready, Stream, StreamExt};
-use range_collections::{RangeSet2, RangeSetRef};
-use smallvec::SmallVec;
 use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt, ReadBuf,
 };
 
 use crate::{
-    error::{DecodeError, EncodeError},
     hash_block,
-    outboard::Outboard,
-    range_ok, BaoTree, ByteNum,
-};
-
-use super::{
+    io::error::{DecodeError, EncodeError},
     iter::{BaoChunk, PreOrderChunkIterRef},
-    BlockSize, ChunkNum,
+    outboard::{Outboard, OutboardMut},
+    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
 };
 
 use ouroboros::self_referencing;
+
+use super::DecodeResponseItem;
 
 #[derive(Debug)]
 enum DecodeResponseStreamState<'a> {
@@ -46,12 +43,15 @@ enum DecodeResponseStreamState<'a> {
         curr: BaoChunk,
     },
     /// we are at the end of the tree. Still need to store the tree somewhere
-    Done,
+    Done {
+        tree: BaoTree,
+    },
+    Taken,
 }
 
 impl DecodeResponseStreamState<'_> {
     fn take(&mut self) -> Self {
-        std::mem::replace(self, DecodeResponseStreamState::Done)
+        std::mem::replace(self, DecodeResponseStreamState::Taken)
     }
 }
 
@@ -68,10 +68,16 @@ pub struct DecodeResponseStreamRef<'a, R> {
 }
 
 impl<'a, R: AsyncRead + Unpin> Stream for DecodeResponseStreamRef<'a, R> {
-    type Item = std::result::Result<(ByteNum, Bytes), DecodeError>;
+    type Item = std::result::Result<DecodeResponseItem, DecodeError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.poll_next_impl(cx)
+    }
+}
+
+impl<'a, R: AsyncRead + Unpin> FusedStream for DecodeResponseStreamRef<'a, R> {
+    fn is_terminated(&self) -> bool {
+        matches!(self.state, DecodeResponseStreamState::Done { .. })
     }
 }
 
@@ -84,7 +90,7 @@ impl<'a, R> DecodeResponseStreamRef<'a, R> {
     ) -> Self {
         let mut stack = SmallVec::new();
         stack.push(hash);
-        let mut buf = BytesMut::with_capacity(block_size.size());
+        let mut buf = BytesMut::with_capacity(block_size.bytes());
         // first item (header) needs 8 bytes.
         buf.resize(8, 0);
         // offset at 0
@@ -96,6 +102,10 @@ impl<'a, R> DecodeResponseStreamRef<'a, R> {
             buf,
             curr,
         }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.encoded
     }
 }
 
@@ -124,26 +134,56 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
             }
             None => {
                 self.buf.resize(0, 0);
-                DecodeResponseStreamState::Done
+                DecodeResponseStreamState::Done { tree: *iter.tree() }
             }
         };
+    }
+
+    fn poll_read_tree(&mut self, cx: &mut Context) -> Poll<io::Result<BaoTree>> {
+        // check if we are at the header
+        let header = if let DecodeResponseStreamState::Header { block_size, .. } = self.state {
+            Some(block_size)
+        } else {
+            None
+        };
+        // if yes,
+        Poll::Ready(Ok(if let Some(block_size) = header {
+            ready!(self.poll_fill_buffer(cx))?;
+            let size = ByteNum(u64::from_le_bytes(self.buf[..8].try_into().unwrap()));
+            BaoTree::new(size, block_size)
+        } else {
+            *self.tree().unwrap()
+        }))
+    }
+
+    pub async fn read_tree(&mut self) -> io::Result<BaoTree> {
+        futures::future::poll_fn(|cx| self.poll_read_tree(cx)).await
+    }
+
+    pub fn tree(&self) -> Option<&BaoTree> {
+        match self.state {
+            DecodeResponseStreamState::Header { .. } => None,
+            DecodeResponseStreamState::Node { ref iter, .. } => Some(iter.tree()),
+            DecodeResponseStreamState::Done { ref tree } => Some(tree),
+            DecodeResponseStreamState::Taken => unreachable!(),
+        }
     }
 
     fn poll_next_impl(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<(ByteNum, Bytes), DecodeError>>> {
+    ) -> Poll<Option<Result<DecodeResponseItem, DecodeError>>> {
         Poll::Ready(Some(loop {
             // fill the buffer if needed
             ready!(self.poll_fill_buffer(cx))?;
             let (buf, curr) = match self.state.take() {
                 DecodeResponseStreamState::Header { ranges, block_size } => {
                     // read header and create the iterator
-                    let len = ByteNum(u64::from_le_bytes(self.buf[..8].try_into().unwrap()));
-                    let tree = BaoTree::new(len, block_size);
-                    let iter = Box::new(tree.ranges_pre_order_chunks_ref(ranges, 0));
+                    let size = ByteNum(u64::from_le_bytes(self.buf[..8].try_into().unwrap()));
+                    let tree = BaoTree::new(size, block_size);
+                    let iter = Box::new(tree.ranges_pre_order_chunks_iter_ref(ranges, 0));
                     self.set_state(iter);
-                    continue;
+                    break Ok(DecodeResponseItem::Header { size });
                 }
                 DecodeResponseStreamState::Node { iter, curr } => {
                     // set the state to the next node
@@ -151,7 +191,11 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                     self.set_state(iter);
                     (buf, curr)
                 }
-                DecodeResponseStreamState::Done { .. } => return Poll::Ready(None),
+                done @ DecodeResponseStreamState::Done { .. } => {
+                    self.state = done;
+                    return Poll::Ready(None);
+                }
+                DecodeResponseStreamState::Taken => unreachable!(),
             };
 
             match curr {
@@ -162,7 +206,7 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                     node,
                 } => {
                     assert_eq!(buf.len(), 64);
-                    let (l_hash, r_hash) = read_parent(&buf);
+                    let pair @ (l_hash, r_hash) = read_parent(&buf);
                     let parent_hash = self.stack.pop().unwrap();
                     let actual = parent_cv(&l_hash, &r_hash, is_root);
                     // Push the children in reverse order so they are popped in the correct order
@@ -178,6 +222,7 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                     if parent_hash != actual {
                         break Err(DecodeError::ParentHashMismatch(node));
                     }
+                    break Ok(DecodeResponseItem::Parent { node, pair });
                 }
                 BaoChunk::Leaf {
                     size,
@@ -190,7 +235,10 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                     if leaf_hash != actual {
                         break Err(DecodeError::LeafHashMismatch(start_chunk));
                     }
-                    break Ok((start_chunk.to_bytes(), buf));
+                    break Ok(DecodeResponseItem::Leaf {
+                        offset: start_chunk.to_bytes(),
+                        data: buf,
+                    });
                 }
             }
         }))
@@ -203,7 +251,7 @@ struct DecodeResponseStreamInner<R, Q: 'static> {
     ranges: Q,
     #[borrows(ranges)]
     #[not_covariant]
-    inner: DecodeResponseStreamRef<'this, R>,
+    inner: Option<DecodeResponseStreamRef<'this, R>>,
 }
 
 /// A DecodeResponseStream that owns the query.
@@ -215,14 +263,23 @@ pub struct DecodeResponseStream<R, Q: 'static = RangeSet2<ChunkNum>>(
 );
 
 impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>>> Stream for DecodeResponseStream<R, Q> {
-    type Item = Result<(ByteNum, Bytes), DecodeError>;
+    type Item = Result<DecodeResponseItem, DecodeError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.0.with_inner_mut(|x| x.poll_next_unpin(cx))
+        self.0
+            .with_inner_mut(|x| x.as_mut().unwrap().poll_next_unpin(cx))
     }
 }
 
-impl<R: AsyncRead, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> DecodeResponseStream<R, Q> {
+impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>>> FusedStream
+    for DecodeResponseStream<R, Q>
+{
+    fn is_terminated(&self) -> bool {
+        self.0.with_inner(|x| x.as_ref().unwrap().is_terminated())
+    }
+}
+
+impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> DecodeResponseStream<R, Q> {
     /// Create a new DecodeResponseStream.
     ///
     /// ranges has to implement `AsRef<RangeSetRef<ChunkNum>>`, so you can pass e.g. a RangeSet2.
@@ -231,11 +288,31 @@ impl<R: AsyncRead, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> DecodeResponseStre
             DecodeResponseStreamInnerBuilder {
                 ranges,
                 inner_builder: |ranges| {
-                    DecodeResponseStreamRef::new(hash, ranges.as_ref(), block_size, encoded)
+                    Some(DecodeResponseStreamRef::new(
+                        hash,
+                        ranges.as_ref(),
+                        block_size,
+                        encoded,
+                    ))
                 },
             }
             .build(),
         )
+    }
+
+    fn poll_read_tree(&mut self, cx: &mut Context) -> Poll<io::Result<BaoTree>> {
+        self.0
+            .with_inner_mut(|this| this.as_mut().unwrap().poll_read_tree(cx))
+    }
+
+    pub async fn read_tree(&mut self) -> io::Result<BaoTree> {
+        futures::future::poll_fn(|cx| self.poll_read_tree(cx)).await
+    }
+
+    pub fn into_inner(self) -> R {
+        let mut this = self;
+        this.0
+            .with_inner_mut(|this| this.take().unwrap().into_inner())
     }
 }
 
@@ -370,7 +447,7 @@ impl<'a, R: AsyncRead + Unpin> AsyncRead for AsyncResponseDecoderRef<'a, R> {
                 AsyncResponseDecoderState::Header { block_size, ranges } => {
                     let size = ByteNum(u64::from_le_bytes(self.buf[..8].try_into().unwrap()));
                     let tree = BaoTree::new(size, block_size);
-                    let iter = Box::new(tree.ranges_pre_order_chunks_ref(ranges, 0));
+                    let iter = Box::new(tree.ranges_pre_order_chunks_iter_ref(ranges, 0));
                     self.set_state_reading(iter);
                     continue;
                 }
@@ -390,8 +467,8 @@ impl<'a, R: AsyncRead + Unpin> AsyncRead for AsyncResponseDecoderRef<'a, R> {
                     // break in any case, since we have written something
                     break Ok(());
                 }
-                AsyncResponseDecoderState::Done { tree } => {
-                    self.state = AsyncResponseDecoderState::Done { tree };
+                done @ AsyncResponseDecoderState::Done { .. } => {
+                    self.state = done;
                     break Ok(());
                 }
                 AsyncResponseDecoderState::Taken => {
@@ -463,7 +540,7 @@ impl<R, Q> fmt::Debug for AsyncResponseDecoder<R, Q> {
 
 impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncResponseDecoder<R, Q> {
     pub fn new(hash: blake3::Hash, ranges: Q, block_size: BlockSize, encoded: R) -> Self {
-        let buffer = vec![0; block_size.size()];
+        let buffer = vec![0; block_size.bytes()];
         Self(
             AsyncResponseDecoderInnerBuilder {
                 buffer,
@@ -547,7 +624,7 @@ where
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())
         .await?;
-    for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
+    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
                 let (l_hash, r_hash) = outboard.load(node)?.unwrap();
@@ -598,7 +675,7 @@ where
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())
         .await?;
-    for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
+    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent {
                 is_root,
@@ -634,6 +711,45 @@ where
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
                 encoded.write_all(data).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Decode a response into a file while updating an outboard
+///
+/// If you don't care about the outboard, just pass in an `EmptyOutboard`
+pub async fn decode_response_into<R, O, W>(
+    ranges: &RangeSetRef<ChunkNum>,
+    encoded: R,
+    mut outboard: O,
+    mut target: W,
+) -> io::Result<()>
+where
+    O: OutboardMut,
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + AsyncSeek + Unpin,
+{
+    let mut stream =
+        DecodeResponseStreamRef::new(outboard.root(), ranges, outboard.tree().block_size, encoded);
+    let mut current = target.seek(SeekFrom::Current(0)).await?;
+    while let Some(item) = stream.next().await {
+        match item? {
+            DecodeResponseItem::Header { size } => {
+                outboard.set_size(size)?;
+            }
+            DecodeResponseItem::Parent { node, pair } => {
+                outboard.save(node, &pair)?;
+            }
+            DecodeResponseItem::Leaf { offset, data } => {
+                // only seek if we need to (only when the response contains gaps)
+                if offset.0 != current {
+                    target.seek(SeekFrom::Start(offset.0)).await?;
+                }
+                target.write_all(&data).await?;
+                // update current
+                current += data.len() as u64;
             }
         }
     }

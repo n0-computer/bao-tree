@@ -4,26 +4,26 @@ use std::{
     ops::Range,
 };
 
+use bytes::BytesMut;
 use futures::StreamExt;
 use proptest::prelude::*;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::AsyncReadExt;
 
+use crate::io::DecodeResponseItem;
+
 use super::{
-    outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
-    tokio_io::AsyncResponseDecoder,
-    BaoTree,
-};
-use crate::{
     canonicalize_range,
-    io::{encode_ranges, encode_ranges_validated, DecodeSliceIter},
+    io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
+    io::tokio::AsyncResponseDecoder,
+    io::tokio::DecodeResponseStreamRef,
     iter::{BaoChunk, NodeInfo},
     outboard::{valid_ranges, Outboard, PostOrderMemOutboardRef},
+    outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
     pre_order_offset_slow,
-    tokio_io::DecodeResponseStreamRef,
     tree::{ByteNum, ChunkNum},
-    BlockSize, PostOrderNodeIter, TreeNode,
+    BaoTree, BlockSize, PostOrderNodeIter, TreeNode,
 };
 
 macro_rules! assert_tuple_eq {
@@ -64,7 +64,7 @@ fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
     let data = data.as_ref();
     let cursor = Cursor::new(data);
     let mut buffer = [0u8; 1024];
-    crate::io::blake3_hash_inner(
+    crate::io::sync::blake3_hash_inner(
         cursor,
         ByteNum(data.len() as u64),
         ChunkNum(0),
@@ -106,7 +106,7 @@ fn encode_ranges_impl(
     let mut res = Vec::new();
     let tree = BaoTree::new(ByteNum(data.len() as u64), block_size);
     res.extend_from_slice(&tree.size.0.to_le_bytes());
-    for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
+    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
                 let offset = tree.post_order_offset(node).unwrap();
@@ -203,9 +203,8 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     let expected = data;
     let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
     let mut ec = Cursor::new(encoded);
-    let mut scratch = vec![0u8; 2048];
-    for item in decode_ranges_into_chunks(root, BlockSize::DEFAULT, &mut ec, &ranges, &mut scratch)
-    {
+    let scratch = BytesMut::with_capacity(2048);
+    for item in decode_ranges_into_chunks(root, BlockSize::DEFAULT, &mut ec, &ranges, scratch) {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
@@ -222,9 +221,10 @@ async fn bao_tree_decode_slice_stream_impl(data: Vec<u8>, range: Range<u64>) {
     let mut ec = Cursor::new(encoded);
     let mut stream = DecodeResponseStreamRef::new(root, &ranges, BlockSize::DEFAULT, &mut ec);
     while let Some(item) = stream.next().await {
-        let (pos, slice) = item.unwrap();
-        let pos = pos.to_usize();
-        assert_eq!(expected[pos..pos + slice.len()], *slice);
+        if let DecodeResponseItem::Leaf { offset, data } = item.unwrap() {
+            let pos = offset.to_usize();
+            assert_eq!(expected[pos..pos + data.len()], *data);
+        }
     }
 }
 
@@ -316,14 +316,10 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
     let expected = data;
     let mut all_ranges = RangeSet2::empty();
     let mut ec = Cursor::new(encoded);
-    let mut scratch = vec![0u8; 1024 << block_size.0];
-    for item in decode_ranges_into_chunks(
-        root,
-        block_size,
-        &mut ec,
-        &RangeSet2::from(range),
-        &mut scratch,
-    ) {
+    let scratch = BytesMut::with_capacity(block_size.bytes());
+    for item in
+        decode_ranges_into_chunks(root, block_size, &mut ec, &RangeSet2::from(range), scratch)
+    {
         let (pos, slice) = item.unwrap();
         // compute all data ranges
         all_ranges |= RangeSet2::from(pos..pos + (slice.len() as u64));
@@ -466,6 +462,38 @@ fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
     res
 }
 
+/// Count valid parents of a node in a tree of a given size.
+fn count_parents(node: u64, len: u64) -> u64 {
+    // node level, 0 for leaf nodes
+    let level = (!node).trailing_zeros();
+    // span of the node, 1 for leaf nodes
+    let span = 1u64 << level;
+    // count the parents with a loop
+    let mut parent_count = 0;
+    let mut offset = node;
+    let mut span = span;
+    // loop until we reach the root, adding valid parents
+    loop {
+        let pspan = span * 2;
+        // find parent
+        offset = if (offset & pspan) == 0 {
+            offset + span
+        } else {
+            offset - span
+        };
+        // if parent is inside the tree, increase parent count
+        if offset < len {
+            parent_count += 1;
+        }
+        if pspan >= len {
+            // we are at the root
+            break;
+        }
+        span = pspan;
+    }
+    parent_count
+}
+
 fn compare_pre_order_outboard(case: usize) {
     let size = ByteNum(case as u64);
     let tree = BaoTree::new(size, BlockSize::DEFAULT);
@@ -482,10 +510,20 @@ fn compare_pre_order_outboard(case: usize) {
         // this is 0 for every bit where we go left, and left_below for every bit where we go right,
         // where left_below is the count of the left child of the node
         let full_lefts = without_lowest_bit - (without_lowest_bit.count_ones() as u64);
-        // add all nodes from the root to the node
-        let actual = full_lefts + (tree.root().level() - k.level()) as u64;
+        // count the parents for the node
+        let parents = (tree.root().level() - k.level()) as u64;
+        // add the parents
+        let actual = full_lefts + parents;
+
+        let corrected = full_lefts + count_parents(k.0, tree.filled_size().0);
         // this works for full trees!
-        println!("{:b}\t{}\t{}", k.0, expected, actual);
+        println!(
+            "{:09b}\t{}\t{}\t{}",
+            k.0,
+            expected,
+            corrected,
+            actual - corrected
+        );
         // let depth = tree.root().level() as u64;
         // println!("{} {}", depth, k.0);
         assert_eq!(v as u64, pre_order_offset_slow(k.0, tree.filled_size().0));
@@ -493,11 +531,45 @@ fn compare_pre_order_outboard(case: usize) {
     println!();
 }
 
+fn pre_order_outboard_line(case: usize) {
+    let size = ByteNum(case as u64);
+    let tree = BaoTree::new(size, BlockSize::DEFAULT);
+    let perm = create_permutation_reference(case);
+    print!("{:08b}", perm.len());
+    for (k, _v) in perm {
+        // repr of node number where trailing zeros indicate level
+        let x = k.0 + 1;
+        // clear lowest bit, since we don't want to count left children below the node itself
+        let without_lowest_bit = x & (x - 1);
+        // subtract all nodes that go to the right themselves
+        // this is 0 for every bit where we go left, and left_below for every bit where we go right,
+        // where left_below is the count of the left child of the node
+        let full_lefts = without_lowest_bit - (without_lowest_bit.count_ones() as u64);
+        // count the parents for the node
+        let parents = (tree.root().level() - k.level()) as u64;
+        // add the parents
+        let actual = full_lefts + parents;
+
+        let corrected = full_lefts + count_parents(k.0, tree.filled_size().0);
+        let delta = actual - corrected;
+        if delta == 0 {
+            print!(" ");
+        } else {
+            print!("{}", delta);
+        }
+    }
+    println!();
+}
+
 #[test]
-fn pre_post_outboard_cases() {
-    let cases = [1024 * 32];
+fn test_pre_order_outboard_fast() {
+    let cases = [1024 * 78];
     for case in cases {
         compare_pre_order_outboard(case);
+    }
+
+    for case in 0..256 {
+        pre_order_outboard_line(case * 1024);
     }
 }
 
@@ -548,16 +620,18 @@ pub fn decode_ranges_into_chunks<'a>(
     block_size: BlockSize,
     encoded: &'a mut impl Read,
     ranges: &'a RangeSetRef<ChunkNum>,
-    scratch: &'a mut [u8],
+    scratch: BytesMut,
 ) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
-    let iter = DecodeSliceIter::new(root, block_size, encoded, &ranges, scratch);
-    MapWithRef::new(iter, |iter, item| match item {
-        Ok(range) => {
-            let len = (range.end - range.start).to_usize();
-            let data = &iter.buffer()[..len];
-            Ok((range.start, data.to_vec()))
+    let iter = DecodeResponseIter::new(root, block_size, encoded, &ranges, scratch);
+    iter.filter_map(|item| match item {
+        Ok(item) => {
+            if let DecodeResponseItem::Leaf { offset, data } = item {
+                Some(Ok((offset, data.to_vec())))
+            } else {
+                None
+            }
         }
-        Err(e) => Err(e.into()),
+        Err(e) => Some(Err(e.into())),
     })
 }
 
@@ -795,21 +869,5 @@ proptest! {
             let (expected, actual) = validate_outboard_impl(&outboard);
             prop_assert_ne!(expected, actual);
         }
-    }
-}
-
-struct MapWithRef<I, F>(I, F);
-
-impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> MapWithRef<I, F> {
-    pub fn new(i: I, f: F) -> Self {
-        Self(i, f)
-    }
-}
-
-impl<I: Iterator, F: FnMut(&I, I::Item) -> R, R> Iterator for MapWithRef<I, F> {
-    type Item = R;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|x| (self.1)(&self.0, x))
     }
 }

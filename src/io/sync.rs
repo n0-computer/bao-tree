@@ -6,16 +6,19 @@ use std::{
 };
 
 use blake3::guts::parent_cv;
+use bytes::BytesMut;
 use range_collections::RangeSetRef;
 use smallvec::SmallVec;
 
 use crate::{
-    error::{DecodeError, EncodeError},
     hash_block, hash_chunk,
+    io::error::{DecodeError, EncodeError},
     iter::{BaoChunk, PreOrderChunkIterRef},
-    outboard::Outboard,
+    outboard::{Outboard, OutboardMut},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
 };
+
+use super::DecodeResponseItem;
 
 #[derive(Debug)]
 enum Position<'a> {
@@ -30,35 +33,33 @@ enum Position<'a> {
 }
 
 #[derive(Debug)]
-pub struct DecodeSliceIter<'a, R> {
+pub struct DecodeResponseIter<'a, R> {
     inner: Position<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
-    scratch: &'a mut [u8],
+    buf: BytesMut,
 }
 
-impl<'a, R: Read> DecodeSliceIter<'a, R> {
+impl<'a, R: Read> DecodeResponseIter<'a, R> {
     pub fn new(
         root: blake3::Hash,
         block_size: BlockSize,
         encoded: R,
         ranges: &'a RangeSetRef<ChunkNum>,
-        scratch: &'a mut [u8],
+        buf: BytesMut,
     ) -> Self {
-        // make sure the buffer is big enough
-        assert!(scratch.len() >= block_size.size());
         let mut stack = SmallVec::new();
         stack.push(root);
         Self {
             stack,
             inner: Position::Header { ranges, block_size },
             encoded,
-            scratch,
+            buf,
         }
     }
 
     pub fn buffer(&self) -> &[u8] {
-        &self.scratch
+        &self.buf
     }
 
     pub fn tree(&self) -> Option<&BaoTree> {
@@ -68,7 +69,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
         }
     }
 
-    fn next0(&mut self) -> result::Result<Option<Range<ByteNum>>, DecodeError> {
+    fn next0(&mut self) -> result::Result<Option<DecodeResponseItem>, DecodeError> {
         loop {
             let inner = match &mut self.inner {
                 Position::Content { ref mut iter } => iter,
@@ -83,9 +84,9 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     }
                     let tree = BaoTree::new(size, *block_size);
                     self.inner = Position::Content {
-                        iter: tree.ranges_pre_order_chunks_ref(range, 0),
+                        iter: tree.ranges_pre_order_chunks_iter_ref(range, 0),
                     };
-                    continue;
+                    break Ok(Some(DecodeResponseItem::Header { size }));
                 }
             };
             match inner.next() {
@@ -95,7 +96,7 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     right,
                     node,
                 }) => {
-                    let (l_hash, r_hash) = read_parent(&mut self.encoded)?;
+                    let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)?;
                     let parent_hash = self.stack.pop().unwrap();
                     let actual = parent_cv(&l_hash, &r_hash, is_root);
                     if parent_hash != actual {
@@ -107,22 +108,24 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
                     if left {
                         self.stack.push(l_hash);
                     }
+                    break Ok(Some(DecodeResponseItem::Parent { node, pair }));
                 }
                 Some(BaoChunk::Leaf {
                     size,
                     is_root,
                     start_chunk,
                 }) => {
-                    let buf = &mut self.scratch[..size];
-                    self.encoded.read_exact(buf)?;
-                    let actual = hash_block(start_chunk, buf, is_root);
+                    self.buf.resize(size, 0);
+                    self.encoded.read_exact(&mut self.buf)?;
+                    let actual = hash_block(start_chunk, &self.buf, is_root);
                     let leaf_hash = self.stack.pop().unwrap();
                     if leaf_hash != actual {
                         break Err(DecodeError::LeafHashMismatch(start_chunk));
                     }
-                    let start = start_chunk.to_bytes();
-                    let end = start + (size as u64);
-                    break Ok(Some(start..end));
+                    break Ok(Some(DecodeResponseItem::Leaf {
+                        offset: start_chunk.to_bytes(),
+                        data: self.buf.split().freeze(),
+                    }));
                 }
                 None => break Ok(None),
             }
@@ -130,8 +133,8 @@ impl<'a, R: Read> DecodeSliceIter<'a, R> {
     }
 }
 
-impl<'a, R: Read> Iterator for DecodeSliceIter<'a, R> {
-    type Item = result::Result<Range<ByteNum>, DecodeError>;
+impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
+    type Item = result::Result<DecodeResponseItem, DecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next0().transpose()
@@ -161,7 +164,7 @@ pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
     // write header
     encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
-    for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
+    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
                 let (l_hash, r_hash) = outboard.load(node)?.unwrap();
@@ -205,7 +208,7 @@ pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
     // write header
     encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
-    for item in tree.ranges_pre_order_chunks_ref(ranges, 0) {
+    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent {
                 is_root,
@@ -241,6 +244,44 @@ pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
                 encoded.write_all(data)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Decode a response into a file while updating an outboard
+pub async fn decode_response_into<R, O, W>(
+    ranges: &RangeSetRef<ChunkNum>,
+    encoded: R,
+    mut outboard: O,
+    mut target: W,
+) -> io::Result<()>
+where
+    O: OutboardMut,
+    R: Read,
+    W: Write + Seek,
+{
+    let block_size = outboard.tree().block_size;
+    let buffer = BytesMut::with_capacity(block_size.bytes());
+    let mut iter = DecodeResponseIter::new(outboard.root(), block_size, encoded, ranges, buffer);
+    let mut current = target.seek(SeekFrom::Current(0))?;
+    while let Some(item) = iter.next() {
+        match item? {
+            DecodeResponseItem::Header { size } => {
+                outboard.set_size(size)?;
+            }
+            DecodeResponseItem::Parent { node, pair } => {
+                outboard.save(node, &pair)?;
+            }
+            DecodeResponseItem::Leaf { offset, data } => {
+                // only seek if we need to (only when the response contains gaps)
+                if offset.0 != current {
+                    target.seek(SeekFrom::Start(offset.0))?;
+                }
+                target.write_all(&data)?;
+                // update current
+                current += data.len() as u64;
             }
         }
     }

@@ -52,11 +52,11 @@ impl BlockSize {
     }
 
     /// Number of bytes in a block at this level
-    pub const fn size(self) -> usize {
-        block_size0(self.0)
+    pub const fn bytes(self) -> usize {
+        byte_size(self.0)
     }
 }
 
-const fn block_size0(block_level: u8) -> usize {
+const fn byte_size(block_level: u8) -> usize {
     BLAKE3_CHUNK_SIZE << block_level
 }
