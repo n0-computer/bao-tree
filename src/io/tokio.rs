@@ -2,7 +2,7 @@
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 use futures::{ready, stream::FusedStream, Stream, StreamExt};
-use range_collections::{RangeSet2, RangeSetRef};
+use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
     fmt,
@@ -752,6 +752,30 @@ where
                 current += data.len() as u64;
             }
         }
+    }
+    Ok(())
+}
+
+/// Write ranges from memory to disk
+///
+/// This is useful for writing changes to outboards.
+/// Note that it is up to you to call flush.
+pub async fn write_ranges(
+    from: impl AsRef<[u8]>,
+    mut to: impl AsyncWrite + AsyncSeek + Unpin,
+    ranges: &RangeSetRef<u64>,
+) -> io::Result<()> {
+    let from = from.as_ref();
+    let end = from.len() as u64;
+    for range in ranges.iter() {
+        let range = match range {
+            RangeSetRange::RangeFrom(x) => *x.start..end,
+            RangeSetRange::Range(x) => *x.start..*x.end,
+        };
+        let start = usize::try_from(range.start).unwrap();
+        let end = usize::try_from(range.end).unwrap();
+        to.seek(SeekFrom::Start(range.start)).await?;
+        to.write_all(&from[start..end]).await?;
     }
     Ok(())
 }

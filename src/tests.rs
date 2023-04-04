@@ -148,7 +148,7 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let mut encoder = bao::encode::Encoder::new_outboard(cursor);
     encoder.write_all(&data).unwrap();
     let hash = encoder.finalize().unwrap();
-    let pre = PreOrderMemOutboard::new(hash, BlockSize::DEFAULT, outboard);
+    let pre = PreOrderMemOutboard::new(hash, BlockSize::DEFAULT, outboard, false);
     pre.flip()
 }
 
@@ -171,7 +171,7 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     let expected = encode_slice_reference(&data, range.clone()).0;
     let ob = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
     let hash = ob.root();
-    let outboard = ob.outboard_with_suffix();
+    let outboard = ob.into_inner();
     // extend empty range to contain at least 1 byte
     if range.start == range.end {
         range.end.0 += 1;
@@ -288,7 +288,7 @@ fn bao_tree_outboard_levels() {
         let block_size = BlockSize(chunk_group_log);
         let ob = BaoTree::outboard_post_order_mem(&td, block_size);
         let hash = ob.root();
-        let outboard = ob.outboard_with_suffix();
+        let outboard = ob.into_inner();
         assert_eq!(expected, hash);
         assert_eq!(
             ByteNum(outboard.len() as u64),
@@ -302,7 +302,7 @@ fn bao_tree_outboard_levels() {
 fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, block_size: BlockSize) {
     let ob = BaoTree::outboard_post_order_mem(&data, block_size);
     let root = ob.root();
-    let outboard = ob.outboard_with_suffix();
+    let outboard = ob.into_inner();
     // extend empty range to contain at least 1 byte
     if range.start == range.end {
         range.end.0 += 1;
@@ -440,7 +440,7 @@ fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
     use make_test_data as td;
     let data = td(size);
     let po = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
-    let post = po.outboard_with_suffix();
+    let post = po.into_inner();
     let (mut pre, _) = bao::encode::outboard(data);
     pre.splice(..8, []);
     let map = pre

@@ -41,8 +41,8 @@ impl From<DecodeError> for io::Error {
             DecodeError::ParentHashMismatch(_) => {
                 io::Error::new(io::ErrorKind::InvalidData, "parent hash mismatch")
             }
-            DecodeError::LeafHashMismatch(_) => {
-                io::Error::new(io::ErrorKind::InvalidData, "leaf hash mismatch")
+            DecodeError::LeafHashMismatch(chunk) => {
+                io::Error::new(io::ErrorKind::InvalidData, format!("leaf hash mismatch {}", chunk.to_bytes().0))
             }
             DecodeError::InvalidQueryRange => {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
