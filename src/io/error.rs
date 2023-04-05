@@ -38,12 +38,18 @@ impl From<DecodeError> for io::Error {
     fn from(e: DecodeError) -> Self {
         match e {
             DecodeError::Io(e) => e,
-            DecodeError::ParentHashMismatch(_) => {
-                io::Error::new(io::ErrorKind::InvalidData, "parent hash mismatch")
-            }
-            DecodeError::LeafHashMismatch(chunk) => {
-                io::Error::new(io::ErrorKind::InvalidData, format!("leaf hash mismatch {}", chunk.to_bytes().0))
-            }
+            DecodeError::ParentHashMismatch(node) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "parent hash mismatch (level {}, block {})",
+                    node.level(),
+                    node.mid().0
+                ),
+            ),
+            DecodeError::LeafHashMismatch(chunk) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("leaf hash mismatch at {}", chunk.to_bytes().0),
+            ),
             DecodeError::InvalidQueryRange => {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
             }
@@ -94,12 +100,18 @@ impl From<EncodeError> for io::Error {
     fn from(e: EncodeError) -> Self {
         match e {
             EncodeError::Io(e) => e,
-            EncodeError::ParentHashMismatch(_) => {
-                io::Error::new(io::ErrorKind::InvalidData, "parent hash mismatch")
-            }
-            EncodeError::LeafHashMismatch(_) => {
-                io::Error::new(io::ErrorKind::InvalidData, "leaf hash mismatch")
-            }
+            EncodeError::ParentHashMismatch(node) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "parent hash mismatch (level {}, block {})",
+                    node.level(),
+                    node.mid().0
+                ),
+            ),
+            EncodeError::LeafHashMismatch(chunk) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("leaf hash mismatch at {}", chunk.to_bytes().0),
+            ),
             EncodeError::InvalidQueryRange => {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
             }

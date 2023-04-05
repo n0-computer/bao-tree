@@ -7,7 +7,7 @@ use std::{
 
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
-use range_collections::{range_set::RangeSetRange, RangeSetRef};
+use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
     io::error::{DecodeError, EncodeError},
     iter::{BaoChunk, PreOrderChunkIterRef},
     outboard::{Outboard, OutboardMut},
-    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
+    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 
 use super::DecodeResponseItem;
@@ -428,4 +428,77 @@ fn read_range<'a>(
     let mut buf = &mut buf[..len];
     from.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+/// Given an outboard and a file, return all valid ranges
+pub fn valid_file_ranges<O, R>(outboard: &O, reader: R) -> io::Result<RangeSet2<ChunkNum>>
+where
+    O: Outboard,
+    R: Read + Seek,
+{
+    struct RecursiveValidator<'a, O: Outboard, R: Read + Seek> {
+        tree: BaoTree,
+        valid_nodes: TreeNode,
+        res: RangeSet2<ChunkNum>,
+        outboard: &'a O,
+        reader: R,
+        buffer: Vec<u8>,
+    }
+
+    impl<'a, O: Outboard, R: Read + Seek> RecursiveValidator<'a, O, R> {
+        fn validate_rec(
+            &mut self,
+            parent_hash: &blake3::Hash,
+            node: TreeNode,
+            is_root: bool,
+        ) -> io::Result<()> {
+            if let Some((l_hash, r_hash)) = self.outboard.load(node)? {
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                if &actual != parent_hash {
+                    // we got a validation error. Simply continue without adding the range
+                    return Ok(());
+                }
+                if let Some(leaf) = node.as_leaf() {
+                    let (s, m, e) = self.tree.leaf_byte_ranges3(leaf);
+                    let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
+                    let actual = hash_block(s.chunks(), l_data, false);
+                    if actual == l_hash {
+                        self.res |= RangeSet2::from(s.chunks()..m.chunks());
+                    }
+
+                    let r_data = read_range(&mut self.reader, m..e, &mut self.buffer)?;
+                    let actual = hash_block(m.chunks(), r_data, false);
+                    if actual == r_hash {
+                        self.res |= RangeSet2::from(m.chunks()..e.chunks());
+                    }
+                } else {
+                    // recurse
+                    let left = node.left_child().unwrap();
+                    self.validate_rec(&l_hash, left, false)?;
+                    let right = node.right_descendant(self.valid_nodes).unwrap();
+                    self.validate_rec(&r_hash, right, false)?;
+                }
+            } else if let Some(leaf) = node.as_leaf() {
+                let (s, m, _) = self.tree.leaf_byte_ranges3(leaf);
+                let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
+                let actual = hash_block(s.chunks(), l_data, is_root);
+                if actual == *parent_hash {
+                    self.res |= RangeSet2::from(s.chunks()..m.chunks());
+                }
+            };
+            Ok(())
+        }
+    }
+    let tree = outboard.tree();
+    let root_hash = outboard.root();
+    let mut validator = RecursiveValidator {
+        tree,
+        valid_nodes: tree.filled_size(),
+        res: RangeSet2::empty(),
+        outboard,
+        reader,
+        buffer: vec![0; tree.block_size.bytes()],
+    };
+    validator.validate_rec(&root_hash, tree.root(), true)?;
+    Ok(validator.res)
 }

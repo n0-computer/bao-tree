@@ -260,6 +260,11 @@ impl ByteNum {
         ChunkNum(whole + part)
     }
 
+    /// number of chunks that this number of bytes covers
+    pub const fn full_chunks(&self) -> ChunkNum {
+        ChunkNum(self.0 >> 10)
+    }
+
     /// number of blocks that this number of bytes covers,
     /// given a block size
     pub const fn blocks(&self, block_size: BlockSize) -> BlockNum {

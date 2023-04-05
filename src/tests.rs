@@ -149,7 +149,7 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     encoder.write_all(&data).unwrap();
     let hash = encoder.finalize().unwrap();
     let pre = PreOrderMemOutboard::new(hash, BlockSize::DEFAULT, outboard, false);
-    pre.flip()
+    pre.unwrap().flip()
 }
 
 fn encode_slice_reference(data: &[u8], chunk_range: Range<ChunkNum>) -> (Vec<u8>, blake3::Hash) {
