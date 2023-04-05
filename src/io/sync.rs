@@ -29,7 +29,7 @@ enum Position<'a> {
         block_size: BlockSize,
     },
     /// currently reading the tree, all the info we need is in the iter
-    Content { iter: PreOrderChunkIterRef<'a> },
+    Content { iter: Box<PreOrderChunkIterRef<'a>> },
 }
 
 #[derive(Debug)]
@@ -70,65 +70,63 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     }
 
     fn next0(&mut self) -> result::Result<Option<DecodeResponseItem>, DecodeError> {
-        loop {
-            let inner = match &mut self.inner {
-                Position::Content { ref mut iter } => iter,
-                Position::Header {
-                    block_size,
-                    ranges: range,
-                } => {
-                    let size = read_len(&mut self.encoded)?;
-                    // make sure the range is valid and canonical
-                    if !range_ok(range, size.chunks()) {
-                        break Err(DecodeError::InvalidQueryRange);
-                    }
-                    let tree = BaoTree::new(size, *block_size);
-                    self.inner = Position::Content {
-                        iter: tree.ranges_pre_order_chunks_iter_ref(range, 0),
-                    };
-                    break Ok(Some(DecodeResponseItem::Header { size }));
+        let inner = match &mut self.inner {
+            Position::Content { ref mut iter } => iter,
+            Position::Header {
+                block_size,
+                ranges: range,
+            } => {
+                let size = read_len(&mut self.encoded)?;
+                // make sure the range is valid and canonical
+                if !range_ok(range, size.chunks()) {
+                    return Err(DecodeError::InvalidQueryRange);
                 }
-            };
-            match inner.next() {
-                Some(BaoChunk::Parent {
-                    is_root,
-                    left,
-                    right,
-                    node,
-                }) => {
-                    let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)?;
-                    let parent_hash = self.stack.pop().unwrap();
-                    let actual = parent_cv(&l_hash, &r_hash, is_root);
-                    if parent_hash != actual {
-                        break Err(DecodeError::ParentHashMismatch(node));
-                    }
-                    if right {
-                        self.stack.push(r_hash);
-                    }
-                    if left {
-                        self.stack.push(l_hash);
-                    }
-                    break Ok(Some(DecodeResponseItem::Parent { node, pair }));
-                }
-                Some(BaoChunk::Leaf {
-                    size,
-                    is_root,
-                    start_chunk,
-                }) => {
-                    self.buf.resize(size, 0);
-                    self.encoded.read_exact(&mut self.buf)?;
-                    let actual = hash_block(start_chunk, &self.buf, is_root);
-                    let leaf_hash = self.stack.pop().unwrap();
-                    if leaf_hash != actual {
-                        break Err(DecodeError::LeafHashMismatch(start_chunk));
-                    }
-                    break Ok(Some(DecodeResponseItem::Leaf {
-                        offset: start_chunk.to_bytes(),
-                        data: self.buf.split().freeze(),
-                    }));
-                }
-                None => break Ok(None),
+                let tree = BaoTree::new(size, *block_size);
+                self.inner = Position::Content {
+                    iter: Box::new(tree.ranges_pre_order_chunks_iter_ref(range, 0)),
+                };
+                return Ok(Some(DecodeResponseItem::Header { size }));
             }
+        };
+        match inner.next() {
+            Some(BaoChunk::Parent {
+                is_root,
+                left,
+                right,
+                node,
+            }) => {
+                let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)?;
+                let parent_hash = self.stack.pop().unwrap();
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                if parent_hash != actual {
+                    return Err(DecodeError::ParentHashMismatch(node));
+                }
+                if right {
+                    self.stack.push(r_hash);
+                }
+                if left {
+                    self.stack.push(l_hash);
+                }
+                Ok(Some(DecodeResponseItem::Parent { node, pair }))
+            }
+            Some(BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+            }) => {
+                self.buf.resize(size, 0);
+                self.encoded.read_exact(&mut self.buf)?;
+                let actual = hash_block(start_chunk, &self.buf, is_root);
+                let leaf_hash = self.stack.pop().unwrap();
+                if leaf_hash != actual {
+                    return Err(DecodeError::LeafHashMismatch(start_chunk));
+                }
+                Ok(Some(DecodeResponseItem::Leaf {
+                    offset: start_chunk.to_bytes(),
+                    data: self.buf.split().freeze(),
+                }))
+            }
+            None => Ok(None),
         }
     }
 }
@@ -264,9 +262,9 @@ where
 {
     let block_size = outboard.tree().block_size;
     let buffer = BytesMut::with_capacity(block_size.bytes());
-    let mut iter = DecodeResponseIter::new(outboard.root(), block_size, encoded, ranges, buffer);
-    let mut current = target.seek(SeekFrom::Current(0))?;
-    while let Some(item) = iter.next() {
+    let iter = DecodeResponseIter::new(outboard.root(), block_size, encoded, ranges, buffer);
+    let mut current = target.stream_position()?;
+    for item in iter {
         match item? {
             DecodeResponseItem::Header { size } => {
                 outboard.set_size(size)?;
@@ -401,7 +399,7 @@ fn read_range<'a>(
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
     from.seek(std::io::SeekFrom::Start(range.start.0))?;
-    let mut buf = &mut buf[..len];
-    from.read_exact(&mut buf)?;
+    let buf = &mut buf[..len];
+    from.read_exact(buf)?;
     Ok(buf)
 }

@@ -367,7 +367,7 @@ impl<'a> PreOrderMemOutboardRef<'a> {
 
     /// The outboard data, including the length prefix.
     pub fn outboard(&self) -> &[u8] {
-        &self.data
+        self.data
     }
 
     pub fn hash(&self) -> &blake3::Hash {
@@ -401,7 +401,7 @@ impl<'a> Outboard for PreOrderMemOutboardRef<'a> {
         self.tree
     }
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
-        Ok(load_raw_pre_mem(&self.tree, &self.data, node).map(parse_hash_pair))
+        Ok(load_raw_pre_mem(&self.tree, self.data, node).map(parse_hash_pair))
     }
 }
 

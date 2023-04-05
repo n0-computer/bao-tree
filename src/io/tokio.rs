@@ -825,8 +825,8 @@ async fn read_range<'a>(
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
     from.seek(SeekFrom::Start(range.start.0)).await?;
-    let mut buf = &mut buf[..len];
-    from.read_exact(&mut buf).await?;
+    let buf = &mut buf[..len];
+    from.read_exact(buf).await?;
     Ok(buf)
 }
 
