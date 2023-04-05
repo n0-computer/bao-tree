@@ -20,7 +20,11 @@ use crate::{
 
 use super::DecodeResponseItem;
 
+// When this enum is used it is in the Header variant for the first 8 bytes, then stays in
+// the Content state for the remainder.  Since the Content is the largest part that this
+// size inbalance is fine, hence allow clippy::large_enum_variant.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Position<'a> {
     /// currently reading the header, so don't know how big the tree is
     /// so we need to store the ranges and the chunk group log
@@ -29,7 +33,7 @@ enum Position<'a> {
         block_size: BlockSize,
     },
     /// currently reading the tree, all the info we need is in the iter
-    Content { iter: Box<PreOrderChunkIterRef<'a>> },
+    Content { iter: PreOrderChunkIterRef<'a> },
 }
 
 #[derive(Debug)]
@@ -83,7 +87,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 }
                 let tree = BaoTree::new(size, *block_size);
                 self.inner = Position::Content {
-                    iter: Box::new(tree.ranges_pre_order_chunks_iter_ref(range, 0)),
+                    iter: tree.ranges_pre_order_chunks_iter_ref(range, 0),
                 };
                 return Ok(Some(DecodeResponseItem::Header { size }));
             }
