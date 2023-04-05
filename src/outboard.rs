@@ -359,12 +359,20 @@ pub struct PreOrderMemOutboardRef<'a> {
 }
 
 impl<'a> PreOrderMemOutboardRef<'a> {
-    pub fn new(root: blake3::Hash, block_size: BlockSize, data: &'a [u8]) -> Self {
-        assert!(data.len() >= 8);
+    pub fn new(root: blake3::Hash, block_size: BlockSize, data: &'a [u8]) -> io::Result<Self> {
+        if data.len() < 8 {
+            io_error!("outboard must be at least 8 bytes");
+        };
         let len = ByteNum(u64::from_le_bytes(data[0..8].try_into().unwrap()));
         let tree = BaoTree::new(len, block_size);
-        assert!(data.len() as u64 == tree.outboard_hash_pairs() * 64 + 8);
-        Self { root, tree, data }
+        let expected_outboard_size = outboard_size(len.0, block_size);
+        let outboard_size = data.len() as u64;
+        if outboard_size != expected_outboard_size {
+            io_error!(
+                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"                
+            );
+        }
+        Ok(Self { root, tree, data })
     }
 
     /// The outboard data, including the length prefix.
@@ -426,24 +434,31 @@ impl PreOrderMemOutboard {
     pub fn new(
         root: blake3::Hash,
         block_size: BlockSize,
-        data: Vec<u8>,
+        mut data: Vec<u8>,
         track_changes: bool,
-    ) -> Self {
-        assert!(data.len() >= 8);
+    ) -> io::Result<Self> {
+        if data.len() < 8 {
+            io_error!("outboard must be at least 8 bytes");
+        };
         let len = ByteNum(u64::from_le_bytes(data[0..8].try_into().unwrap()));
         let tree = BaoTree::new(len, block_size);
-        assert!(data.len() as u64 == tree.outboard_hash_pairs() * 64 + 8);
+        let expected_outboard_size = outboard_size(len.0, block_size);
+        if data.len() as u64 > expected_outboard_size {
+            io_error!("outboard too large");
+        }
+        // zero pad the rest, if needed.
+        data.resize(expected_outboard_size as usize, 0u8);
         let changes = if track_changes {
             Some(RangeSet2::empty())
         } else {
             None
         };
-        Self {
+        Ok(Self {
             root,
             tree,
             data,
             changes,
-        }
+        })
     }
 }
 
