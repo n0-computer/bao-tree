@@ -59,6 +59,7 @@ jobs:
         run: cargo test --locked --workspace --all-features --bins --tests --examples
 
   test-release:
+    runs-on: ${{ matrix.target.os }}
     strategy:
       fail-fast: false
       matrix:
