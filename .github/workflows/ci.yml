@@ -91,6 +91,7 @@ jobs:
         run: cargo test --release --locked --workspace --all-features --bins --tests --examples
 
   minimal-crates:
+    runs-on: ${{ matrix.target.os }}
     strategy:
       fail-fast: false
       matrix:
