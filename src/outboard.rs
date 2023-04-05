@@ -443,7 +443,7 @@ impl PreOrderMemOutboard {
         let len = ByteNum(u64::from_le_bytes(data[0..8].try_into().unwrap()));
         let tree = BaoTree::new(len, block_size);
         let expected_outboard_size = outboard_size(len.0, block_size);
-        if data.len() as u64 >= expected_outboard_size {
+        if data.len() as u64 > expected_outboard_size {
             io_error!("outboard too large");
         }
         // zero pad the rest, if needed.
