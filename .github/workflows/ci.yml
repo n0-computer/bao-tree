@@ -90,6 +90,16 @@ jobs:
       - name: cargo test
         run: cargo test --release --locked --workspace --all-features --bins --tests --examples
 
+  # Checks correct runtime deps and features are requested by not including dev-dependencies.
+  check-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --workspace --all-features --lib --bins
+
   minimal-crates:
     runs-on: ubuntu-latest
     steps:
