@@ -237,7 +237,7 @@ impl BaoTree {
                 // compute the offset based on the total size and the height of the node
                 self.outboard_hash_pairs()
                     .checked_sub(u64::from(node.right_count()) + 1)
-                    .map(|i| PostOrderOffset::Unstable(i))
+                    .map(PostOrderOffset::Unstable)
             }
         }
     }
@@ -258,6 +258,11 @@ impl ByteNum {
         let part = ((self.0 & mask) != 0) as u64;
         let whole = self.0 >> 10;
         ChunkNum(whole + part)
+    }
+
+    /// number of chunks that this number of bytes covers
+    pub const fn full_chunks(&self) -> ChunkNum {
+        ChunkNum(self.0 >> 10)
     }
 
     /// number of blocks that this number of bytes covers,
@@ -336,12 +341,10 @@ impl fmt::Debug for TreeNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !f.alternate() {
             write!(f, "TreeNode({})", self.0)
+        } else if self.is_leaf() {
+            write!(f, "TreeNode::Leaf({})", self.0)
         } else {
-            if self.is_leaf() {
-                write!(f, "TreeNode::Leaf({})", self.0)
-            } else {
-                write!(f, "TreeNode::Branch({}, level={})", self.0, self.level())
-            }
+            write!(f, "TreeNode::Branch({}, level={})", self.0, self.level())
         }
     }
 }
@@ -501,11 +504,10 @@ impl TreeNode {
         // compute next ancestor that is to the left
         let next_left_ancestor = self.next_left_ancestor0();
         // compute offset
-        let offset = match next_left_ancestor {
+        match next_left_ancestor {
             Some(nla) => below_me + nla + 1 - ((nla + 1).count_ones() as u64),
             None => below_me,
-        };
-        offset
+        }
     }
 
     pub fn post_order_range(&self) -> Range<u64> {

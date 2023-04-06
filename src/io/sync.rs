@@ -7,7 +7,7 @@ use std::{
 
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
-use range_collections::RangeSetRef;
+use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
 use crate::{
@@ -15,12 +15,16 @@ use crate::{
     io::error::{DecodeError, EncodeError},
     iter::{BaoChunk, PreOrderChunkIterRef},
     outboard::{Outboard, OutboardMut},
-    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
+    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 
 use super::DecodeResponseItem;
 
+// When this enum is used it is in the Header variant for the first 8 bytes, then stays in
+// the Content state for the remainder.  Since the Content is the largest part that this
+// size inbalance is fine, hence allow clippy::large_enum_variant.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Position<'a> {
     /// currently reading the header, so don't know how big the tree is
     /// so we need to store the ranges and the chunk group log
@@ -70,65 +74,63 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     }
 
     fn next0(&mut self) -> result::Result<Option<DecodeResponseItem>, DecodeError> {
-        loop {
-            let inner = match &mut self.inner {
-                Position::Content { ref mut iter } => iter,
-                Position::Header {
-                    block_size,
-                    ranges: range,
-                } => {
-                    let size = read_len(&mut self.encoded)?;
-                    // make sure the range is valid and canonical
-                    if !range_ok(range, size.chunks()) {
-                        break Err(DecodeError::InvalidQueryRange);
-                    }
-                    let tree = BaoTree::new(size, *block_size);
-                    self.inner = Position::Content {
-                        iter: tree.ranges_pre_order_chunks_iter_ref(range, 0),
-                    };
-                    break Ok(Some(DecodeResponseItem::Header { size }));
+        let inner = match &mut self.inner {
+            Position::Content { ref mut iter } => iter,
+            Position::Header {
+                block_size,
+                ranges: range,
+            } => {
+                let size = read_len(&mut self.encoded)?;
+                // make sure the range is valid and canonical
+                if !range_ok(range, size.chunks()) {
+                    return Err(DecodeError::InvalidQueryRange);
                 }
-            };
-            match inner.next() {
-                Some(BaoChunk::Parent {
-                    is_root,
-                    left,
-                    right,
-                    node,
-                }) => {
-                    let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)?;
-                    let parent_hash = self.stack.pop().unwrap();
-                    let actual = parent_cv(&l_hash, &r_hash, is_root);
-                    if parent_hash != actual {
-                        break Err(DecodeError::ParentHashMismatch(node));
-                    }
-                    if right {
-                        self.stack.push(r_hash);
-                    }
-                    if left {
-                        self.stack.push(l_hash);
-                    }
-                    break Ok(Some(DecodeResponseItem::Parent { node, pair }));
-                }
-                Some(BaoChunk::Leaf {
-                    size,
-                    is_root,
-                    start_chunk,
-                }) => {
-                    self.buf.resize(size, 0);
-                    self.encoded.read_exact(&mut self.buf)?;
-                    let actual = hash_block(start_chunk, &self.buf, is_root);
-                    let leaf_hash = self.stack.pop().unwrap();
-                    if leaf_hash != actual {
-                        break Err(DecodeError::LeafHashMismatch(start_chunk));
-                    }
-                    break Ok(Some(DecodeResponseItem::Leaf {
-                        offset: start_chunk.to_bytes(),
-                        data: self.buf.split().freeze(),
-                    }));
-                }
-                None => break Ok(None),
+                let tree = BaoTree::new(size, *block_size);
+                self.inner = Position::Content {
+                    iter: tree.ranges_pre_order_chunks_iter_ref(range, 0),
+                };
+                return Ok(Some(DecodeResponseItem::Header { size }));
             }
+        };
+        match inner.next() {
+            Some(BaoChunk::Parent {
+                is_root,
+                left,
+                right,
+                node,
+            }) => {
+                let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)?;
+                let parent_hash = self.stack.pop().unwrap();
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                if parent_hash != actual {
+                    return Err(DecodeError::ParentHashMismatch(node));
+                }
+                if right {
+                    self.stack.push(r_hash);
+                }
+                if left {
+                    self.stack.push(l_hash);
+                }
+                Ok(Some(DecodeResponseItem::Parent { node, pair }))
+            }
+            Some(BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+            }) => {
+                self.buf.resize(size, 0);
+                self.encoded.read_exact(&mut self.buf)?;
+                let actual = hash_block(start_chunk, &self.buf, is_root);
+                let leaf_hash = self.stack.pop().unwrap();
+                if leaf_hash != actual {
+                    return Err(DecodeError::LeafHashMismatch(start_chunk));
+                }
+                Ok(Some(DecodeResponseItem::Leaf {
+                    offset: start_chunk.to_bytes(),
+                    data: self.buf.split().freeze(),
+                }))
+            }
+            None => Ok(None),
         }
     }
 }
@@ -264,9 +266,9 @@ where
 {
     let block_size = outboard.tree().block_size;
     let buffer = BytesMut::with_capacity(block_size.bytes());
-    let mut iter = DecodeResponseIter::new(outboard.root(), block_size, encoded, ranges, buffer);
-    let mut current = target.seek(SeekFrom::Current(0))?;
-    while let Some(item) = iter.next() {
+    let iter = DecodeResponseIter::new(outboard.root(), block_size, encoded, ranges, buffer);
+    let mut current = target.stream_position()?;
+    for item in iter {
         match item? {
             DecodeResponseItem::Header { size } => {
                 outboard.set_size(size)?;
@@ -284,6 +286,30 @@ where
                 current += data.len() as u64;
             }
         }
+    }
+    Ok(())
+}
+
+/// Write ranges from memory to disk
+///
+/// This is useful for writing changes to outboards.
+/// Note that it is up to you to call flush.
+pub fn write_ranges(
+    from: impl AsRef<[u8]>,
+    mut to: impl Write + Seek,
+    ranges: &RangeSetRef<u64>,
+) -> io::Result<()> {
+    let from = from.as_ref();
+    let end = from.len() as u64;
+    for range in ranges.iter() {
+        let range = match range {
+            RangeSetRange::RangeFrom(x) => *x.start..end,
+            RangeSetRange::Range(x) => *x.start..*x.end,
+        };
+        let start = usize::try_from(range.start).unwrap();
+        let end = usize::try_from(range.end).unwrap();
+        to.seek(SeekFrom::Start(range.start))?;
+        to.write_all(&from[start..end])?;
     }
     Ok(())
 }
@@ -401,7 +427,80 @@ fn read_range<'a>(
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
     from.seek(std::io::SeekFrom::Start(range.start.0))?;
-    let mut buf = &mut buf[..len];
-    from.read_exact(&mut buf)?;
+    let buf = &mut buf[..len];
+    from.read_exact(buf)?;
     Ok(buf)
+}
+
+/// Given an outboard and a file, return all valid ranges
+pub fn valid_file_ranges<O, R>(outboard: &O, reader: R) -> io::Result<RangeSet2<ChunkNum>>
+where
+    O: Outboard,
+    R: Read + Seek,
+{
+    struct RecursiveValidator<'a, O: Outboard, R: Read + Seek> {
+        tree: BaoTree,
+        valid_nodes: TreeNode,
+        res: RangeSet2<ChunkNum>,
+        outboard: &'a O,
+        reader: R,
+        buffer: Vec<u8>,
+    }
+
+    impl<'a, O: Outboard, R: Read + Seek> RecursiveValidator<'a, O, R> {
+        fn validate_rec(
+            &mut self,
+            parent_hash: &blake3::Hash,
+            node: TreeNode,
+            is_root: bool,
+        ) -> io::Result<()> {
+            if let Some((l_hash, r_hash)) = self.outboard.load(node)? {
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                if &actual != parent_hash {
+                    // we got a validation error. Simply continue without adding the range
+                    return Ok(());
+                }
+                if let Some(leaf) = node.as_leaf() {
+                    let (s, m, e) = self.tree.leaf_byte_ranges3(leaf);
+                    let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
+                    let actual = hash_block(s.chunks(), l_data, false);
+                    if actual == l_hash {
+                        self.res |= RangeSet2::from(s.chunks()..m.chunks());
+                    }
+
+                    let r_data = read_range(&mut self.reader, m..e, &mut self.buffer)?;
+                    let actual = hash_block(m.chunks(), r_data, false);
+                    if actual == r_hash {
+                        self.res |= RangeSet2::from(m.chunks()..e.chunks());
+                    }
+                } else {
+                    // recurse
+                    let left = node.left_child().unwrap();
+                    self.validate_rec(&l_hash, left, false)?;
+                    let right = node.right_descendant(self.valid_nodes).unwrap();
+                    self.validate_rec(&r_hash, right, false)?;
+                }
+            } else if let Some(leaf) = node.as_leaf() {
+                let (s, m, _) = self.tree.leaf_byte_ranges3(leaf);
+                let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
+                let actual = hash_block(s.chunks(), l_data, is_root);
+                if actual == *parent_hash {
+                    self.res |= RangeSet2::from(s.chunks()..m.chunks());
+                }
+            };
+            Ok(())
+        }
+    }
+    let tree = outboard.tree();
+    let root_hash = outboard.root();
+    let mut validator = RecursiveValidator {
+        tree,
+        valid_nodes: tree.filled_size(),
+        res: RangeSet2::empty(),
+        outboard,
+        reader,
+        buffer: vec![0; tree.block_size.bytes()],
+    };
+    validator.validate_rec(&root_hash, tree.root(), true)?;
+    Ok(validator.res)
 }
