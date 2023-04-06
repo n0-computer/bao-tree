@@ -89,7 +89,7 @@ fn encode_ranges_2(
 ) -> Vec<u8> {
     let size = ByteNum(data.len() as u64);
     match canonicalize_range(ranges, size.chunks()) {
-        Ok(ranges) => encode_ranges_impl(data, outboard, &ranges, block_size),
+        Ok(ranges) => encode_ranges_impl(data, outboard, ranges, block_size),
         Err(range) => {
             let ranges = RangeSet2::from(range);
             encode_ranges_impl(data, outboard, &ranges, block_size)
@@ -129,7 +129,7 @@ fn post_order_outboard_reference_2(data: &[u8]) -> PostOrderMemOutboard {
     let mut outboard = Vec::new();
     let cursor = std::io::Cursor::new(&mut outboard);
     let mut encoder = abao::encode::Encoder::new_outboard(cursor);
-    encoder.write_all(&data).unwrap();
+    encoder.write_all(data).unwrap();
     // requires non standard fn finalize_post_order
     let hash = encoder.finalize_post_order().unwrap();
     // remove the length suffix
@@ -146,7 +146,7 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let mut outboard = Vec::new();
     let cursor = Cursor::new(&mut outboard);
     let mut encoder = bao::encode::Encoder::new_outboard(cursor);
-    encoder.write_all(&data).unwrap();
+    encoder.write_all(data).unwrap();
     let hash = encoder.finalize().unwrap();
     let pre = PreOrderMemOutboard::new(hash, BlockSize::DEFAULT, outboard, false);
     pre.unwrap().flip()
@@ -622,7 +622,7 @@ pub fn decode_ranges_into_chunks<'a>(
     ranges: &'a RangeSetRef<ChunkNum>,
     scratch: BytesMut,
 ) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
-    let iter = DecodeResponseIter::new(root, block_size, encoded, &ranges, scratch);
+    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges, scratch);
     iter.filter_map(|item| match item {
         Ok(item) => {
             if let DecodeResponseItem::Leaf { offset, data } = item {
@@ -754,7 +754,7 @@ proptest! {
 
     #[test]
     fn flip(len in 0usize..32768) {
-        let data = make_test_data(len as usize);
+        let data = make_test_data(len);
         let post1 = post_order_outboard_reference(&data);
         let post2 = post_order_outboard_reference_2(&data);
         prop_assert_eq!(&post1, &post2);
@@ -840,7 +840,7 @@ proptest! {
     fn partial_iterator_reference_comparison((len, start, size) in size_and_slice_overlapping()) {
         let tree = BaoTree::new(len, BlockSize::DEFAULT);
         let chunk_range = start .. start + size;
-        let rs = RangeSet2::from(chunk_range.clone());
+        let rs = RangeSet2::from(chunk_range);
         let iter1 = iterate_part_preorder_reference(&tree, &rs, 0);
         let iter2 = tree.ranges_pre_order_nodes_iter(&rs, 0).collect::<Vec<_>>();
         prop_assert_eq!(&iter1, &iter2);
@@ -854,7 +854,7 @@ proptest! {
     #[test]
     fn validate_outboard_test(size in 0usize..32768, rand in any::<usize>()) {
         let data = make_test_data(size);
-        let mut outboard = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
+        let mut outboard = BaoTree::outboard_post_order_mem(data, BlockSize::DEFAULT);
         let (expected, actual) = validate_outboard_impl(&outboard);
         prop_assert_eq!(expected, actual);
         if !outboard.data.is_empty() {
@@ -864,7 +864,7 @@ proptest! {
             let bit = rand % outboard.data.len() * 8;
             let byte = bit / 8;
             let bit = bit % 8;
-            outboard.data[byte as usize] ^= 1 << bit;
+            outboard.data[byte] ^= 1 << bit;
             // Check that at least one range is invalid
             let (expected, actual) = validate_outboard_impl(&outboard);
             prop_assert_ne!(expected, actual);
