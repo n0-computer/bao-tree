@@ -1,7 +1,7 @@
 //! Async (tokio) IO
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
-use futures::{ready, stream::FusedStream, Future, Stream, StreamExt};
+use futures::{ready, stream::FusedStream, Stream, StreamExt};
 use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
