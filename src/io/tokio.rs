@@ -229,6 +229,8 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<DecodeResponseItem, DecodeError>>> {
+        // TODO: fix this clippy lint
+        #[allow(clippy::never_loop)]
         Poll::Ready(Some(loop {
             // fill the buffer if needed
             ready!(self.poll_fill_buffer(cx))?;
@@ -479,6 +481,8 @@ impl<'a, R: AsyncRead + Unpin> AsyncResponseDecoderRef<'a, R> {
         }
     }
 
+    // TODO: fix this clippy lint
+    #[allow(clippy::unused_io_amount)]
     pub async fn read_tree(&mut self) -> io::Result<&BaoTree> {
         self.read(&mut []).await?;
         Ok(self.tree().unwrap())
@@ -618,6 +622,8 @@ impl<R: AsyncRead + Unpin, Q: AsRef<RangeSetRef<ChunkNum>> + 'static> AsyncRespo
     /// Read the tree geometry from the encoded stream.
     ///
     /// This is useful for determining the size of the decoded stream.
+    // TODO: fix this clippy lint
+    #[allow(clippy::unused_io_amount)]
     pub async fn read_tree(&mut self) -> io::Result<BaoTree> {
         self.read(&mut []).await?;
         Ok(self.0.with_inner(|x| *x.as_ref().unwrap().tree().unwrap()))
@@ -905,8 +911,8 @@ async fn read_range<'a>(
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
     from.seek(SeekFrom::Start(range.start.0)).await?;
-    let mut buf = &mut buf[..len];
-    from.read_exact(&mut buf).await?;
+    let buf = &mut buf[..len];
+    from.read_exact(buf).await?;
     Ok(buf)
 }
 
