@@ -1,7 +1,7 @@
 //! Async (tokio) IO
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
-use futures::{ready, stream::FusedStream, Stream, StreamExt};
+use futures::{ready, stream::FusedStream, Future, Stream, StreamExt};
 use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
@@ -55,6 +55,41 @@ impl DecodeResponseStreamState<'_> {
     }
 }
 
+// /// A future to read the 8 byte bao stream header
+// #[derive(Debug)]
+// pub struct ReadHeader<R> {
+//     encoded: Option<R>,
+//     buf: [u8; 8],
+//     curr: usize,
+// }
+
+// impl<R: AsyncRead + Unpin> Future for ReadHeader<R> {
+//     type Output = io::Result<(u64, R)>;
+
+//     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+//         if let Some(mut encoded) = self.encoded.take() {
+//             while self.curr < 8 {
+//                 let curr = self.curr;
+//                 let mut buf = ReadBuf::new(&mut self.buf[curr..]);
+//                 match AsyncRead::poll_read(Pin::new(&mut encoded), cx, &mut buf) {
+//                     Poll::Ready(Ok(())) => {
+//                         self.curr += buf.filled().len();
+//                     }
+//                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+//                     Poll::Pending => {
+//                         self.encoded = Some(encoded);
+//                         return Poll::Pending;
+//                     }
+//                 }
+//             }
+//             let size = u64::from_le_bytes(self.buf);
+//             Poll::Ready(Ok((size, encoded)))
+//         } else {
+//             Poll::Pending
+//         }
+//     }
+// }
+
 /// A stream of decoded byte slices, with the byte number of the first byte in the slice
 ///
 /// This is useful if you want to process a query response and place the data in a file.
@@ -81,7 +116,28 @@ impl<'a, R: AsyncRead + Unpin> FusedStream for DecodeResponseStreamRef<'a, R> {
     }
 }
 
-impl<'a, R> DecodeResponseStreamRef<'a, R> {
+impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
+    /// Create a new stream from a query and a reader from which we have already read the size header
+    pub fn new_with_tree(
+        hash: blake3::Hash,
+        tree: BaoTree,
+        query: &'a RangeSetRef<ChunkNum>,
+        encoded: R,
+    ) -> Self {
+        let mut stack = SmallVec::new();
+        stack.push(hash);
+        let iter = Box::new(PreOrderChunkIterRef::new(tree, query, 0));
+        let mut res = Self {
+            state: DecodeResponseStreamState::Taken,
+            stack,
+            encoded,
+            buf: BytesMut::with_capacity(tree.block_size.bytes()),
+            curr: 0,
+        };
+        res.set_state(iter);
+        res
+    }
+
     pub fn new(
         hash: blake3::Hash,
         ranges: &'a RangeSetRef<ChunkNum>,
