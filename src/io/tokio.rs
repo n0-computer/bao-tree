@@ -1,7 +1,7 @@
 //! Async (tokio) IO
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
-use futures::{ready, stream::FusedStream, Stream, StreamExt};
+use futures::{ready, stream::FusedStream, Future, Stream, StreamExt};
 use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
@@ -23,6 +23,37 @@ use crate::{
     outboard::{Outboard, OutboardMut},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
 };
+
+pub trait AsyncBaoWriter: AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static {}
+
+impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static> AsyncBaoWriter for W {}
+
+pub trait AsyncBaoReader {
+    type AsyncReadResult<'a>: Future<Output = io::Result<usize>> + Unpin + Send + 'a
+    where
+        Self: 'a;
+    type AsyncLenResult<'a>: Future<Output = io::Result<u64>> + Unpin + Send + 'a
+    where
+        Self: 'a;
+    fn read<'a>(&'a mut self, offset: u64, buf: &'a mut [u8]) -> Self::AsyncReadResult<'a>;
+    fn len<'a>(&'a mut self) -> Self::AsyncLenResult<'a>;
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin + Send + Sync + 'static> AsyncBaoReader for R {
+    type AsyncReadResult<'a> = Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+    type AsyncLenResult<'a> = Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'a>>;
+
+    fn read<'a>(&'a mut self, offset: u64, buf: &'a mut [u8]) -> Self::AsyncReadResult<'a> {
+        Box::pin(async move {
+            self.seek(SeekFrom::Start(offset)).await?;
+            self.read_exact(buf).await
+        })
+    }
+
+    fn len<'a>(&'a mut self) -> Self::AsyncLenResult<'a> {
+        Box::pin(async move { self.seek(SeekFrom::End(0)).await })
+    }
+}
 
 use ouroboros::self_referencing;
 
@@ -662,13 +693,13 @@ pub async fn encode_ranges<D, O, W>(
     encoded: W,
 ) -> result::Result<(), EncodeError>
 where
-    D: AsyncRead + AsyncSeek + Unpin,
+    D: AsyncBaoReader,
     O: Outboard,
     W: AsyncWrite + Unpin,
 {
     let mut data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.seek(SeekFrom::End(0)).await?);
+    let file_len = ByteNum(data.len().await?);
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -711,7 +742,7 @@ pub async fn encode_ranges_validated<D, O, W>(
     encoded: W,
 ) -> result::Result<(), EncodeError>
 where
-    D: AsyncRead + AsyncSeek + Unpin,
+    D: AsyncBaoReader,
     O: Outboard,
     W: AsyncWrite + Unpin,
 {
@@ -719,7 +750,7 @@ where
     stack.push(outboard.root());
     let mut data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.seek(SeekFrom::End(0)).await?);
+    let file_len = ByteNum(data.len().await?);
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -901,14 +932,13 @@ where
 
 /// seeks read the bytes for the range from the source
 async fn read_range<'a>(
-    from: &mut (impl AsyncRead + AsyncSeek + Unpin),
+    from: &mut (impl AsyncBaoReader),
     range: Range<ByteNum>,
     buf: &'a mut [u8],
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
-    from.seek(SeekFrom::Start(range.start.0)).await?;
     let buf = &mut buf[..len];
-    from.read_exact(buf).await?;
+    from.read(range.start.0, buf).await?;
     Ok(buf)
 }
 
