@@ -1,7 +1,7 @@
 //! Async (tokio) IO
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
-use futures::{ready, stream::FusedStream, Stream, StreamExt};
+use futures::{ready, stream::FusedStream, Future, Stream, StreamExt};
 use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
@@ -23,6 +23,73 @@ use crate::{
     outboard::{Outboard, OutboardMut},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
 };
+
+/// A writer that can write a slice at a specified offset
+///
+/// Will extend the file if the offset is past the end of the file, just like posix
+/// and windows files do.
+///
+/// For external storage such as S3/R2, this might be implemented in terms of async http requests.
+///
+/// This is similar to the io interface of sqlite.
+/// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
+pub trait AsyncSliceWriter: Unpin + Send + Sync + 'static {
+    type AsyncWriteResult<'a>: Future<Output = io::Result<usize>> + Unpin + Send + 'a
+    where
+        Self: 'a;
+
+    fn write<'a>(&'a mut self, offset: u64, buf: &'a [u8]) -> Self::AsyncWriteResult<'a>;
+}
+
+impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceWriter for W {
+    type AsyncWriteResult<'a> = Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+
+    fn write<'a>(&'a mut self, offset: u64, buf: &'a [u8]) -> Self::AsyncWriteResult<'a> {
+        Box::pin(async move {
+            self.seek(SeekFrom::Start(offset)).await?;
+            self.write_all(buf).await?;
+            Ok(buf.len())
+        })
+    }
+}
+
+/// A reader that can read a slice at a specified offset
+///
+/// For a file, this will be implemented by seeking to the offset and then reading the data.
+/// For other types of storage, seeking is not necessary. E.g. a Bytes or a memory mapped
+/// slice already allows random access.
+///
+/// For external storage such as S3/R2, this might be implemented in terms of async http requests.
+///
+/// This is similar to the io interface of sqlite.
+/// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
+#[allow(clippy::len_without_is_empty)]
+pub trait AsyncSliceReader {
+    type AsyncReadResult<'a>: Future<Output = io::Result<usize>> + Unpin + Send + 'a
+    where
+        Self: 'a;
+    type AsyncLenResult<'a>: Future<Output = io::Result<u64>> + Unpin + Send + 'a
+    where
+        Self: 'a;
+    fn read<'a>(&'a mut self, offset: u64, buf: &'a mut [u8]) -> Self::AsyncReadResult<'a>;
+    fn len(&mut self) -> Self::AsyncLenResult<'_>;
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceReader for R {
+    type AsyncReadResult<'a> = Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+    type AsyncLenResult<'a> = Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'a>>;
+
+    fn read<'a>(&'a mut self, offset: u64, buf: &'a mut [u8]) -> Self::AsyncReadResult<'a> {
+        Box::pin(async move {
+            self.seek(SeekFrom::Start(offset)).await?;
+            self.read_exact(buf).await
+        })
+    }
+
+    fn len(&mut self) -> Self::AsyncLenResult<'_> {
+        Box::pin(async move { self.seek(SeekFrom::End(0)).await })
+    }
+}
 
 use ouroboros::self_referencing;
 
@@ -662,13 +729,13 @@ pub async fn encode_ranges<D, O, W>(
     encoded: W,
 ) -> result::Result<(), EncodeError>
 where
-    D: AsyncRead + AsyncSeek + Unpin,
+    D: AsyncSliceReader,
     O: Outboard,
     W: AsyncWrite + Unpin,
 {
     let mut data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.seek(SeekFrom::End(0)).await?);
+    let file_len = ByteNum(data.len().await?);
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -711,7 +778,7 @@ pub async fn encode_ranges_validated<D, O, W>(
     encoded: W,
 ) -> result::Result<(), EncodeError>
 where
-    D: AsyncRead + AsyncSeek + Unpin,
+    D: AsyncSliceReader,
     O: Outboard,
     W: AsyncWrite + Unpin,
 {
@@ -719,7 +786,7 @@ where
     stack.push(outboard.root());
     let mut data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.seek(SeekFrom::End(0)).await?);
+    let file_len = ByteNum(data.len().await?);
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -787,11 +854,10 @@ pub async fn decode_response_into<R, O, W>(
 where
     O: OutboardMut,
     R: AsyncRead + Unpin,
-    W: AsyncWrite + AsyncSeek + Unpin,
+    W: AsyncSliceWriter,
 {
     let mut stream =
         DecodeResponseStreamRef::new(outboard.root(), ranges, outboard.tree().block_size, encoded);
-    let mut current = target.seek(SeekFrom::Current(0)).await?;
     while let Some(item) = stream.next().await {
         match item? {
             DecodeResponseItem::Header { size } => {
@@ -801,13 +867,7 @@ where
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf { offset, data } => {
-                // only seek if we need to (only when the response contains gaps)
-                if offset.0 != current {
-                    target.seek(SeekFrom::Start(offset.0)).await?;
-                }
-                target.write_all(&data).await?;
-                // update current
-                current += data.len() as u64;
+                target.write(offset.0, &data).await?;
             }
         }
     }
@@ -820,7 +880,7 @@ where
 /// Note that it is up to you to call flush.
 pub async fn write_ranges(
     from: impl AsRef<[u8]>,
-    mut to: impl AsyncWrite + AsyncSeek + Unpin,
+    mut to: impl AsyncSliceWriter,
     ranges: &RangeSetRef<u64>,
 ) -> io::Result<()> {
     let from = from.as_ref();
@@ -832,8 +892,7 @@ pub async fn write_ranges(
         };
         let start = usize::try_from(range.start).unwrap();
         let end = usize::try_from(range.end).unwrap();
-        to.seek(SeekFrom::Start(range.start)).await?;
-        to.write_all(&from[start..end]).await?;
+        to.write(range.start, &from[start..end]).await?;
     }
     Ok(())
 }
@@ -901,14 +960,13 @@ where
 
 /// seeks read the bytes for the range from the source
 async fn read_range<'a>(
-    from: &mut (impl AsyncRead + AsyncSeek + Unpin),
+    from: &mut impl AsyncSliceReader,
     range: Range<ByteNum>,
     buf: &'a mut [u8],
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
-    from.seek(SeekFrom::Start(range.start.0)).await?;
     let buf = &mut buf[..len];
-    from.read_exact(buf).await?;
+    from.read(range.start.0, buf).await?;
     Ok(buf)
 }
 

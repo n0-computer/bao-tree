@@ -18,6 +18,49 @@ use crate::{
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 
+/// A reader that can read a slice at a specified offset
+///
+/// For a file, this will be implemented by seeking to the offset and then reading the data.
+/// For other types of storage, seeking is not necessary. E.g. a Bytes or a memory mapped
+/// slice already allows random access.
+///
+/// This is similar to the io interface of sqlite.
+/// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
+#[allow(clippy::len_without_is_empty)]
+pub trait SliceReader {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+    fn len(&mut self) -> io::Result<u64>;
+}
+
+impl<R: Read + Seek> SliceReader for R {
+    fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.seek(SeekFrom::Start(offset))?;
+        self.read_exact(buf)
+    }
+
+    fn len(&mut self) -> io::Result<u64> {
+        self.seek(SeekFrom::End(0))
+    }
+}
+
+/// A writer that can write a slice at a specified offset
+///
+/// Will extend the file if the offset is past the end of the file, just like posix
+/// and windows files do.
+///
+/// This is similar to the io interface of sqlite.
+/// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
+pub trait SliceWriter {
+    fn write(&mut self, offset: u64, src: &[u8]) -> io::Result<()>;
+}
+
+impl<W: Write + Seek> SliceWriter for W {
+    fn write(&mut self, offset: u64, src: &[u8]) -> io::Result<()> {
+        self.seek(SeekFrom::Start(offset))?;
+        self.write_all(src)
+    }
+}
+
 use super::DecodeResponseItem;
 
 // When this enum is used it is in the Header variant for the first 8 bytes, then stays in
@@ -146,7 +189,7 @@ impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
 /// Encode ranges relevant to a query from a reader and outboard to a writer
 ///
 /// This will not validate on writing, so data corruption will be detected on reading
-pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
+pub fn encode_ranges<D: SliceReader, O: Outboard, W: Write>(
     data: D,
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
@@ -154,7 +197,7 @@ pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
 ) -> result::Result<(), EncodeError> {
     let mut data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
+    let file_len = ByteNum(data.len()?);
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -177,8 +220,9 @@ pub fn encode_ranges<D: Read + Seek, O: Outboard, W: Write>(
                 start_chunk, size, ..
             } => {
                 let start = start_chunk.to_bytes();
-                let data = read_range(&mut data, start..start + (size as u64), &mut buffer)?;
-                encoded.write_all(data)?;
+                let buf = &mut buffer[..size];
+                data.read(start.0, buf)?;
+                encoded.write_all(buf)?;
             }
         }
     }
@@ -262,12 +306,11 @@ pub async fn decode_response_into<R, O, W>(
 where
     O: OutboardMut,
     R: Read,
-    W: Write + Seek,
+    W: SliceWriter,
 {
     let block_size = outboard.tree().block_size;
     let buffer = BytesMut::with_capacity(block_size.bytes());
     let iter = DecodeResponseIter::new(outboard.root(), block_size, encoded, ranges, buffer);
-    let mut current = target.stream_position()?;
     for item in iter {
         match item? {
             DecodeResponseItem::Header { size } => {
@@ -277,13 +320,7 @@ where
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf { offset, data } => {
-                // only seek if we need to (only when the response contains gaps)
-                if offset.0 != current {
-                    target.seek(SeekFrom::Start(offset.0))?;
-                }
-                target.write_all(&data)?;
-                // update current
-                current += data.len() as u64;
+                target.write(offset.0, &data)?;
             }
         }
     }
