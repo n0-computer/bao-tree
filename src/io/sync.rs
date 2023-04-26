@@ -18,27 +18,43 @@ use crate::{
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 
-pub trait BaoReader {
+/// A reader that can read a slice at a specified offset
+///
+/// For a file, this will be implemented by seeking to the offset and then reading the data.
+/// For other types of storage, seeking is not necessary. E.g. a Bytes or a memory mapped
+/// slice already allows random access.
+///
+/// This is similar to the io interface of sqlite.
+/// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
+#[allow(clippy::len_without_is_empty)]
+pub trait SliceReader {
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
     fn len(&mut self) -> io::Result<u64>;
 }
 
-impl<R: Read + Seek> BaoReader for R {
+impl<R: Read + Seek> SliceReader for R {
     fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         self.seek(SeekFrom::Start(offset))?;
         self.read_exact(buf)
     }
 
     fn len(&mut self) -> io::Result<u64> {
-        Ok(self.seek(SeekFrom::End(0))?)
+        self.seek(SeekFrom::End(0))
     }
 }
 
-pub trait BaoWriter {
+/// A writer that can write a slice at a specified offset
+///
+/// Will extend the file if the offset is past the end of the file, just like posix
+/// and windows files do.
+///
+/// This is similar to the io interface of sqlite.
+/// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
+pub trait SliceWriter {
     fn write(&mut self, offset: u64, src: &[u8]) -> io::Result<()>;
 }
 
-impl<W: Write + Seek> BaoWriter for W {
+impl<W: Write + Seek> SliceWriter for W {
     fn write(&mut self, offset: u64, src: &[u8]) -> io::Result<()> {
         self.seek(SeekFrom::Start(offset))?;
         self.write_all(src)
@@ -173,7 +189,7 @@ impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
 /// Encode ranges relevant to a query from a reader and outboard to a writer
 ///
 /// This will not validate on writing, so data corruption will be detected on reading
-pub fn encode_ranges<D: BaoReader, O: Outboard, W: Write>(
+pub fn encode_ranges<D: SliceReader, O: Outboard, W: Write>(
     data: D,
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
@@ -290,7 +306,7 @@ pub async fn decode_response_into<R, O, W>(
 where
     O: OutboardMut,
     R: Read,
-    W: BaoWriter,
+    W: SliceWriter,
 {
     let block_size = outboard.tree().block_size;
     let buffer = BytesMut::with_capacity(block_size.bytes());
