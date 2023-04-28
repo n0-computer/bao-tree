@@ -11,7 +11,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::AsyncReadExt;
 
-use crate::io::DecodeResponseItem;
+use crate::io::{DecodeResponseItem, Leaf};
 
 use super::{
     canonicalize_range,
@@ -221,7 +221,7 @@ async fn bao_tree_decode_slice_stream_impl(data: Vec<u8>, range: Range<u64>) {
     let mut ec = Cursor::new(encoded);
     let mut stream = DecodeResponseStreamRef::new(root, &ranges, BlockSize::DEFAULT, &mut ec);
     while let Some(item) = stream.next().await {
-        if let DecodeResponseItem::Leaf { offset, data } = item.unwrap() {
+        if let DecodeResponseItem::Leaf(Leaf { offset, data }) = item.unwrap() {
             let pos = offset.to_usize();
             assert_eq!(expected[pos..pos + data.len()], *data);
         }
@@ -625,7 +625,7 @@ pub fn decode_ranges_into_chunks<'a>(
     let iter = DecodeResponseIter::new(root, block_size, encoded, ranges, scratch);
     iter.filter_map(|item| match item {
         Ok(item) => {
-            if let DecodeResponseItem::Leaf { offset, data } = item {
+            if let DecodeResponseItem::Leaf(Leaf { offset, data }) = item {
                 Some(Ok((offset, data.to_vec())))
             } else {
                 None

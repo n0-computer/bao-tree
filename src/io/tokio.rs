@@ -18,7 +18,10 @@ use tokio::io::{
 
 use crate::{
     hash_block,
-    io::error::{DecodeError, EncodeError},
+    io::{
+        error::{DecodeError, EncodeError},
+        Leaf, Parent,
+    },
     iter::{BaoChunk, PreOrderChunkIterRef},
     outboard::{Outboard, OutboardMut},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
@@ -93,7 +96,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceReader 
 
 use ouroboros::self_referencing;
 
-use super::DecodeResponseItem;
+use super::{DecodeResponseItem, Header};
 
 #[derive(Debug)]
 enum DecodeResponseStreamState<'a> {
@@ -308,7 +311,7 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                     let tree = BaoTree::new(size, block_size);
                     let iter = Box::new(tree.ranges_pre_order_chunks_iter_ref(ranges, 0));
                     self.set_state(iter);
-                    break Ok(DecodeResponseItem::Header { size });
+                    break Ok(Header { size }.into());
                 }
                 DecodeResponseStreamState::Node { iter, curr } => {
                     // set the state to the next node
@@ -347,7 +350,7 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                     if parent_hash != actual {
                         break Err(DecodeError::ParentHashMismatch(node));
                     }
-                    break Ok(DecodeResponseItem::Parent { node, pair });
+                    break Ok(Parent { node, pair }.into());
                 }
                 BaoChunk::Leaf {
                     size,
@@ -360,10 +363,11 @@ impl<'a, R: AsyncRead + Unpin> DecodeResponseStreamRef<'a, R> {
                     if leaf_hash != actual {
                         break Err(DecodeError::LeafHashMismatch(start_chunk));
                     }
-                    break Ok(DecodeResponseItem::Leaf {
+                    break Ok(Leaf {
                         offset: start_chunk.to_bytes(),
                         data: buf,
-                    });
+                    }
+                    .into());
                 }
             }
         }))
@@ -860,13 +864,13 @@ where
         DecodeResponseStreamRef::new(outboard.root(), ranges, outboard.tree().block_size, encoded);
     while let Some(item) = stream.next().await {
         match item? {
-            DecodeResponseItem::Header { size } => {
+            DecodeResponseItem::Header(Header { size }) => {
                 outboard.set_size(size)?;
             }
-            DecodeResponseItem::Parent { node, pair } => {
+            DecodeResponseItem::Parent(Parent { node, pair }) => {
                 outboard.save(node, &pair)?;
             }
-            DecodeResponseItem::Leaf { offset, data } => {
+            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
                 target.write(offset.0, &data).await?;
             }
         }

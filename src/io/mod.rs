@@ -16,12 +16,44 @@ pub enum DecodeResponseItem {
     ///
     /// Actually this is just how big the remote side *claims* the overall size is.
     /// In an adversarial setting, this could be wrong.
-    Header { size: ByteNum },
+    Header(Header),
     /// a parent node, to update the outboard
-    Parent {
-        node: TreeNode,
-        pair: (blake3::Hash, blake3::Hash),
-    },
+    Parent(Parent),
     /// a leaf node, to write to the file
-    Leaf { offset: ByteNum, data: Bytes },
+    Leaf(Leaf),
+}
+
+impl From<Header> for DecodeResponseItem {
+    fn from(h: Header) -> Self {
+        Self::Header(h)
+    }
+}
+
+impl From<Parent> for DecodeResponseItem {
+    fn from(p: Parent) -> Self {
+        Self::Parent(p)
+    }
+}
+
+impl From<Leaf> for DecodeResponseItem {
+    fn from(l: Leaf) -> Self {
+        Self::Leaf(l)
+    }
+}
+
+#[derive(Debug)]
+pub struct Header {
+    pub size: ByteNum,
+}
+
+#[derive(Debug)]
+pub struct Parent {
+    pub node: TreeNode,
+    pub pair: (blake3::Hash, blake3::Hash),
+}
+
+#[derive(Debug)]
+pub struct Leaf {
+    pub offset: ByteNum,
+    pub data: Bytes,
 }

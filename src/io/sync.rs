@@ -61,7 +61,7 @@ impl<W: Write + Seek> SliceWriter for W {
     }
 }
 
-use super::DecodeResponseItem;
+use super::{DecodeResponseItem, Header, Leaf, Parent};
 
 // When this enum is used it is in the Header variant for the first 8 bytes, then stays in
 // the Content state for the remainder.  Since the Content is the largest part that this
@@ -132,7 +132,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 self.inner = Position::Content {
                     iter: tree.ranges_pre_order_chunks_iter_ref(range, 0),
                 };
-                return Ok(Some(DecodeResponseItem::Header { size }));
+                return Ok(Some(Header { size }.into()));
             }
         };
         match inner.next() {
@@ -154,7 +154,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 if left {
                     self.stack.push(l_hash);
                 }
-                Ok(Some(DecodeResponseItem::Parent { node, pair }))
+                Ok(Some(Parent { node, pair }.into()))
             }
             Some(BaoChunk::Leaf {
                 size,
@@ -168,10 +168,13 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 if leaf_hash != actual {
                     return Err(DecodeError::LeafHashMismatch(start_chunk));
                 }
-                Ok(Some(DecodeResponseItem::Leaf {
-                    offset: start_chunk.to_bytes(),
-                    data: self.buf.split().freeze(),
-                }))
+                Ok(Some(
+                    Leaf {
+                        offset: start_chunk.to_bytes(),
+                        data: self.buf.split().freeze(),
+                    }
+                    .into(),
+                ))
             }
             None => Ok(None),
         }
@@ -313,13 +316,13 @@ where
     let iter = DecodeResponseIter::new(outboard.root(), block_size, encoded, ranges, buffer);
     for item in iter {
         match item? {
-            DecodeResponseItem::Header { size } => {
+            DecodeResponseItem::Header(Header { size }) => {
                 outboard.set_size(size)?;
             }
-            DecodeResponseItem::Parent { node, pair } => {
+            DecodeResponseItem::Parent(Parent { node, pair }) => {
                 outboard.save(node, &pair)?;
             }
-            DecodeResponseItem::Leaf { offset, data } => {
+            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
                 target.write(offset.0, &data)?;
             }
         }
