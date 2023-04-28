@@ -1,7 +1,7 @@
 //! Async (tokio) IO
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
-use futures::{ready, stream::FusedStream, Future, Stream, StreamExt};
+use futures::{ready, stream::FusedStream, Future, FutureExt, Stream, StreamExt};
 use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
@@ -36,23 +36,33 @@ use crate::{
 ///
 /// This is similar to the io interface of sqlite.
 /// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
-pub trait AsyncSliceWriter: Unpin + Send + Sync + 'static {
-    type AsyncWriteResult<'a>: Future<Output = io::Result<usize>> + Unpin + Send + 'a
+pub trait AsyncSliceWriter: Unpin + Send + Sync {
+    fn write<'a, 'r>(
+        &'a mut self,
+        offset: u64,
+        buf: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'r>>
     where
-        Self: 'a;
-
-    fn write<'a>(&'a mut self, offset: u64, buf: &'a [u8]) -> Self::AsyncWriteResult<'a>;
+        Self: 'r,
+        'a: 'r;
 }
 
-impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceWriter for W {
-    type AsyncWriteResult<'a> = Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
-
-    fn write<'a>(&'a mut self, offset: u64, buf: &'a [u8]) -> Self::AsyncWriteResult<'a> {
-        Box::pin(async move {
+impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync> AsyncSliceWriter for W {
+    fn write<'a, 'r>(
+        &'a mut self,
+        offset: u64,
+        buf: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'r>>
+    where
+        Self: 'r,
+        'a: 'r,
+    {
+        async move {
             self.seek(SeekFrom::Start(offset)).await?;
             self.write_all(buf).await?;
-            Ok(buf.len())
-        })
+            Ok(())
+        }
+        .boxed()
     }
 }
 
@@ -68,29 +78,46 @@ impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceWriter
 /// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
 #[allow(clippy::len_without_is_empty)]
 pub trait AsyncSliceReader {
-    type AsyncReadResult<'a>: Future<Output = io::Result<usize>> + Unpin + Send + 'a
+    fn read<'a, 'b, 'r>(
+        &'a mut self,
+        offset: u64,
+        buf: &'b mut [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'r>>
     where
-        Self: 'a;
-    type AsyncLenResult<'a>: Future<Output = io::Result<u64>> + Unpin + Send + 'a
+        Self: 'r,
+        'a: 'r,
+        'b: 'r;
+    fn len<'a, 'r>(&'a mut self) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'r>>
     where
-        Self: 'a;
-    fn read<'a>(&'a mut self, offset: u64, buf: &'a mut [u8]) -> Self::AsyncReadResult<'a>;
-    fn len(&mut self) -> Self::AsyncLenResult<'_>;
+        Self: 'r,
+        'a: 'r;
 }
 
-impl<R: AsyncRead + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceReader for R {
-    type AsyncReadResult<'a> = Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
-    type AsyncLenResult<'a> = Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'a>>;
-
-    fn read<'a>(&'a mut self, offset: u64, buf: &'a mut [u8]) -> Self::AsyncReadResult<'a> {
-        Box::pin(async move {
+impl<R: AsyncRead + AsyncSeek + Unpin + Send + Sync> AsyncSliceReader for R {
+    fn read<'a, 'b, 'r>(
+        &'a mut self,
+        offset: u64,
+        buf: &'b mut [u8],
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'r>>
+    where
+        Self: 'r,
+        'a: 'r,
+        'b: 'r,
+    {
+        async move {
             self.seek(SeekFrom::Start(offset)).await?;
-            self.read_exact(buf).await
-        })
+            self.read_exact(buf).await?;
+            Ok(())
+        }
+        .boxed()
     }
 
-    fn len(&mut self) -> Self::AsyncLenResult<'_> {
-        Box::pin(async move { self.seek(SeekFrom::End(0)).await })
+    fn len<'a, 'r>(&'a mut self) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'r>>
+    where
+        Self: 'r,
+        'a: 'r,
+    {
+        async move { self.seek(SeekFrom::End(0)).await }.boxed()
     }
 }
 
