@@ -1,13 +1,12 @@
 //! Async (tokio) IO
 use blake3::guts::parent_cv;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures::{ready, stream::FusedStream, Future, FutureExt, Stream, StreamExt};
 use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::{
     fmt,
     io::{self, SeekFrom},
-    ops::Range,
     pin::Pin,
     result,
     task::{Context, Poll},
@@ -37,29 +36,20 @@ use crate::{
 /// This is similar to the io interface of sqlite.
 /// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
 pub trait AsyncSliceWriter: Unpin + Send + Sync {
-    fn write<'a, 'r>(
-        &'a mut self,
-        offset: u64,
-        buf: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'r>>
+    type WriteFuture<'a>: Future<Output = io::Result<()>> + Send + 'a
     where
-        Self: 'r,
-        'a: 'r;
+        Self: 'a;
+
+    fn write_at(&mut self, offset: u64, data: Bytes) -> Self::WriteFuture<'_>;
 }
 
 impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync> AsyncSliceWriter for W {
-    fn write<'a, 'r>(
-        &'a mut self,
-        offset: u64,
-        buf: &'a [u8],
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'r>>
-    where
-        Self: 'r,
-        'a: 'r,
-    {
+    type WriteFuture<'a> = Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> where W: 'a;
+
+    fn write_at(&mut self, offset: u64, buf: Bytes) -> Self::WriteFuture<'_> {
         async move {
             self.seek(SeekFrom::Start(offset)).await?;
-            self.write_all(buf).await?;
+            self.write_all(&buf).await?;
             Ok(())
         }
         .boxed()
@@ -78,45 +68,29 @@ impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync> AsyncSliceWriter for W {
 /// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
 #[allow(clippy::len_without_is_empty)]
 pub trait AsyncSliceReader {
-    fn read<'a, 'b, 'r>(
-        &'a mut self,
-        offset: u64,
-        buf: &'b mut [u8],
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'r>>
+    type ReadFuture<'a>: Future<Output = io::Result<BytesMut>> + Send + 'a
     where
-        Self: 'r,
-        'a: 'r,
-        'b: 'r;
-    fn len<'a, 'r>(&'a mut self) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'r>>
+        Self: 'a;
+    type LenFuture<'a>: Future<Output = io::Result<u64>> + Send + 'a
     where
-        Self: 'r,
-        'a: 'r;
+        Self: 'a;
+    fn read_at(&mut self, offset: u64, buf: BytesMut) -> Self::ReadFuture<'_>;
+    fn len(&mut self) -> Self::LenFuture<'_>;
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin + Send + Sync> AsyncSliceReader for R {
-    fn read<'a, 'b, 'r>(
-        &'a mut self,
-        offset: u64,
-        buf: &'b mut [u8],
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'r>>
-    where
-        Self: 'r,
-        'a: 'r,
-        'b: 'r,
-    {
+    type ReadFuture<'a> = Pin<Box<dyn Future<Output = io::Result<BytesMut>> + Send + 'a>> where R: 'a;
+    type LenFuture<'a> = Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'a>> where R: 'a;
+    fn read_at(&mut self, offset: u64, mut buf: BytesMut) -> Self::ReadFuture<'_> {
         async move {
             self.seek(SeekFrom::Start(offset)).await?;
-            self.read_exact(buf).await?;
-            Ok(())
+            self.read_exact(&mut buf).await?;
+            Ok(buf)
         }
         .boxed()
     }
 
-    fn len<'a, 'r>(&'a mut self) -> Pin<Box<dyn Future<Output = io::Result<u64>> + Send + 'r>>
-    where
-        Self: 'r,
-        'a: 'r,
-    {
+    fn len(&mut self) -> Self::LenFuture<'_> {
         async move { self.seek(SeekFrom::End(0)).await }.boxed()
     }
 }
@@ -775,7 +749,7 @@ where
     if !range_ok(ranges, tree.chunks()) {
         return Err(EncodeError::InvalidQueryRange);
     }
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let mut buffer = BytesMut::with_capacity(tree.chunk_group_bytes().to_usize());
     // write header
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())
@@ -791,8 +765,9 @@ where
                 start_chunk, size, ..
             } => {
                 let start = start_chunk.to_bytes();
-                let data = read_range(&mut data, start..start + (size as u64), &mut buffer).await?;
-                encoded.write_all(data).await?;
+                buffer.resize(size, 0);
+                buffer = data.read_at(start.0, buffer).await?;
+                encoded.write_all(&buffer).await?;
             }
         }
     }
@@ -826,7 +801,7 @@ where
     if !range_ok(ranges, tree.chunks()) {
         return Err(EncodeError::InvalidQueryRange);
     }
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let mut buffer = BytesMut::with_capacity(tree.chunk_group_bytes().to_usize());
     // write header
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())
@@ -861,12 +836,13 @@ where
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
-                let data = read_range(&mut data, start..start + (size as u64), &mut buffer).await?;
-                let actual = hash_block(start_chunk, data, is_root);
+                buffer.resize(size, 0);
+                buffer = data.read_at(start.0, buffer).await?;
+                let actual = hash_block(start_chunk, &buffer, is_root);
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
-                encoded.write_all(data).await?;
+                encoded.write_all(&buffer).await?;
             }
         }
     }
@@ -898,7 +874,7 @@ where
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                target.write(offset.0, &data).await?;
+                target.write_at(offset.0, data).await?;
             }
         }
     }
@@ -910,11 +886,10 @@ where
 /// This is useful for writing changes to outboards.
 /// Note that it is up to you to call flush.
 pub async fn write_ranges(
-    from: impl AsRef<[u8]>,
+    from: Bytes,
     mut to: impl AsyncSliceWriter,
     ranges: &RangeSetRef<u64>,
 ) -> io::Result<()> {
-    let from = from.as_ref();
     let end = from.len() as u64;
     for range in ranges.iter() {
         let range = match range {
@@ -923,7 +898,7 @@ pub async fn write_ranges(
         };
         let start = usize::try_from(range.start).unwrap();
         let end = usize::try_from(range.end).unwrap();
-        to.write(range.start, &from[start..end]).await?;
+        to.write_at(range.start, from.slice(start..end)).await?;
     }
     Ok(())
 }
@@ -987,18 +962,6 @@ where
     debug_assert_eq!(stack.len(), 1);
     let hash = stack.pop().unwrap();
     Ok(hash)
-}
-
-/// seeks read the bytes for the range from the source
-async fn read_range<'a>(
-    from: &mut impl AsyncSliceReader,
-    range: Range<ByteNum>,
-    buf: &'a mut [u8],
-) -> std::io::Result<&'a [u8]> {
-    let len = (range.end - range.start).to_usize();
-    let buf = &mut buf[..len];
-    from.read(range.start.0, buf).await?;
-    Ok(buf)
 }
 
 fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
