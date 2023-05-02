@@ -3,6 +3,8 @@ use crate::{ByteNum, TreeNode};
 use bytes::Bytes;
 
 pub mod error;
+#[cfg(feature = "tokio_fsm")]
+pub mod fsm;
 pub mod sync;
 #[cfg(feature = "tokio_io")]
 pub mod tokio;
@@ -56,4 +58,10 @@ pub struct Parent {
 pub struct Leaf {
     pub offset: ByteNum,
     pub data: Bytes,
+}
+
+fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
+    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
+    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
+    (l_hash, r_hash)
 }

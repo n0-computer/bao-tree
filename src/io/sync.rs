@@ -28,12 +28,12 @@ use crate::{
 /// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
 #[allow(clippy::len_without_is_empty)]
 pub trait SliceReader {
-    fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
     fn len(&mut self) -> io::Result<u64>;
 }
 
 impl<R: Read + Seek> SliceReader for R {
-    fn read(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         self.seek(SeekFrom::Start(offset))?;
         self.read_exact(buf)
     }
@@ -51,11 +51,11 @@ impl<R: Read + Seek> SliceReader for R {
 /// This is similar to the io interface of sqlite.
 /// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
 pub trait SliceWriter {
-    fn write(&mut self, offset: u64, src: &[u8]) -> io::Result<()>;
+    fn write_at(&mut self, offset: u64, src: &[u8]) -> io::Result<()>;
 }
 
 impl<W: Write + Seek> SliceWriter for W {
-    fn write(&mut self, offset: u64, src: &[u8]) -> io::Result<()> {
+    fn write_at(&mut self, offset: u64, src: &[u8]) -> io::Result<()> {
         self.seek(SeekFrom::Start(offset))?;
         self.write_all(src)
     }
@@ -224,7 +224,7 @@ pub fn encode_ranges<D: SliceReader, O: Outboard, W: Write>(
             } => {
                 let start = start_chunk.to_bytes();
                 let buf = &mut buffer[..size];
-                data.read(start.0, buf)?;
+                data.read_at(start.0, buf)?;
                 encoded.write_all(buf)?;
             }
         }
@@ -323,7 +323,7 @@ where
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                target.write(offset.0, &data)?;
+                target.write_at(offset.0, &data)?;
             }
         }
     }

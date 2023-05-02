@@ -23,7 +23,8 @@ futures = { version = "0.3", optional = true }
 
 [features]
 tokio_io = ["tokio", "futures", "ouroboros"]
-default = ["tokio_io"]
+tokio_fsm = ["tokio", "futures", "ouroboros"]
+default = ["tokio_io", "tokio_fsm"]
 
 [dev-dependencies]
 hex = "0.4.3"

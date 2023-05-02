@@ -20,7 +20,7 @@ use crate::{
     hash_block,
     io::{
         error::{DecodeError, EncodeError},
-        Leaf, Parent,
+        read_parent, Leaf, Parent,
     },
     iter::{BaoChunk, PreOrderChunkIterRef},
     outboard::{Outboard, OutboardMut},
@@ -766,7 +766,7 @@ where
 {
     let mut data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.len().await?);
+    let file_len = data.len().await?;
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -999,10 +999,4 @@ async fn read_range<'a>(
     let buf = &mut buf[..len];
     from.read(range.start.0, buf).await?;
     Ok(buf)
-}
-
-fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
-    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
-    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
-    (l_hash, r_hash)
 }

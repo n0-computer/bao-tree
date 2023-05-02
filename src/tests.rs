@@ -11,7 +11,10 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::AsyncReadExt;
 
-use crate::io::{DecodeResponseItem, Leaf};
+use crate::io::{
+    fsm::{ResponseDecoderReadingNext, ResponseDecoderStart},
+    DecodeResponseItem, Leaf,
+};
 
 use super::{
     canonicalize_range,
@@ -229,6 +232,25 @@ async fn bao_tree_decode_slice_stream_impl(data: Vec<u8>, range: Range<u64>) {
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
+async fn bao_tree_decode_slice_fsm_impl(data: Vec<u8>, range: Range<u64>) {
+    let range = ChunkNum(range.start)..ChunkNum(range.end);
+    let (encoded, root) = encode_slice_reference(&data, range.clone());
+    let size = ByteNum(data.len() as u64);
+    let expected = data;
+    let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
+    let mut ec = Cursor::new(encoded);
+    let at_start = ResponseDecoderStart::new(root, ranges, BlockSize::DEFAULT, &mut ec);
+    let (mut reading, _size) = at_start.next().await.unwrap();
+    while let ResponseDecoderReadingNext::More((next_state, item)) = reading.next().await {
+        if let DecodeResponseItem::Leaf(Leaf { offset, data }) = item.unwrap() {
+            let pos = offset.to_usize();
+            assert_eq!(expected[pos..pos + data.len()], *data);
+        }
+        reading = next_state;
+    }
+}
+
+/// range is a range of chunks. Just using u64 for convenience in tests
 async fn encode_all_roundtrip(data: Vec<u8>) {
     let (encoded, hash) = abao::encode::encode(&data);
     let mut ec = std::io::Cursor::new(encoded);
@@ -418,6 +440,22 @@ async fn bao_tree_decode_slice_stream_0() {
     bao_tree_decode_slice_stream_impl(td(1025), 0..1).await;
     bao_tree_decode_slice_stream_impl(td(1025), 1..2).await;
     bao_tree_decode_slice_stream_impl(td(1024 * 17), 0..18).await;
+}
+
+#[tokio::test]
+async fn bao_tree_decode_slice_fsm_0() {
+    use make_test_data as td;
+    bao_tree_decode_slice_fsm_impl(td(0), 0..1).await;
+    bao_tree_decode_slice_fsm_impl(td(1), 0..1).await;
+    bao_tree_decode_slice_fsm_impl(td(1023), 0..1).await;
+    bao_tree_decode_slice_fsm_impl(td(1024), 0..1).await;
+    bao_tree_decode_slice_fsm_impl(td(1025), 0..2).await;
+    bao_tree_decode_slice_fsm_impl(td(2047), 0..2).await;
+    bao_tree_decode_slice_fsm_impl(td(2048), 0..2).await;
+    bao_tree_decode_slice_fsm_impl(td(24 * 1024 + 1), 0..25).await;
+    bao_tree_decode_slice_fsm_impl(td(1025), 0..1).await;
+    bao_tree_decode_slice_fsm_impl(td(1025), 1..2).await;
+    bao_tree_decode_slice_fsm_impl(td(1024 * 17), 0..18).await;
 }
 
 #[test]
@@ -794,7 +832,8 @@ proptest! {
     fn bao_tree_decode_slice_all_stream(len in 0..32768usize) {
         let data = make_test_data(len);
         let chunk_range = 0..(data.len() / 1024 + 1) as u64;
-        futures::executor::block_on(bao_tree_decode_slice_stream_impl(data, chunk_range));
+        futures::executor::block_on(bao_tree_decode_slice_stream_impl(data.clone(), chunk_range.clone()));
+        futures::executor::block_on(bao_tree_decode_slice_fsm_impl(data, chunk_range));
     }
 
     #[test]
