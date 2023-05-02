@@ -37,7 +37,7 @@ use crate::{
 /// This is similar to the io interface of sqlite.
 /// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
 pub trait AsyncSliceWriter: Unpin + Send + Sync {
-    fn write<'a, 'r>(
+    fn write_at<'a, 'r>(
         &'a mut self,
         offset: u64,
         buf: &'a [u8],
@@ -48,7 +48,7 @@ pub trait AsyncSliceWriter: Unpin + Send + Sync {
 }
 
 impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync> AsyncSliceWriter for W {
-    fn write<'a, 'r>(
+    fn write_at<'a, 'r>(
         &'a mut self,
         offset: u64,
         buf: &'a [u8],
@@ -78,7 +78,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync> AsyncSliceWriter for W {
 /// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
 #[allow(clippy::len_without_is_empty)]
 pub trait AsyncSliceReader {
-    fn read<'a, 'b, 'r>(
+    fn read_at<'a, 'b, 'r>(
         &'a mut self,
         offset: u64,
         buf: &'b mut [u8],
@@ -94,7 +94,7 @@ pub trait AsyncSliceReader {
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin + Send + Sync> AsyncSliceReader for R {
-    fn read<'a, 'b, 'r>(
+    fn read_at<'a, 'b, 'r>(
         &'a mut self,
         offset: u64,
         buf: &'b mut [u8],
@@ -898,7 +898,7 @@ where
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                target.write(offset.0, &data).await?;
+                target.write_at(offset.0, &data).await?;
             }
         }
     }
@@ -923,7 +923,7 @@ pub async fn write_ranges(
         };
         let start = usize::try_from(range.start).unwrap();
         let end = usize::try_from(range.end).unwrap();
-        to.write(range.start, &from[start..end]).await?;
+        to.write_at(range.start, &from[start..end]).await?;
     }
     Ok(())
 }
@@ -997,6 +997,6 @@ async fn read_range<'a>(
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
     let buf = &mut buf[..len];
-    from.read(range.start.0, buf).await?;
+    from.read_at(range.start.0, buf).await?;
     Ok(buf)
 }
