@@ -34,25 +34,37 @@ use super::{error::DecodeError, read_parent, DecodeResponseItem, Leaf, Parent};
 pub trait AsyncSliceWriter: Sized {
     type WriteFuture: Future<Output = (Self, io::Result<()>)> + Send;
 
-    /// Write the entire bytes at the given position
+    /// Write the entire Bytes at the given position
     fn write_at(self, offset: u64, data: Bytes) -> Self::WriteFuture;
+
+    /// Write an owned byte array at the given position
+    fn write_array_at<const N: usize>(self, offset: u64, bytes: [u8; N]) -> Self::WriteFuture;
+}
+
+async fn write_at_inner<W: AsyncWrite + AsyncSeek + Unpin>(
+    this: &mut W,
+    offset: u64,
+    buf: &[u8],
+) -> io::Result<()> {
+    this.seek(SeekFrom::Start(offset)).await?;
+    this.write_all(buf).await?;
+    Ok(())
 }
 
 impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceWriter for W {
     type WriteFuture = BoxFuture<'static, (W, io::Result<()>)>;
 
     fn write_at(mut self, offset: u64, buf: Bytes) -> Self::WriteFuture {
-        async fn inner<W: AsyncWrite + AsyncSeek + Unpin>(
-            this: &mut W,
-            offset: u64,
-            buf: &[u8],
-        ) -> io::Result<()> {
-            this.seek(SeekFrom::Start(offset)).await?;
-            this.write_all(buf).await?;
-            Ok(())
-        }
         async move {
-            let res = inner(&mut self, offset, &buf).await;
+            let res = write_at_inner(&mut self, offset, &buf).await;
+            (self, res)
+        }
+        .boxed()
+    }
+
+    fn write_array_at<const N: usize>(mut self, offset: u64, buf: [u8; N]) -> Self::WriteFuture {
+        async move {
+            let res = write_at_inner(&mut self, offset, &buf).await;
             (self, res)
         }
         .boxed()
