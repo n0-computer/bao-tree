@@ -41,6 +41,26 @@ pub trait AsyncSliceWriter: Sized {
     fn write_array_at<const N: usize>(self, offset: u64, bytes: [u8; N]) -> Self::WriteFuture;
 }
 
+impl<T: AsyncSliceWriter> Handle<T> {
+    pub async fn write_at(&mut self, offset: u64, buf: Bytes) -> io::Result<()> {
+        let t = self.0.take().unwrap();
+        let (t, res) = t.write_at(offset, buf).await;
+        self.0 = Some(t);
+        res
+    }
+
+    pub async fn write_array_at<const N: usize>(
+        &mut self,
+        offset: u64,
+        bytes: [u8; N],
+    ) -> io::Result<()> {
+        let t = self.0.take().unwrap();
+        let (t, res) = t.write_array_at(offset, bytes).await;
+        self.0 = Some(t);
+        res
+    }
+}
+
 async fn write_at_inner<W: AsyncWrite + AsyncSeek + Unpin>(
     this: &mut W,
     offset: u64,
@@ -70,7 +90,6 @@ impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceWriter
         .boxed()
     }
 }
-
 /// A reader that can read a slice at a specified offset
 ///
 /// For a file, this will be implemented by seeking to the offset and then reading the data.
@@ -87,6 +106,22 @@ pub trait AsyncSliceReader: Sized {
     type LenFuture: Future<Output = (Self, io::Result<u64>)> + Send;
     fn read_at(self, offset: u64, buf: BytesMut) -> Self::ReadFuture;
     fn len(self) -> Self::LenFuture;
+}
+
+impl<T: AsyncSliceReader> Handle<T> {
+    pub async fn read_at(&mut self, offset: u64, buf: BytesMut) -> io::Result<BytesMut> {
+        let t = self.0.take().unwrap();
+        let (t, buf, res) = t.read_at(offset, buf).await;
+        self.0 = Some(t);
+        res.map(|_| buf)
+    }
+
+    pub async fn len(&mut self) -> io::Result<u64> {
+        let t = self.0.take().unwrap();
+        let (t, res) = t.len().await;
+        self.0 = Some(t);
+        res
+    }
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin + Send + 'static> AsyncSliceReader for R {
@@ -115,6 +150,28 @@ impl<R: AsyncRead + AsyncSeek + Unpin + Send + 'static> AsyncSliceReader for R {
             (self, len)
         }
         .boxed()
+    }
+}
+
+/// Convenience wrapper around a type that implements a state passing style fsm.
+///
+/// This is so you can use mutable style instead of state passing style.
+#[derive(Debug)]
+pub struct Handle<T>(Option<T>);
+
+impl<T> Handle<T> {
+    pub fn new(t: T) -> Self {
+        Self(Some(t))
+    }
+
+    pub fn into_inner(self) -> T {
+        self.0.unwrap()
+    }
+}
+
+impl<T> From<T> for Handle<T> {
+    fn from(t: T) -> Self {
+        Self::new(t)
     }
 }
 
