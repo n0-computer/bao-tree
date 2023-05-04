@@ -235,7 +235,7 @@ pub fn encode_ranges<D: SliceReader, O: Outboard, W: Write>(
 /// Encode ranges relevant to a query from a reader and outboard to a writer
 ///
 /// This function validates the data before writing
-pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
+pub fn encode_ranges_validated<D: SliceReader, O: Outboard, W: Write>(
     data: D,
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
@@ -245,7 +245,7 @@ pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
     stack.push(outboard.root());
     let mut data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.seek(SeekFrom::End(0))?);
+    let file_len = ByteNum(data.len()?);
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -287,12 +287,13 @@ pub fn encode_ranges_validated<D: Read + Seek, O: Outboard, W: Write>(
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
-                let data = read_range(&mut data, start..start + (size as u64), &mut buffer)?;
-                let actual = hash_block(start_chunk, data, is_root);
+                let buf = &mut buffer[..size];
+                data.read_at(start.0, buf)?;
+                let actual = hash_block(start_chunk, buf, is_root);
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
-                encoded.write_all(data)?;
+                encoded.write_all(buf)?;
             }
         }
     }
