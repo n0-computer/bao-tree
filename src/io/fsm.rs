@@ -590,3 +590,96 @@ where
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[tokio::test]
+    async fn async_slice_writer_usage() -> io::Result<()> {
+        // use a cursor as a file, it implements tokio AsyncWrite and AsyncSeek
+        let mut file = io::Cursor::new(vec![]);
+
+        // write 3 bytes at offset 0
+        let res;
+        (file, res) = file.write_at(0, vec![0, 1, 2].into()).await;
+        res?;
+        assert_eq!(file.get_ref(), &[0, 1, 2]);
+
+        // write 3 bytes at offset 5
+        let res;
+        (file, res) = file.write_at(5, vec![0, 1, 2].into()).await;
+        res?;
+        assert_eq!(file.get_ref(), &[0, 1, 2, 0, 0, 0, 1, 2]);
+
+        // write a u16 at offset 8
+        let res;
+        (file, res) = file.write_array_at(8, 1u16.to_le_bytes()).await;
+        res?;
+        assert_eq!(file.get_ref(), &[0, 1, 2, 0, 0, 0, 1, 2, 1, 0]);
+
+        file.get_mut().truncate(0);
+        // same ops, but mutable style using handle
+        let mut file = Handle::new(file);
+
+        // write 3 bytes at offset 0
+        file.write_at(0, vec![0, 1, 2].into()).await?;
+        assert_eq!(file.as_ref().get_ref(), &[0, 1, 2]);
+
+        // write 3 bytes at offset 5
+        file.write_at(5, vec![0, 1, 2].into()).await?;
+        assert_eq!(file.as_ref().get_ref(), &[0, 1, 2, 0, 0, 0, 1, 2]);
+
+        // write a u16 at offset 8
+        file.write_array_at(8, 1u16.to_le_bytes()).await?;
+        assert_eq!(file.as_ref().get_ref(), &[0, 1, 2, 0, 0, 0, 1, 2, 1, 0]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn async_slice_reader_usage() -> io::Result<()> {
+        // use a cursor as a file, it implements tokio AsyncRead and AsyncSeek
+        let mut file = io::Cursor::new((0..100u8).collect::<Vec<_>>());
+
+        // read the length of the file
+        let res;
+        (file, res) = file.len().await; // 100
+        assert_eq!(res?, 100);
+
+        // read buffer that will be threaded through the read calls
+        let mut buffer = BytesMut::new();
+        // read 3 bytes
+        buffer.resize(3, 0u8);
+
+        // read 3 bytes at offset 10
+        let res;
+        (file, buffer, res) = file.read_at(10, buffer).await;
+        // check result
+        res?;
+        assert_eq!(&[10, 11, 12], &buffer[..]);
+
+        // read 3 bytes at offset 99 (fails)
+        let res;
+        (file, buffer, res) = file.read_at(99, buffer).await;
+        // check result, should be error because we read past the end of the file
+        assert!(res.is_err());
+
+        // same ops, but mutable style using handle
+        let mut handle = Handle::new(file);
+
+        // read the length of the file
+        assert_eq!(handle.len().await?, 100);
+
+        // read 3 bytes at offset 10
+        buffer = handle.read_at(10, buffer).await?;
+        assert_eq!(&[10, 11, 12], &buffer[..]);
+
+        // read 3 bytes at offset 99 (fails)
+        let res = handle.read_at(99, buffer).await;
+        assert!(res.is_err());
+
+        Ok(())
+    }
+}
