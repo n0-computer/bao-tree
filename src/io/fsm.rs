@@ -15,7 +15,10 @@ use bytes::{Bytes, BytesMut};
 use futures::{future::BoxFuture, Future, FutureExt};
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
-use tokio::{io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt}, task::JoinHandle};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
+    task::JoinHandle,
+};
 
 use crate::{
     hash_block,
