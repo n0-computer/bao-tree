@@ -5,6 +5,7 @@
 use std::fmt;
 
 use range_collections::{RangeSet2, RangeSetRef};
+use self_cell::self_cell;
 use smallvec::SmallVec;
 
 use crate::{BaoTree, ChunkNum, TreeNode};
@@ -509,14 +510,12 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
     }
 }
 
-use ouroboros::self_referencing;
-
-#[self_referencing]
-pub struct PreOrderChunkIterInner {
-    ranges: range_collections::RangeSet2<ChunkNum>,
-    #[borrows(ranges)]
-    #[not_covariant]
-    iter: PreOrderChunkIterRef<'this>,
+self_cell! {
+    pub struct PreOrderChunkIterInner {
+        owner: range_collections::RangeSet2<ChunkNum>,
+        #[not_covariant]
+        dependent: PreOrderChunkIterRef,
+    }
 }
 
 pub struct PreOrderChunkIter(PreOrderChunkIterInner);
@@ -539,6 +538,6 @@ impl Iterator for PreOrderChunkIter {
     type Item = BaoChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.with_iter_mut(|iter| iter.next())
+        self.0.with_dependent_mut(|_, iter| iter.next())
     }
 }
