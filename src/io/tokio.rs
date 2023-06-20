@@ -35,7 +35,7 @@ use crate::{
 /// For external storage such as S3/R2, this might be implemented in terms of async http requests.
 ///
 /// This is similar to the io interface of sqlite.
-/// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
+/// See xWrite in <https://www.sqlite.org/c3ref/io_methods.html>
 pub trait AsyncSliceWriter: Unpin + Send + Sync {
     fn write_at<'a, 'r>(
         &'a mut self,
@@ -75,7 +75,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync> AsyncSliceWriter for W {
 /// For external storage such as S3/R2, this might be implemented in terms of async http requests.
 ///
 /// This is similar to the io interface of sqlite.
-/// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
+/// See xRead, xFileSize in <https://www.sqlite.org/c3ref/io_methods.html>
 #[allow(clippy::len_without_is_empty)]
 pub trait AsyncSliceReader {
     fn read_at<'a, 'b, 'r>(

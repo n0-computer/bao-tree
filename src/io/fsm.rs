@@ -5,20 +5,16 @@
 //!
 //! This makes them occasionally a bit verbose to use, but allows being generic
 //! without having to box the futures.
-use std::{
-    io::{self, SeekFrom},
-    result, task,
-};
+use std::{io, result};
 
 use blake3::guts::parent_cv;
-use bytes::{Bytes, BytesMut};
-use futures::{future::BoxFuture, Future, FutureExt};
+use bytes::BytesMut;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
-    task::JoinHandle,
-};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+// reexport
+pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter, Either, FileAdapter};
 
 use crate::{
     hash_block,
@@ -31,271 +27,6 @@ use super::{
     error::{DecodeError, EncodeError},
     read_parent, DecodeResponseItem, Leaf, Parent,
 };
-
-/// A reader that can read a slice at a specified offset
-///
-/// For a file, this will be implemented by seeking to the offset and then reading the data.
-/// For other types of storage, seeking is not necessary. E.g. a Bytes or a memory mapped
-/// slice already allows random access.
-///
-/// For external storage such as S3/R2, this might be implemented in terms of async http requests.
-///
-/// This is similar to the io interface of sqlite.
-/// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
-#[allow(clippy::len_without_is_empty)]
-pub trait AsyncSliceReader: Sized {
-    type ReadFuture: Future<Output = (Self, BytesMut, io::Result<()>)> + Send;
-    type LenFuture: Future<Output = (Self, io::Result<u64>)> + Send;
-    /// Read the entire buffer at the given position.
-    ///
-    /// Will fail if the file is smaller than offset + buf.len()
-    fn read_at(self, offset: u64, buf: BytesMut) -> Self::ReadFuture;
-
-    /// Get the length of the file
-    fn len(self) -> Self::LenFuture;
-}
-
-/// A writer that can write a slice at a specified offset
-///
-/// Will extend the file if the offset is past the end of the file, just like posix
-/// and windows files do.
-///
-/// For external storage such as S3/R2, this might be implemented in terms of async http requests.
-///
-/// This is similar to the io interface of sqlite.
-/// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
-pub trait AsyncSliceWriter: Sized {
-    /// The future returned by write_at and write_array_at
-    ///
-    /// This is state passing style, so the future will return Self in addition
-    /// to the result of the write.
-    type WriteFuture: Future<Output = (Self, io::Result<()>)> + Send;
-
-    /// Write the entire Bytes at the given position
-    fn write_at(self, offset: u64, data: Bytes) -> Self::WriteFuture;
-
-    /// Write an owned byte array at the given position
-    ///
-    /// This is an alternative to write_at for small, fixed sized writes where
-    /// converting to a Bytes would have too much overhead.
-    fn write_array_at<const N: usize>(self, offset: u64, bytes: [u8; N]) -> Self::WriteFuture;
-}
-
-impl<T: AsyncSliceWriter> Handle<T> {
-    pub async fn write_at(&mut self, offset: u64, buf: Bytes) -> io::Result<()> {
-        let t = self.0.take().unwrap();
-        let (t, res) = t.write_at(offset, buf).await;
-        self.0 = Some(t);
-        res
-    }
-
-    pub async fn write_array_at<const N: usize>(
-        &mut self,
-        offset: u64,
-        bytes: [u8; N],
-    ) -> io::Result<()> {
-        let t = self.0.take().unwrap();
-        let (t, res) = t.write_array_at(offset, bytes).await;
-        self.0 = Some(t);
-        res
-    }
-}
-
-async fn write_at_inner<W: AsyncWrite + AsyncSeek + Unpin>(
-    this: &mut W,
-    offset: u64,
-    buf: &[u8],
-) -> io::Result<()> {
-    this.seek(SeekFrom::Start(offset)).await?;
-    this.write_all(buf).await?;
-    Ok(())
-}
-
-impl<W: AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static> AsyncSliceWriter for W {
-    type WriteFuture = BoxFuture<'static, (W, io::Result<()>)>;
-
-    fn write_at(mut self, offset: u64, buf: Bytes) -> Self::WriteFuture {
-        async move {
-            let res = write_at_inner(&mut self, offset, &buf).await;
-            (self, res)
-        }
-        .boxed()
-    }
-
-    fn write_array_at<const N: usize>(mut self, offset: u64, buf: [u8; N]) -> Self::WriteFuture {
-        async move {
-            let res = write_at_inner(&mut self, offset, &buf).await;
-            (self, res)
-        }
-        .boxed()
-    }
-}
-
-impl<T: AsyncSliceReader> Handle<T> {
-    pub async fn read_at(&mut self, offset: u64, buf: BytesMut) -> io::Result<BytesMut> {
-        let t = self.0.take().unwrap();
-        let (t, buf, res) = t.read_at(offset, buf).await;
-        self.0 = Some(t);
-        res.map(|_| buf)
-    }
-
-    pub async fn len(&mut self) -> io::Result<u64> {
-        let t = self.0.take().unwrap();
-        let (t, res) = t.len().await;
-        self.0 = Some(t);
-        res
-    }
-}
-
-///
-#[derive(Debug)]
-pub struct SyncIoAdapter<R>(R);
-
-#[derive(Debug)]
-pub struct UnwrapJoinHandle<T>(JoinHandle<T>);
-
-impl<T> Future for UnwrapJoinHandle<T> {
-    type Output = T;
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut task::Context<'_>,
-    ) -> task::Poll<Self::Output> {
-        let this = self.get_mut();
-        std::pin::Pin::new(&mut this.0)
-            .poll(cx)
-            .map(|res| res.unwrap())
-    }
-}
-
-impl<R: std::io::Read + std::io::Seek + Unpin + Send + 'static> AsyncSliceReader
-    for SyncIoAdapter<R>
-{
-    type ReadFuture = UnwrapJoinHandle<(Self, BytesMut, io::Result<()>)>;
-    type LenFuture = UnwrapJoinHandle<(Self, io::Result<u64>)>;
-    fn read_at(mut self, offset: u64, mut buf: BytesMut) -> Self::ReadFuture {
-        fn inner<R: std::io::Read + std::io::Seek>(
-            this: &mut R,
-            offset: u64,
-            buf: &mut [u8],
-        ) -> io::Result<()> {
-            this.seek(SeekFrom::Start(offset))?;
-            this.read_exact(buf)?;
-            Ok(())
-        }
-        UnwrapJoinHandle(tokio::task::spawn_blocking(move || {
-            let res = inner(&mut self.0, offset, &mut buf);
-            (self, buf, res)
-        }))
-    }
-
-    fn len(mut self) -> Self::LenFuture {
-        UnwrapJoinHandle(tokio::task::spawn_blocking(move || {
-            let res = self.0.seek(SeekFrom::End(0));
-            (self, res)
-        }))
-    }
-}
-
-impl<R: std::io::Write + std::io::Seek + Unpin + Send + 'static> AsyncSliceWriter
-    for SyncIoAdapter<R>
-{
-    type WriteFuture = UnwrapJoinHandle<(Self, io::Result<()>)>;
-
-    fn write_at(mut self, offset: u64, data: Bytes) -> Self::WriteFuture {
-        fn inner<W: std::io::Write + std::io::Seek>(
-            this: &mut W,
-            offset: u64,
-            buf: &[u8],
-        ) -> io::Result<()> {
-            this.seek(SeekFrom::Start(offset))?;
-            this.write_all(buf)?;
-            Ok(())
-        }
-        UnwrapJoinHandle(tokio::task::spawn_blocking(move || {
-            let res = inner(&mut self.0, offset, &data);
-            (self, res)
-        }))
-    }
-
-    fn write_array_at<const N: usize>(mut self, offset: u64, bytes: [u8; N]) -> Self::WriteFuture {
-        fn inner<W: std::io::Write + std::io::Seek>(
-            this: &mut W,
-            offset: u64,
-            buf: &[u8],
-        ) -> io::Result<()> {
-            this.seek(SeekFrom::Start(offset))?;
-            this.write_all(buf)?;
-            Ok(())
-        }
-        UnwrapJoinHandle(tokio::task::spawn_blocking(move || {
-            let res = inner(&mut self.0, offset, &bytes);
-            (self, res)
-        }))
-    }
-}
-
-impl<R: AsyncRead + AsyncSeek + Unpin + Send + 'static> AsyncSliceReader for R {
-    type ReadFuture = BoxFuture<'static, (Self, BytesMut, io::Result<()>)>;
-    type LenFuture = BoxFuture<'static, (Self, io::Result<u64>)>;
-    fn read_at(mut self, offset: u64, mut buf: BytesMut) -> Self::ReadFuture {
-        async fn inner<R: AsyncRead + AsyncSeek + Unpin>(
-            this: &mut R,
-            offset: u64,
-            buf: &mut [u8],
-        ) -> io::Result<()> {
-            this.seek(SeekFrom::Start(offset)).await?;
-            this.read_exact(buf).await?;
-            Ok(())
-        }
-        async move {
-            let res = inner(&mut self, offset, &mut buf).await;
-            (self, buf, res)
-        }
-        .boxed()
-    }
-
-    fn len(mut self) -> Self::LenFuture {
-        async move {
-            let len = self.seek(SeekFrom::End(0)).await;
-            (self, len)
-        }
-        .boxed()
-    }
-}
-
-/// Convenience wrapper around a type that implements a state passing style fsm.
-///
-/// This is so you can use mutable style instead of state passing style.
-#[derive(Debug)]
-pub struct Handle<T>(Option<T>);
-
-impl<T> Handle<T> {
-    pub fn new(t: T) -> Self {
-        Self(Some(t))
-    }
-
-    pub fn into_inner(self) -> T {
-        self.0.unwrap()
-    }
-}
-
-impl<T> AsRef<T> for Handle<T> {
-    fn as_ref(&self) -> &T {
-        self.0.as_ref().unwrap()
-    }
-}
-
-impl<T> AsMut<T> for Handle<T> {
-    fn as_mut(&mut self) -> &mut T {
-        self.0.as_mut().unwrap()
-    }
-}
-
-impl<T> From<T> for Handle<T> {
-    fn from(t: T) -> Self {
-        Self::new(t)
-    }
-}
 
 /// Response decoder state machine, at the start of a stream
 #[derive(Debug)]
@@ -472,7 +203,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
 ///
 /// This will not validate on writing, so data corruption will be detected on reading
 pub async fn encode_ranges<D, O, W>(
-    data: &mut Handle<D>,
+    data: &mut D,
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
@@ -492,7 +223,6 @@ where
     if !range_ok(ranges, tree.chunks()) {
         return Err(EncodeError::InvalidQueryRange);
     }
-    let mut buffer = BytesMut::with_capacity(tree.chunk_group_bytes().to_usize());
     // write header
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())
@@ -508,9 +238,8 @@ where
                 start_chunk, size, ..
             } => {
                 let start = start_chunk.to_bytes();
-                buffer.resize(size, 0u8);
-                buffer = data.read_at(start.0, buffer).await?;
-                encoded.write_all(&buffer).await?;
+                let bytes = data.read_at(start.0, size).await?;
+                encoded.write_all(&bytes).await?;
             }
         }
     }
@@ -521,7 +250,7 @@ where
 ///
 /// This function validates the data before writing
 pub async fn encode_ranges_validated<D, O, W>(
-    data: &mut Handle<D>,
+    data: &mut D,
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
@@ -543,7 +272,6 @@ where
     if !range_ok(ranges, tree.chunks()) {
         return Err(EncodeError::InvalidQueryRange);
     }
-    let mut buffer = BytesMut::with_capacity(tree.chunk_group_bytes().to_usize());
     // write header
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())
@@ -578,108 +306,14 @@ where
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
-                buffer.resize(size, 0u8);
-                buffer = data.read_at(start.0, buffer).await?;
-                let actual = hash_block(start_chunk, &buffer, is_root);
+                let bytes = data.read_at(start.0, size).await?;
+                let actual = hash_block(start_chunk, &bytes, is_root);
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
-                encoded.write_all(&buffer).await?;
+                encoded.write_all(&bytes).await?;
             }
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io;
-
-    #[tokio::test]
-    async fn async_slice_writer_usage() -> io::Result<()> {
-        // use a cursor as a file, it implements tokio AsyncWrite and AsyncSeek
-        let mut file = io::Cursor::new(vec![]);
-
-        // write 3 bytes at offset 0
-        let res;
-        (file, res) = file.write_at(0, vec![0, 1, 2].into()).await;
-        res?;
-        assert_eq!(file.get_ref(), &[0, 1, 2]);
-
-        // write 3 bytes at offset 5
-        let res;
-        (file, res) = file.write_at(5, vec![0, 1, 2].into()).await;
-        res?;
-        assert_eq!(file.get_ref(), &[0, 1, 2, 0, 0, 0, 1, 2]);
-
-        // write a u16 at offset 8
-        let res;
-        (file, res) = file.write_array_at(8, 1u16.to_le_bytes()).await;
-        res?;
-        assert_eq!(file.get_ref(), &[0, 1, 2, 0, 0, 0, 1, 2, 1, 0]);
-
-        file.get_mut().truncate(0);
-        // same ops, but mutable style using handle
-        let mut file = Handle::new(file);
-
-        // write 3 bytes at offset 0
-        file.write_at(0, vec![0, 1, 2].into()).await?;
-        assert_eq!(file.as_ref().get_ref(), &[0, 1, 2]);
-
-        // write 3 bytes at offset 5
-        file.write_at(5, vec![0, 1, 2].into()).await?;
-        assert_eq!(file.as_ref().get_ref(), &[0, 1, 2, 0, 0, 0, 1, 2]);
-
-        // write a u16 at offset 8
-        file.write_array_at(8, 1u16.to_le_bytes()).await?;
-        assert_eq!(file.as_ref().get_ref(), &[0, 1, 2, 0, 0, 0, 1, 2, 1, 0]);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn async_slice_reader_usage() -> io::Result<()> {
-        // use a cursor as a file, it implements tokio AsyncRead and AsyncSeek
-        let mut file = io::Cursor::new((0..100u8).collect::<Vec<_>>());
-
-        // read the length of the file
-        let res;
-        (file, res) = file.len().await; // 100
-        assert_eq!(res?, 100);
-
-        // read buffer that will be threaded through the read calls
-        let mut buffer = BytesMut::new();
-        // read 3 bytes
-        buffer.resize(3, 0u8);
-
-        // read 3 bytes at offset 10
-        let res;
-        (file, buffer, res) = file.read_at(10, buffer).await;
-        // check result
-        res?;
-        assert_eq!(&[10, 11, 12], &buffer[..]);
-
-        // read 3 bytes at offset 99 (fails)
-        let res;
-        (file, buffer, res) = file.read_at(99, buffer).await;
-        // check result, should be error because we read past the end of the file
-        assert!(res.is_err());
-
-        // same ops, but mutable style using handle
-        let mut handle = Handle::new(file);
-
-        // read the length of the file
-        assert_eq!(handle.len().await?, 100);
-
-        // read 3 bytes at offset 10
-        buffer = handle.read_at(10, buffer).await?;
-        assert_eq!(&[10, 11, 12], &buffer[..]);
-
-        // read 3 bytes at offset 99 (fails)
-        let res = handle.read_at(99, buffer).await;
-        assert!(res.is_err());
-
-        Ok(())
-    }
 }
