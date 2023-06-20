@@ -25,7 +25,7 @@ use crate::{
 /// slice already allows random access.
 ///
 /// This is similar to the io interface of sqlite.
-/// See xRead, xFileSize in https://www.sqlite.org/c3ref/io_methods.html
+/// See xRead, xFileSize in <https://www.sqlite.org/c3ref/io_methods.html>
 #[allow(clippy::len_without_is_empty)]
 pub trait SliceReader {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
@@ -49,7 +49,7 @@ impl<R: Read + Seek> SliceReader for R {
 /// and windows files do.
 ///
 /// This is similar to the io interface of sqlite.
-/// See xWrite in https://www.sqlite.org/c3ref/io_methods.html
+/// See xWrite in <https://www.sqlite.org/c3ref/io_methods.html>
 pub trait SliceWriter {
     fn write_at(&mut self, offset: u64, src: &[u8]) -> io::Result<()>;
 }

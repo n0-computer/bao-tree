@@ -1,6 +1,6 @@
 [package]
 name = "bao-tree"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
@@ -20,10 +20,12 @@ ouroboros = { version = "0.15", optional = true }
 bytes = { version = "1" }
 tokio = { version = "1", features = ["io-util", "rt"], optional = true }
 futures = { version = "0.3", optional = true }
+self_cell = { version = "1" }
+iroh-io = { version = "0.1", features = ["tokio-io"], default_features = false, optional = true }
 
 [features]
 tokio_io = ["tokio", "futures", "ouroboros"]
-tokio_fsm = ["tokio", "futures", "ouroboros"]
+tokio_fsm = ["tokio", "futures", "iroh-io"]
 default = ["tokio_io", "tokio_fsm"]
 
 [dev-dependencies]
@@ -35,6 +37,8 @@ abao = { git = "https://github.com/n0-computer/abao", branch = "post-order-outbo
 proptest = "1.0.0"
 rand = "0.8.5"
 criterion = "0.4.0"
+tempfile = "3.6.0"
+warp = "0.3.5"
 
 [[bench]]
 name = "tree_bench"
