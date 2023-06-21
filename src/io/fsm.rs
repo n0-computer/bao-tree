@@ -9,12 +9,10 @@ use std::{io, result};
 
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
+use iroh_io::AsyncSliceReader;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-
-// reexport
-pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter, Either, FileAdapter};
 
 use crate::{
     hash_block,
