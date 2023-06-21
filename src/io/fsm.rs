@@ -25,7 +25,7 @@ use crate::{
 
 use super::{
     error::{DecodeError, EncodeError},
-    read_parent, DecodeResponseItem, Leaf, Parent,
+    DecodeResponseItem, Leaf, Parent,
 };
 
 /// Response decoder state machine, at the start of a stream
@@ -316,4 +316,10 @@ where
         }
     }
     Ok(())
+}
+
+fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
+    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
+    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
+    (l_hash, r_hash)
 }
