@@ -706,13 +706,14 @@ dependencies = [
 
 [[package]]
 name = "iroh-io"
-version = "0.1.0"
+version = "0.2.0-beta1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ba054d7171115a0863053e7323068a3e80a1088c3e63c6fe56def7dff237399"
+checksum = "1144cefb55c198acfc545cb27d2ab8b03c85187cee4c4e223d425834e78164be"
 dependencies = [
  "bytes",
  "futures",
  "pin-project",
+ "smallvec",
  "tokio",
 ]
 

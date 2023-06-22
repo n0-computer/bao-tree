@@ -20,7 +20,7 @@ bytes = { version = "1" }
 tokio = { version = "1", features = ["io-util", "rt"], optional = true }
 futures = { version = "0.3", optional = true }
 self_cell = { version = "1" }
-iroh-io = { version = "0.1", features = ["tokio-io"], default_features = false, optional = true }
+iroh-io = { version = "0.2.0-beta1", features = ["tokio-io"], default_features = false, optional = true }
 
 [features]
 tokio_fsm = ["tokio", "futures", "iroh-io"]
