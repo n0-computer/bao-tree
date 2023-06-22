@@ -9,6 +9,7 @@ use std::{io, result};
 
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
+use futures::Future;
 use iroh_io::AsyncSliceReader;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
@@ -17,14 +18,27 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::{
     hash_block,
     iter::{BaoChunk, PreOrderChunkIter},
-    outboard::Outboard,
-    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum,
+    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 
 use super::{
     error::{DecodeError, EncodeError},
     DecodeResponseItem, Leaf, Parent,
 };
+
+/// An outboard is a just a thing that knows how big it is and can get you the hashes for a node.
+pub trait Outboard {
+    /// The root hash
+    fn root(&self) -> blake3::Hash;
+    /// The tree. This contains the information about the size of the file and the block size.
+    fn tree(&self) -> BaoTree;
+    /// Future returned by `load`
+    type LoadFuture<'a>: Future<Output = io::Result<Option<(blake3::Hash, blake3::Hash)>>>
+    where
+        Self: 'a;
+    /// load the hash pair for a node
+    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_>;
+}
 
 /// Response decoder state machine, at the start of a stream
 #[derive(Debug)]
@@ -228,7 +242,7 @@ where
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
-                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
                 encoded.write_all(l_hash.as_bytes()).await?;
                 encoded.write_all(r_hash.as_bytes()).await?;
             }
@@ -282,7 +296,7 @@ where
                 right,
                 node,
             } => {
-                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
                 let expected = stack.pop().unwrap();
                 if actual != expected {
