@@ -9,14 +9,16 @@ use proptest::prelude::*;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
-use crate::io::{DecodeResponseItem, Leaf};
+use crate::io::{
+    sync::{valid_ranges, Outboard},
+    DecodeResponseItem, Leaf,
+};
 
 use super::{
     canonicalize_range,
     io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
     iter::{BaoChunk, NodeInfo},
-    outboard::{valid_ranges, Outboard, PostOrderMemOutboardRef},
-    outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
+    outboard::{PostOrderMemOutboard, PostOrderMemOutboardRef, PreOrderMemOutboard},
     pre_order_offset_slow,
     tree::{ByteNum, ChunkNum},
     BaoTree, BlockSize, PostOrderNodeIter, TreeNode,

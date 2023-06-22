@@ -14,9 +14,113 @@ use crate::{
     hash_block, hash_chunk,
     io::error::{DecodeError, EncodeError},
     iter::{BaoChunk, PreOrderChunkIterRef},
-    outboard::{Outboard, OutboardMut},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
+
+/// An outboard is a just a thing that knows how big it is and can get you the hashes for a node.
+pub trait Outboard {
+    /// The root hash
+    fn root(&self) -> blake3::Hash;
+    /// The tree. This contains the information about the size of the file and the block size.
+    fn tree(&self) -> BaoTree;
+    /// load the hash pair for a node
+    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>>;
+}
+
+pub trait OutboardMut: Outboard {
+    /// Set the length of the file for which this outboard is
+    fn set_size(&mut self, len: ByteNum) -> io::Result<()>;
+    /// Save a hash pair for a node
+    fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()>;
+}
+
+impl<O: Outboard> Outboard for &O {
+    fn root(&self) -> blake3::Hash {
+        (**self).root()
+    }
+    fn tree(&self) -> BaoTree {
+        (**self).tree()
+    }
+    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        (**self).load(node)
+    }
+}
+
+impl<O: Outboard> Outboard for &mut O {
+    fn root(&self) -> blake3::Hash {
+        (**self).root()
+    }
+    fn tree(&self) -> BaoTree {
+        (**self).tree()
+    }
+    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        (**self).load(node)
+    }
+}
+
+impl<O: OutboardMut> OutboardMut for &mut O {
+    fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
+        (**self).save(node, hash_pair)
+    }
+    fn set_size(&mut self, len: ByteNum) -> io::Result<()> {
+        (**self).set_size(len)
+    }
+}
+
+/// Given an outboard, return a range set of all valid ranges
+pub fn valid_ranges<O>(outboard: &O) -> io::Result<RangeSet2<ChunkNum>>
+where
+    O: Outboard,
+{
+    struct RecursiveValidator<'a, O: Outboard> {
+        tree: BaoTree,
+        valid_nodes: TreeNode,
+        res: RangeSet2<ChunkNum>,
+        outboard: &'a O,
+    }
+
+    impl<'a, O: Outboard> RecursiveValidator<'a, O> {
+        fn validate_rec(
+            &mut self,
+            parent_hash: &blake3::Hash,
+            node: TreeNode,
+            is_root: bool,
+        ) -> io::Result<()> {
+            let (l_hash, r_hash) = if let Some((l_hash, r_hash)) = self.outboard.load(node)? {
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                if &actual != parent_hash {
+                    // we got a validation error. Simply continue without adding the range
+                    return Ok(());
+                }
+                (l_hash, r_hash)
+            } else {
+                (*parent_hash, blake3::Hash::from([0; 32]))
+            };
+            if let Some(leaf) = node.as_leaf() {
+                let start = self.tree.chunk_num(leaf);
+                let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
+                self.res |= RangeSet2::from(start..end);
+            } else {
+                // recurse
+                let left = node.left_child().unwrap();
+                self.validate_rec(&l_hash, left, false)?;
+                let right = node.right_descendant(self.valid_nodes).unwrap();
+                self.validate_rec(&r_hash, right, false)?;
+            }
+            Ok(())
+        }
+    }
+    let tree = outboard.tree();
+    let root_hash = outboard.root();
+    let mut validator = RecursiveValidator {
+        tree,
+        valid_nodes: tree.filled_size(),
+        res: RangeSet2::empty(),
+        outboard,
+    };
+    validator.validate_rec(&root_hash, tree.root(), true)?;
+    Ok(validator.res)
+}
 
 /// A reader that can read a slice at a specified offset
 ///
