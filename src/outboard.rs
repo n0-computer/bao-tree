@@ -1,4 +1,5 @@
 //! Implementations of the outboard traits
+use bytes::Bytes;
 use range_collections::RangeSet2;
 
 use super::{outboard_size, TreeNode};
@@ -106,7 +107,7 @@ impl<'a> PostOrderMemOutboardRef<'a> {
         Ok(Self { root, tree, data })
     }
 
-    pub fn flip(&self) -> PreOrderMemOutboard {
+    pub fn flip(&self) -> PreOrderMemOutboardMut {
         let tree = self.tree;
         let mut data = vec![0; self.data.len() + 8];
         data[0..8].copy_from_slice(tree.size.0.to_le_bytes().as_slice());
@@ -118,7 +119,7 @@ impl<'a> PostOrderMemOutboardRef<'a> {
                 data[offset + 32..offset + 64].copy_from_slice(r.as_bytes());
             }
         }
-        PreOrderMemOutboard {
+        PreOrderMemOutboardMut {
             root: self.root,
             tree,
             data,
@@ -202,7 +203,7 @@ impl PostOrderMemOutboard {
         &self.data
     }
 
-    pub fn flip(&self) -> PreOrderMemOutboard {
+    pub fn flip(&self) -> PreOrderMemOutboardMut {
         self.as_outboard_ref().flip()
     }
 
@@ -369,11 +370,88 @@ impl<'a> crate::io::fsm::Outboard for PreOrderMemOutboardRef<'a> {
     }
 }
 
+#[derive(Debug)]
+pub struct PreOrderMemOutboard<T: AsRef<[u8]> = Bytes> {
+    /// root hash
+    root: blake3::Hash,
+    /// tree defining the data
+    tree: BaoTree,
+    /// hashes with length prefix
+    data: T,
+}
+
+impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
+    pub fn new(root: blake3::Hash, block_size: BlockSize, data: T) -> io::Result<Self> {
+        let content = data.as_ref();
+        if content.len() < 8 {
+            io_error!("outboard must be at least 8 bytes");
+        };
+        let len = ByteNum(u64::from_le_bytes(content[0..8].try_into().unwrap()));
+        let tree = BaoTree::new(len, block_size);
+        let expected_outboard_size = outboard_size(len.0, block_size);
+        if content.len() as u64 != expected_outboard_size {
+            io_error!("invalid outboard size");
+        }
+        // zero pad the rest, if needed.
+        Ok(Self { root, tree, data })
+    }
+
+    /// The outboard data, including the length prefix.
+    pub fn outboard(&self) -> &[u8] {
+        self.data.as_ref()
+    }
+
+    pub fn hash(&self) -> &blake3::Hash {
+        &self.root
+    }
+
+    pub fn into_inner(self) -> T {
+        self.data
+    }
+
+    pub fn as_outboard_ref(&self) -> PreOrderMemOutboardRef {
+        PreOrderMemOutboardRef {
+            root: self.root,
+            tree: self.tree,
+            data: self.data.as_ref(),
+        }
+    }
+
+    pub fn flip(&self) -> PostOrderMemOutboard {
+        self.as_outboard_ref().flip()
+    }
+}
+
+impl<T: AsRef<[u8]>> crate::io::sync::Outboard for PreOrderMemOutboard<T> {
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        self.as_outboard_ref().load(node)
+    }
+}
+
+impl<T: AsRef<[u8]> + 'static> crate::io::fsm::Outboard for PreOrderMemOutboard<T> {
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+    type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
+    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
+        crate::io::fsm::Outboard::load(&self.as_outboard_ref(), node)
+    }
+}
+
 /// Pre-order outboard, stored in memory.
 ///
 /// Mostly for compat with bao, not very fast.
 #[derive(Debug, Clone)]
-pub struct PreOrderMemOutboard {
+pub struct PreOrderMemOutboardMut {
     /// root hash
     root: blake3::Hash,
     /// tree defining the data
@@ -384,7 +462,7 @@ pub struct PreOrderMemOutboard {
     changes: Option<RangeSet2<u64>>,
 }
 
-impl PreOrderMemOutboard {
+impl PreOrderMemOutboardMut {
     pub fn new(
         root: blake3::Hash,
         block_size: BlockSize,
@@ -414,9 +492,7 @@ impl PreOrderMemOutboard {
             changes,
         })
     }
-}
 
-impl PreOrderMemOutboard {
     /// The outboard data, including the length prefix.
     pub fn outboard(&self) -> &[u8] {
         &self.data
@@ -451,7 +527,7 @@ impl PreOrderMemOutboard {
     }
 }
 
-impl Outboard for PreOrderMemOutboard {
+impl Outboard for PreOrderMemOutboardMut {
     fn root(&self) -> blake3::Hash {
         self.root
     }
@@ -478,7 +554,7 @@ fn parse_hash_pair(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {
     (l_hash, r_hash)
 }
 
-impl crate::io::sync::OutboardMut for PreOrderMemOutboard {
+impl crate::io::sync::OutboardMut for PreOrderMemOutboardMut {
     fn save(&mut self, node: TreeNode, pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         match self.tree.pre_order_offset(node) {
             Some(offset) => {

@@ -18,7 +18,7 @@ use super::{
     canonicalize_range,
     io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
     iter::{BaoChunk, NodeInfo},
-    outboard::{PostOrderMemOutboard, PostOrderMemOutboardRef, PreOrderMemOutboard},
+    outboard::{PostOrderMemOutboard, PostOrderMemOutboardRef, PreOrderMemOutboardMut},
     pre_order_offset_slow,
     tree::{ByteNum, ChunkNum},
     BaoTree, BlockSize, PostOrderNodeIter, TreeNode,
@@ -146,7 +146,7 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let mut encoder = bao::encode::Encoder::new_outboard(cursor);
     encoder.write_all(data).unwrap();
     let hash = encoder.finalize().unwrap();
-    let pre = PreOrderMemOutboard::new(hash, BlockSize::DEFAULT, outboard, false);
+    let pre = PreOrderMemOutboardMut::new(hash, BlockSize::DEFAULT, outboard, false);
     pre.unwrap().flip()
 }
 

@@ -40,6 +40,38 @@ pub trait Outboard {
     fn load(&self, node: TreeNode) -> Self::LoadFuture<'_>;
 }
 
+impl<'b, O: Outboard> Outboard for &'b O {
+    fn root(&self) -> blake3::Hash {
+        (**self).root()
+    }
+
+    fn tree(&self) -> BaoTree {
+        (**self).tree()
+    }
+
+    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
+
+    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
+        (**self).load(node)
+    }
+}
+
+impl<'b, O: Outboard> Outboard for &'b mut O {
+    fn root(&self) -> blake3::Hash {
+        (**self).root()
+    }
+
+    fn tree(&self) -> BaoTree {
+        (**self).tree()
+    }
+
+    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
+
+    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
+        (**self).load(node)
+    }
+}
+
 /// Response decoder state machine, at the start of a stream
 #[derive(Debug)]
 pub struct ResponseDecoderStart<R> {
