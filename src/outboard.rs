@@ -370,7 +370,7 @@ impl<'a> crate::io::fsm::Outboard for PreOrderMemOutboardRef<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PreOrderMemOutboard<T: AsRef<[u8]> = Bytes> {
     /// root hash
     root: blake3::Hash,
