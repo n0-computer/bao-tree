@@ -1,7 +1,7 @@
 //! Iterators over BaoTree nodes
 //!
 //! Range iterators take a reference to the ranges, and therefore require a lifetime parameter.
-//! They can be used without lifetime parameters using self referecning structs.
+//! They can be used without lifetime parameters using self referencing structs.
 use std::fmt;
 
 use range_collections::{RangeSet2, RangeSetRef};

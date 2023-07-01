@@ -595,17 +595,17 @@ fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
     left - (left.count_ones() as u64) + parent_count
 }
 
-/// The outboard size of a file of size `size` with a blogk size of `block_size`
+/// The outboard size of a file of size `size` with a block size of `block_size`
 pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
     BaoTree::outboard_size(ByteNum(size), block_size).0
 }
 
-/// The encoded size of a file of size `size` with a blogk size of `block_size`
+/// The encoded size of a file of size `size` with a block size of `block_size`
 pub fn encoded_size(size: u64, block_size: BlockSize) -> u64 {
     outboard_size(size, block_size) + size
 }
 
-/// Computes the  pre order outboard of a file in memory.
+/// Computes the pre order outboard of a file in memory.
 pub fn outboard(input: impl AsRef<[u8]>, block_size: BlockSize) -> (Vec<u8>, blake3::Hash) {
     let outboard = BaoTree::outboard_post_order_mem(input, block_size).flip();
     let hash = *outboard.hash();
