@@ -43,6 +43,7 @@ index_newtype! {
 /// A block size.
 ///
 /// Block sizes are powers of 2, with the smallest being 1024 bytes.
+/// They are encoded as the power of 2, minus 10, so 1 is 1024 bytes, 2 is 2048 bytes, etc.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockSize(pub u8);
@@ -56,6 +57,19 @@ impl BlockSize {
     /// Number of bytes in a block at this level
     pub const fn bytes(self) -> usize {
         byte_size(self.0)
+    }
+
+    /// Compute a block size from bytes
+    pub const fn from_bytes(bytes: u64) -> Option<Self> {
+        if bytes.count_ones() != 1 {
+            // must be a power of 2
+            return None;
+        }
+        if bytes < 1024 {
+            // must be at least 1024 bytes
+            return None;
+        }
+        Some(Self((bytes.trailing_zeros() - 10) as u8))
     }
 }
 
