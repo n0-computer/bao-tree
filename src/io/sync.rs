@@ -1,6 +1,6 @@
 //! Syncronous IO
 use std::{
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Write},
     ops::Range,
     result,
 };
@@ -594,7 +594,7 @@ where
 /// Note that it is up to you to call flush.
 pub fn write_ranges(
     from: impl AsRef<[u8]>,
-    mut to: impl Write + Seek,
+    mut to: impl WriteAt,
     ranges: &RangeSetRef<u64>,
 ) -> io::Result<()> {
     let from = from.as_ref();
@@ -606,8 +606,7 @@ pub fn write_ranges(
         };
         let start = usize::try_from(range.start).unwrap();
         let end = usize::try_from(range.end).unwrap();
-        to.seek(SeekFrom::Start(range.start))?;
-        to.write_all(&from[start..end])?;
+        to.write_all_at(range.start, &from[start..end])?;
     }
     Ok(())
 }
@@ -719,14 +718,13 @@ fn read_parent(from: &mut impl Read) -> std::io::Result<(blake3::Hash, blake3::H
 
 /// seeks read the bytes for the range from the source
 fn read_range<'a>(
-    from: &mut (impl Read + Seek),
+    from: &mut impl ReadAt,
     range: Range<ByteNum>,
     buf: &'a mut [u8],
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
-    from.seek(std::io::SeekFrom::Start(range.start.0))?;
     let buf = &mut buf[..len];
-    from.read_exact(buf)?;
+    from.read_exact_at(range.start.0, buf)?;
     Ok(buf)
 }
 
@@ -734,9 +732,9 @@ fn read_range<'a>(
 pub fn valid_file_ranges<O, R>(outboard: &O, reader: R) -> io::Result<RangeSet2<ChunkNum>>
 where
     O: Outboard,
-    R: Read + Seek,
+    R: ReadAt,
 {
-    struct RecursiveValidator<'a, O: Outboard, R: Read + Seek> {
+    struct RecursiveValidator<'a, O: Outboard, R: ReadAt> {
         tree: BaoTree,
         valid_nodes: TreeNode,
         res: RangeSet2<ChunkNum>,
@@ -745,7 +743,7 @@ where
         buffer: Vec<u8>,
     }
 
-    impl<'a, O: Outboard, R: Read + Seek> RecursiveValidator<'a, O, R> {
+    impl<'a, O: Outboard, R: ReadAt> RecursiveValidator<'a, O, R> {
         fn validate_rec(
             &mut self,
             parent_hash: &blake3::Hash,

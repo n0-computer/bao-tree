@@ -88,6 +88,7 @@ impl crate::io::sync::OutboardMut for EmptyOutboard {
 }
 
 /// A generic outboard in pre order
+#[derive(Debug, Clone)]
 pub struct PreOrderOutboard<R> {
     /// root hash
     pub(crate) root: blake3::Hash,
@@ -105,6 +106,7 @@ impl<R> PreOrderOutboard<R> {
 }
 
 /// A generic outboard in post order
+#[derive(Debug, Clone)]
 pub struct PostOrderOutboard<R> {
     /// root hash
     pub(crate) root: blake3::Hash,

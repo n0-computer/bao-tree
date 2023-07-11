@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "bao-tree"
-version = "0.5.0-rc.3"
+version = "0.5.0"
 dependencies = [
  "abao",
  "bao",
@@ -734,9 +734,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-io"
-version = "0.2.0-rc.3"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cd17448eee20adf26444a35002a74fd9096eb05c7cd72b4f135b9b42c786e7d"
+checksum = "65ab77680677309a40f5f3821d0bb4fe86ef14d6b733c87d204e8bc79be92a2d"
 dependencies = [
  "bytes",
  "futures",
