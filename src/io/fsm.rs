@@ -37,23 +37,10 @@ pub trait Outboard {
     where
         Self: 'a;
     /// load the hash pair for a node
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_>;
-}
-
-impl<'b, O: Outboard> Outboard for &'b O {
-    fn root(&self) -> blake3::Hash {
-        (**self).root()
-    }
-
-    fn tree(&self) -> BaoTree {
-        (**self).tree()
-    }
-
-    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
-
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
-        (**self).load(node)
-    }
+    ///
+    /// This takes a &mut self not because it mutates the outboard (it doesn't),
+    /// but to ensure that there is only one outstanding load at a time.
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_>;
 }
 
 impl<'b, O: Outboard> Outboard for &'b mut O {
@@ -67,7 +54,7 @@ impl<'b, O: Outboard> Outboard for &'b mut O {
 
     type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
 
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
         (**self).load(node)
     }
 }
@@ -248,7 +235,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
 /// This will not validate on writing, so data corruption will be detected on reading
 pub async fn encode_ranges<D, O, W>(
     data: &mut D,
-    outboard: O,
+    mut outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
 ) -> result::Result<(), EncodeError>
@@ -295,7 +282,7 @@ where
 /// This function validates the data before writing
 pub async fn encode_ranges_validated<D, O, W>(
     data: &mut D,
-    outboard: O,
+    mut outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
 ) -> result::Result<(), EncodeError>

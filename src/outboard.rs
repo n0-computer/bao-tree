@@ -52,7 +52,7 @@ impl crate::io::fsm::Outboard for EmptyOutboard {
         self.tree
     }
     type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
         futures::future::ok(if self.tree.is_persisted(node) {
             // behave as if it was an outboard file filled with 0s
             Some((blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32])))
@@ -149,7 +149,7 @@ impl<'a> crate::io::fsm::Outboard for PostOrderMemOutboardRef<'a> {
     }
     type LoadFuture<'b> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>
         where 'a: 'b;
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
         futures::future::ok(load_raw_post_mem(&self.tree, self.data, node).map(parse_hash_pair))
     }
 }
@@ -243,8 +243,8 @@ impl crate::io::fsm::Outboard for PostOrderMemOutboard {
         self.tree
     }
     type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
-        crate::io::fsm::Outboard::load(&self.as_outboard_ref(), node)
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
+        crate::io::fsm::Outboard::load(&mut self.as_outboard_ref(), node)
     }
 }
 
@@ -365,7 +365,7 @@ impl<'a> crate::io::fsm::Outboard for PreOrderMemOutboardRef<'a> {
     type LoadFuture<'b> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>
         where
             'a: 'b;
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
         futures::future::ok(load_raw_pre_mem(&self.tree, self.data, node).map(parse_hash_pair))
     }
 }
@@ -442,8 +442,8 @@ impl<T: AsRef<[u8]> + 'static> crate::io::fsm::Outboard for PreOrderMemOutboard<
         self.tree
     }
     type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
-        crate::io::fsm::Outboard::load(&self.as_outboard_ref(), node)
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
+        crate::io::fsm::Outboard::load(&mut self.as_outboard_ref(), node)
     }
 }
 
