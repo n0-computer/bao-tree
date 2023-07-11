@@ -439,7 +439,7 @@ fn flip_pre(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PostOrderMemOutbo
     PostOrderMemOutboard {
         root,
         tree,
-        data: out.into(),
+        data: out,
     }
 }
 

@@ -186,7 +186,7 @@ impl<R: ReadAt + Size> PostOrderOutboard<R> {
         };
         let mut suffix = [0u8; 8];
         data.read_exact_at(outboard_size - 8, &mut suffix)?;
-        let len = u64::from_le_bytes(suffix.try_into().unwrap());
+        let len = u64::from_le_bytes(suffix);
         let expected_outboard_size = super::outboard_size(len, block_size);
         if outboard_size != expected_outboard_size {
             io_error!(
@@ -250,7 +250,7 @@ impl PostOrderMemOutboard {
         }
         let tree = BaoTree::new(ByteNum(len), block_size);
         outboard.truncate(outboard.len() - 8);
-        Ok(Self::new(root, tree, outboard.into()))
+        Ok(Self::new(root, tree, outboard))
     }
 }
 
