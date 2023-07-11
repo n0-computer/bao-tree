@@ -330,26 +330,12 @@ fn range_ok(range: &RangeSetRef<ChunkNum>, end: ChunkNum) -> bool {
 pub struct TreeNode(u64);
 
 /// A tree node for which we know that it is a leaf node.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct LeafNode(u64);
 
 impl From<LeafNode> for TreeNode {
     fn from(leaf: LeafNode) -> TreeNode {
         Self(leaf.0)
-    }
-}
-
-impl LeafNode {
-    /// Range of blocks that this leaf node covers
-    #[inline]
-    pub fn block_range(&self) -> Range<BlockNum> {
-        BlockNum(self.0)..BlockNum(self.0 + 2)
-    }
-}
-
-impl fmt::Debug for LeafNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LeafNode({})", self.0)
     }
 }
 
