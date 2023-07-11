@@ -1,3 +1,13 @@
+//! The tree for the bao file format
+//!
+//! This crate is similar to the [bao crate](https://crates.io/crates/bao), but
+//! takes a slightly different approach.
+//!
+//! The core struct is [BaoTree], which describes the geometry of the tree and
+//! various ways to traverse it.
+//!
+//! This is then used in the [io] module to implement the actual io.
+#![deny(missing_docs)]
 use range_collections::{range_set::RangeSetEntry, RangeSetRef};
 use std::{
     fmt::{self, Debug},
@@ -21,7 +31,7 @@ mod tests;
 
 /// Defines a Bao tree.
 ///
-/// This is just the specification of the tree, it does not contain any actual data
+/// This is just the specification of the tree, it does not contain any actual data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaoTree {
     /// Total number of bytes in the file
@@ -52,6 +62,7 @@ impl PostOrderOffset {
 }
 
 impl BaoTree {
+    /// Create a new empty BaoTree with the given block size
     pub fn empty(block_size: BlockSize) -> Self {
         Self::new(ByteNum(0), block_size)
     }
@@ -77,6 +88,7 @@ impl BaoTree {
         PostOrderMemOutboard::new(hash, tree, res)
     }
 
+    /// The size of the blob from which this tree was constructed, in bytes
     pub fn size(&self) -> ByteNum {
         self.size
     }
@@ -218,6 +230,7 @@ impl BaoTree {
         ByteNum(blocks.0 << (10 + self.block_size.0))
     }
 
+    /// The offset of the given node in the pre order traversal
     pub fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
         if self.is_persisted(node) {
             Some(pre_order_offset_slow(node.0, self.filled_size().0))
@@ -226,6 +239,7 @@ impl BaoTree {
         }
     }
 
+    /// The offset of the given node in the post order traversal
     pub fn post_order_offset(&self, node: TreeNode) -> Option<PostOrderOffset> {
         if self.is_sealed(node) {
             Some(PostOrderOffset::Stable(node.post_order_offset()))
@@ -279,6 +293,7 @@ impl ByteNum {
 }
 
 impl ChunkNum {
+    /// number of bytes that this number of chunks covers
     pub const fn to_bytes(&self) -> ByteNum {
         ByteNum(self.0 << 10)
     }
@@ -325,6 +340,7 @@ impl From<LeafNode> for TreeNode {
 }
 
 impl LeafNode {
+    /// Range of blocks that this leaf node covers
     #[inline]
     pub fn block_range(&self) -> Range<BlockNum> {
         BlockNum(self.0)..BlockNum(self.0 + 2)
@@ -355,7 +371,7 @@ impl TreeNode {
         Self(((blocks.0 + 1) / 2).next_power_of_two() - 1)
     }
 
-    // the middle of the tree node, in blocks
+    /// the middle of the tree node, in blocks
     pub const fn mid(&self) -> BlockNum {
         BlockNum(self.0 + 1)
     }
@@ -365,22 +381,26 @@ impl TreeNode {
         1 << self.level()
     }
 
+    /// The level of the node in the tree, 0 for leafs.
     #[inline]
     pub const fn level(&self) -> u32 {
         (!self.0).trailing_zeros()
     }
 
+    /// True if this is a leaf node.
     #[inline]
     pub const fn is_leaf(&self) -> bool {
         self.level() == 0
     }
 
+    /// Range of blocks that this node covers, given a block size
     pub fn byte_range(&self, block_size: BlockSize) -> Range<ByteNum> {
         let range = self.block_range();
         let shift = 10 + block_size.0;
         ByteNum(range.start.0 << shift)..ByteNum(range.end.0 << shift)
     }
 
+    /// Convert to a leaf node, if this is a leaf node.
     pub const fn as_leaf(&self) -> Option<LeafNode> {
         if self.is_leaf() {
             Some(LeafNode(self.0))
@@ -389,6 +409,7 @@ impl TreeNode {
         }
     }
 
+    /// Number of nodes below this node, excluding this node.
     #[inline]
     pub const fn count_below(&self) -> u64 {
         // go to representation where trailing zeros are the level
@@ -404,10 +425,12 @@ impl TreeNode {
         self.next_left_ancestor0().map(Self)
     }
 
+    /// Get the left child of this node, or None if it is a child node.
     pub fn left_child(&self) -> Option<Self> {
         self.left_child0().map(Self)
     }
 
+    /// Get the right child of this node, or None if it is a child node.
     pub fn right_child(&self) -> Option<Self> {
         self.right_child0().map(Self)
     }
@@ -463,6 +486,7 @@ impl TreeNode {
         })
     }
 
+    /// Get the range of nodes this node covers
     pub const fn node_range(&self) -> Range<Self> {
         let half_span = self.half_span();
         let nn = self.0;
@@ -471,6 +495,7 @@ impl TreeNode {
         Self(l)..Self(r)
     }
 
+    /// Get the range of blocks this node covers
     pub fn block_range(&self) -> Range<BlockNum> {
         let Range { start, end } = self.block_range0();
         BlockNum(start)..BlockNum(end)
@@ -486,6 +511,7 @@ impl TreeNode {
         mid - span..mid + span
     }
 
+    /// Get the post order offset of this node
     pub fn post_order_offset(&self) -> u64 {
         self.post_order_offset0()
     }
@@ -510,6 +536,7 @@ impl TreeNode {
         }
     }
 
+    /// Get the range of post order offsets this node covers
     pub fn post_order_range(&self) -> Range<u64> {
         self.post_order_range0()
     }

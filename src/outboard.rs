@@ -1,9 +1,16 @@
 //! Implementations of the outboard traits
+//!
+//! A number of implementations for the sync and async outboard traits are provided.
+//! Implementations for in-memory outboards, for outboards where the data resides on disk,
+//! and a special implementation [EmptyOutboard] that just ignores all writes.
 use bytes::Bytes;
 use range_collections::RangeSet2;
 
 use super::{outboard_size, TreeNode};
-use crate::{io::sync::Outboard, BaoTree, BlockSize, ByteNum};
+use crate::{
+    io::sync::{Outboard, OutboardMut},
+    BaoTree, BlockSize, ByteNum,
+};
 use std::io;
 
 macro_rules! io_error {
@@ -22,6 +29,7 @@ pub struct EmptyOutboard {
 }
 
 impl EmptyOutboard {
+    /// Create a new empty outboard with the given hash and tree.
     pub fn new(tree: BaoTree, root: blake3::Hash) -> Self {
         Self { tree, root }
     }
@@ -90,6 +98,7 @@ pub struct PreOrderOutboard<R> {
 }
 
 impl<R> PreOrderOutboard<R> {
+    /// Return the inner reader
     pub fn into_inner(self) -> R {
         self.data
     }
@@ -106,12 +115,13 @@ pub struct PostOrderOutboard<R> {
 }
 
 impl<R> PostOrderOutboard<R> {
+    /// Return the inner reader
     pub fn into_inner(self) -> R {
         self.data
     }
 }
 
-/// Post-order outboard, stored in memory.
+/// A post order outboard that is optimized for memory storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostOrderMemOutboard<T: AsRef<[u8]> = Vec<u8>> {
     /// root hash
@@ -142,6 +152,7 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
         self.data.as_ref()
     }
 
+    /// Flip the outboard to pre order.
     pub fn flip(&self) -> PreOrderMemOutboardMut {
         flip_post(self.root, self.tree, self.data.as_ref())
     }
@@ -233,6 +244,7 @@ fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutbo
     }
 }
 
+/// A pre order outboard that is optimized for memory storage.
 #[derive(Debug, Clone)]
 pub struct PreOrderMemOutboard<T: AsRef<[u8]> = Bytes> {
     /// root hash
@@ -244,6 +256,7 @@ pub struct PreOrderMemOutboard<T: AsRef<[u8]> = Bytes> {
 }
 
 impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
+    /// Create a new outboard from a root hash, block size, and data.
     pub fn new(root: blake3::Hash, block_size: BlockSize, data: T) -> io::Result<Self> {
         let content = data.as_ref();
         if content.len() < 8 {
@@ -264,14 +277,17 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
         self.data.as_ref()
     }
 
+    /// The root hash.
     pub fn hash(&self) -> &blake3::Hash {
         &self.root
     }
 
+    /// Get the inner data.
     pub fn into_inner(self) -> T {
         self.data
     }
 
+    /// Flip the outboard to a post order outboard.
     pub fn flip(&self) -> PostOrderMemOutboard {
         flip_pre(self.root, self.tree, self.data.as_ref())
     }
@@ -303,7 +319,7 @@ impl<T: AsRef<[u8]> + 'static> crate::io::fsm::Outboard for PreOrderMemOutboard<
     }
 }
 
-/// Pre-order outboard, stored in memory.
+/// A mutable pre order outboard that is optimized for memory storage.
 ///
 /// Mostly for compat with bao, not very fast.
 #[derive(Debug, Clone)]
@@ -319,6 +335,7 @@ pub struct PreOrderMemOutboardMut {
 }
 
 impl PreOrderMemOutboardMut {
+    /// Create a new mutable outboard.
     pub fn new(
         root: blake3::Hash,
         block_size: BlockSize,
@@ -354,22 +371,27 @@ impl PreOrderMemOutboardMut {
         &self.data
     }
 
+    /// The root hash.
     pub fn hash(&self) -> &blake3::Hash {
         &self.root
     }
 
+    /// Get a set of changes to the outboard.
     pub fn changes(&self) -> &Option<RangeSet2<u64>> {
         &self.changes
     }
 
+    /// Mutable reference to the set of changes.
     pub fn changes_mut(&mut self) -> &mut Option<RangeSet2<u64>> {
         &mut self.changes
     }
 
+    /// The outboard data, including the length prefix.
     pub fn into_inner(self) -> Vec<u8> {
         self.data
     }
 
+    /// Flip this outboard into a post order outboard.
     pub fn flip(&self) -> PostOrderMemOutboard {
         flip_pre(self.root, self.tree, self.data.as_ref())
     }
@@ -423,7 +445,7 @@ pub(crate) fn parse_hash_pair(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {
     (l_hash, r_hash)
 }
 
-impl crate::io::sync::OutboardMut for PreOrderMemOutboardMut {
+impl OutboardMut for PreOrderMemOutboardMut {
     fn save(&mut self, node: TreeNode, pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         match self.tree.pre_order_offset(node) {
             Some(offset) => {

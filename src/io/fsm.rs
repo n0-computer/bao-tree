@@ -10,30 +10,69 @@ use std::{io, result};
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};
-use iroh_io::AsyncSliceReader;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     hash_block,
+    io::{
+        error::{DecodeError, EncodeError},
+        Leaf, Parent,
+    },
     iter::{BaoChunk, PreOrderChunkIter},
     outboard::{PostOrderOutboard, PreOrderOutboard},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
+pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::{
-    error::{DecodeError, EncodeError},
-    DecodeResponseItem, Leaf, Parent,
-};
-
-macro_rules! io_error {
-    ($($arg:tt)*) => {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
-    };
+/// An item of a decode response
+///
+/// This is used by both sync and tokio decoders
+#[derive(Debug)]
+pub enum DecodeResponseItem {
+    /// a parent node, to update the outboard
+    Parent(Parent),
+    /// a leaf node, to write to the file
+    Leaf(Leaf),
 }
 
-/// An outboard is a just a thing that knows how big it is and can get you the hashes for a node.
+impl From<Parent> for DecodeResponseItem {
+    fn from(p: Parent) -> Self {
+        Self::Parent(p)
+    }
+}
+
+impl From<Leaf> for DecodeResponseItem {
+    fn from(l: Leaf) -> Self {
+        Self::Leaf(l)
+    }
+}
+
+/// A binary merkle tree for blake3 hashes of a blob.
+///
+/// This trait contains information about the geometry of the tree, the root hash,
+/// and a method to load the hashes at a given node.
+///
+/// It is up to the implementor to decide how to store the hashes.
+///
+/// In the original bao crate, the hashes are stored in a file in pre order.
+/// This is implemented for a generic io object in [crate::outboard::PreOrderOutboard]
+/// and for a memory region in [crate::outboard::PreOrderMemOutboard].
+///
+/// For files that grow over time, it is more efficient to store the hashes in post order.
+/// This is implemented for a generic io object in [crate::outboard::PostOrderOutboard]
+/// and for a memory region in [crate::outboard::PostOrderMemOutboard].
+///
+/// If you use a different storage engine, you can implement this trait for it. E.g.
+/// you could store the hashes in a database and use the node number as the key.
+///
+/// The async version takes a mutable reference to load, not because it mutates
+/// the outboard (it doesn't), but to ensure that there is at most one outstanding
+/// load at a time.
+///
+/// Dropping the load future without polling it to completion is safe, but will
+/// possibly render the outboard unusable.
 pub trait Outboard {
     /// The root hash
     fn root(&self) -> blake3::Hash;
@@ -48,6 +87,36 @@ pub trait Outboard {
     /// This takes a &mut self not because it mutates the outboard (it doesn't),
     /// but to ensure that there is only one outstanding load at a time.
     fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_>;
+}
+
+/// A mutable outboard.
+///
+/// This trait extends [Outboard] with methods to save a hash pair for a node and to set the
+/// length of the data file.
+///
+/// This trait can be used to incrementally save an outboard when receiving data.
+/// If you want to just ignore outboard data, there is a special placeholder outboard
+/// implementation [crate::outboard::EmptyOutboard].
+pub trait OutboardMut: Outboard {
+    /// Future returned by `save`
+    type SaveFuture<'a>: Future<Output = io::Result<()>>
+    where
+        Self: 'a;
+
+    /// Save a hash pair for a node
+    fn save(
+        &mut self,
+        node: TreeNode,
+        hash_pair: &(blake3::Hash, blake3::Hash),
+    ) -> Self::SaveFuture<'_>;
+
+    /// Future returned by `set_size`
+    type SetSizeFuture<'a>: Future<Output = io::Result<()>>
+    where
+        Self: 'a;
+
+    /// Set the length of the file for which this outboard is
+    fn set_size(&mut self, len: ByteNum) -> Self::SetSizeFuture<'_>;
 }
 
 impl<'b, O: Outboard> Outboard for &'b mut O {
@@ -205,11 +274,16 @@ pub struct ResponseDecoderReading<R>(Box<ResponseDecoderReadingInner<R>>);
 
 /// Next type for ResponseDecoderReading.
 #[derive(Debug)]
-pub enum ResponseDecoderReadingNext<M, D> {
-    /// More data is available
-    More(M),
-    /// The stream is done
-    Done(D),
+pub enum ResponseDecoderReadingNext<R> {
+    /// One more item, and you get back the state machine in the next state
+    More(
+        (
+            ResponseDecoderReading<R>,
+            std::result::Result<DecodeResponseItem, DecodeError>,
+        ),
+    ),
+    /// The stream is done, you get back the underlying reader
+    Done(R),
 }
 
 impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
@@ -227,10 +301,8 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         }))
     }
 
-    pub async fn next(
-        mut self,
-    ) -> ResponseDecoderReadingNext<(Self, std::result::Result<DecodeResponseItem, DecodeError>), R>
-    {
+    /// Proceed to the next state by reading the next chunk from the stream.
+    pub async fn next(mut self) -> ResponseDecoderReadingNext<R> {
         if let Some(chunk) = self.0.iter.next() {
             let item = self.next0(chunk).await;
             ResponseDecoderReadingNext::More((self, item))
@@ -239,6 +311,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         }
     }
 
+    /// Immediately return the underlying reader
     pub fn finish(self) -> R {
         self.0.encoded
     }
@@ -418,6 +491,44 @@ where
     Ok(())
 }
 
+/// Decode a response into a file while updating an outboard.
+///
+/// If you do not want to update an outboard, use [crate::outboard::EmptyOutboard] as
+/// the outboard.
+pub async fn decode_response_into<R, O, W>(
+    ranges: RangeSet2<ChunkNum>,
+    encoded: R,
+    mut outboard: O,
+    mut target: W,
+) -> io::Result<()>
+where
+    O: OutboardMut,
+    R: AsyncRead + Unpin,
+    W: AsyncSliceWriter,
+{
+    let start =
+        ResponseDecoderStart::new(outboard.root(), ranges, outboard.tree().block_size, encoded);
+    let (mut reading, size) = start.next().await?;
+    outboard.set_size(ByteNum(size)).await?;
+    loop {
+        let item = match reading.next().await {
+            ResponseDecoderReadingNext::Done(_reader) => break,
+            ResponseDecoderReadingNext::More((next, item)) => {
+                reading = next;
+                item?
+            }
+        };
+        match item {
+            DecodeResponseItem::Parent(Parent { node, pair }) => {
+                outboard.save(node, &pair).await?;
+            }
+            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+                target.write_bytes_at(offset.0, data).await?;
+            }
+        }
+    }
+    Ok(())
+}
 fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());

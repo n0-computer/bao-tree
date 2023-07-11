@@ -7,53 +7,30 @@ pub mod error;
 pub mod fsm;
 pub mod sync;
 
-/// An item of a decode response
-///
-/// This is used by both sync and tokio decoders
-#[derive(Debug)]
-pub enum DecodeResponseItem {
-    /// We got the header and now know how big the overall size is
-    ///
-    /// Actually this is just how big the remote side *claims* the overall size is.
-    /// In an adversarial setting, this could be wrong.
-    Header(Header),
-    /// a parent node, to update the outboard
-    Parent(Parent),
-    /// a leaf node, to write to the file
-    Leaf(Leaf),
-}
-
-impl From<Header> for DecodeResponseItem {
-    fn from(h: Header) -> Self {
-        Self::Header(h)
-    }
-}
-
-impl From<Parent> for DecodeResponseItem {
-    fn from(p: Parent) -> Self {
-        Self::Parent(p)
-    }
-}
-
-impl From<Leaf> for DecodeResponseItem {
-    fn from(l: Leaf) -> Self {
-        Self::Leaf(l)
-    }
-}
-
+/// A bao header, containing the size of the file.
 #[derive(Debug)]
 pub struct Header {
+    /// The size of the file.
+    ///
+    /// This is not the size of the data you are being sent, but the oveall size
+    /// of the file.
     pub size: ByteNum,
 }
 
+/// A parent hash pair.
 #[derive(Debug)]
 pub struct Parent {
+    /// The node in the tree for which the hashes are.
     pub node: TreeNode,
+    /// The pair of hashes for the node.
     pub pair: (blake3::Hash, blake3::Hash),
 }
 
+/// A leaf node.
 #[derive(Debug)]
 pub struct Leaf {
+    /// The byte offset of the leaf in the file.
     pub offset: ByteNum,
+    /// The data of the leaf.
     pub data: Bytes,
 }

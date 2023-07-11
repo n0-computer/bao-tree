@@ -6,8 +6,9 @@ use std::ops::{Add, Div, Mul, Sub};
 use range_collections::range_set::RangeSetEntry;
 
 index_newtype! {
-    /// A number of blake3 chunks
+    /// A number of blake3 chunks.
     ///
+    /// This is a newtype for u64.
     /// The blake3 chunk size is 1024 bytes.
     pub struct ChunkNum(pub u64);
 }
@@ -15,7 +16,9 @@ index_newtype! {
 pub(crate) const BLAKE3_CHUNK_SIZE: usize = 1024;
 
 index_newtype! {
-    /// a block number
+    /// A block number.
+    ///
+    /// This is a newtype for u64.
     pub struct BlockNum(pub u64);
 }
 
@@ -30,7 +33,10 @@ impl BlockNum {
 }
 
 index_newtype! {
-    /// A number of bytes
+    /// A number of bytes.
+    ///
+    /// This is a newtype for u64. It does not distinguish between an absolute
+    /// number of bytes or a difference between two numbers of bytes.
     pub struct ByteNum(pub u64);
 }
 
@@ -39,17 +45,13 @@ index_newtype! {
 /// Block sizes are powers of 2, with the smallest being 1024 bytes.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlockSize(pub(crate) u8);
+pub struct BlockSize(pub u8);
 
 impl BlockSize {
     /// The default block size, 1024 bytes
     ///
     /// This means that blocks and blake3 chunks are the same size.
     pub const DEFAULT: BlockSize = BlockSize(0);
-
-    pub const fn new(n: u8) -> Option<BlockSize> {
-        Some(BlockSize(n))
-    }
 
     /// Number of bytes in a block at this level
     pub const fn bytes(self) -> usize {

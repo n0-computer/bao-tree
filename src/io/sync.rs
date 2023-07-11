@@ -8,6 +8,7 @@ use std::{
 use crate::{
     hash_block, hash_chunk,
     io::error::{DecodeError, EncodeError},
+    io::{Header, Leaf, Parent},
     iter::{BaoChunk, PreOrderChunkIterRef},
     outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
     outboard_size, range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
@@ -24,7 +25,57 @@ macro_rules! io_error {
     };
 }
 
-/// An outboard is a just a thing that knows how big it is and can get you the hashes for a node.
+/// An item of a decode response
+///
+/// This is used by both sync and tokio decoders
+#[derive(Debug)]
+pub enum DecodeResponseItem {
+    /// We got the header and now know how big the overall size is
+    ///
+    /// Actually this is just how big the remote side *claims* the overall size is.
+    /// In an adversarial setting, this could be wrong.
+    Header(Header),
+    /// a parent node, to update the outboard
+    Parent(Parent),
+    /// a leaf node, to write to the file
+    Leaf(Leaf),
+}
+
+impl From<Header> for DecodeResponseItem {
+    fn from(h: Header) -> Self {
+        Self::Header(h)
+    }
+}
+
+impl From<Parent> for DecodeResponseItem {
+    fn from(p: Parent) -> Self {
+        Self::Parent(p)
+    }
+}
+
+impl From<Leaf> for DecodeResponseItem {
+    fn from(l: Leaf) -> Self {
+        Self::Leaf(l)
+    }
+}
+
+/// A binary merkle tree for blake3 hashes of a blob.
+///
+/// This trait contains information about the geometry of the tree, the root hash,
+/// and a method to load the hashes at a given node.
+///
+/// It is up to the implementor to decide how to store the hashes.
+///
+/// In the original bao crate, the hashes are stored in a file in pre order.
+/// This is implemented for a generic io object in [crate::outboard::PreOrderOutboard]
+/// and for a memory region in [crate::outboard::PreOrderMemOutboard].
+///
+/// For files that grow over time, it is more efficient to store the hashes in post order.
+/// This is implemented for a generic io object in [crate::outboard::PostOrderOutboard]
+/// and for a memory region in [crate::outboard::PostOrderMemOutboard].
+///
+/// If you use a different storage engine, you can implement this trait for it. E.g.
+/// you could store the hashes in a database and use the node number as the key.
 pub trait Outboard {
     /// The root hash
     fn root(&self) -> blake3::Hash;
@@ -34,6 +85,14 @@ pub trait Outboard {
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>>;
 }
 
+/// A mutable outboard.
+///
+/// This trait extends [Outboard] with methods to save a hash pair for a node and to set the
+/// length of the data file.
+///
+/// This trait can be used to incrementally save an outboard when receiving data.
+/// If you want to just ignore outboard data, there is a special placeholder outboard
+/// implementation [crate::outboard::EmptyOutboard].
 pub trait OutboardMut: Outboard {
     /// Set the length of the file for which this outboard is
     fn set_size(&mut self, len: ByteNum) -> io::Result<()>;
@@ -75,6 +134,7 @@ impl<O: OutboardMut> OutboardMut for &mut O {
 }
 
 impl<R: ReadAt + Size> PreOrderOutboard<R> {
+    /// Create a new outboard from a reader, root hash, and block size.
     pub fn new(root: blake3::Hash, block_size: BlockSize, data: R) -> io::Result<Self> {
         let mut content = [0u8; 8];
         data.read_exact_at(0, &mut content)?;
@@ -115,6 +175,7 @@ impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
 }
 
 impl<R: ReadAt + Size> PostOrderOutboard<R> {
+    /// Create a new outboard from a reader, root hash, and block size.
     pub fn new(root: blake3::Hash, block_size: BlockSize, data: R) -> io::Result<Self> {
         // validate roughly that the outboard is correct
         let Some(outboard_size) = data.size()? else {
@@ -160,6 +221,7 @@ impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
 }
 
 impl PostOrderMemOutboard {
+    /// Load a post-order outboard from a reader, root hash, and block size.
     pub fn load(
         root: blake3::Hash,
         data: impl ReadAt + Size,
@@ -247,8 +309,6 @@ where
     Ok(validator.res)
 }
 
-use super::{DecodeResponseItem, Header, Leaf, Parent};
-
 // When this enum is used it is in the Header variant for the first 8 bytes, then stays in
 // the Content state for the remainder.  Since the Content is the largest part that this
 // size inbalance is fine, hence allow clippy::large_enum_variant.
@@ -265,6 +325,7 @@ enum Position<'a> {
     Content { iter: PreOrderChunkIterRef<'a> },
 }
 
+/// Iterator that can be used to decode a response to a range request
 #[derive(Debug)]
 pub struct DecodeResponseIter<'a, R> {
     inner: Position<'a>,
@@ -274,6 +335,11 @@ pub struct DecodeResponseIter<'a, R> {
 }
 
 impl<'a, R: Read> DecodeResponseIter<'a, R> {
+    /// Create a new iterator to decode a response.
+    ///
+    /// For decoding you need to know the root hash, block size, and the ranges that were requested.
+    /// Additionally you need to provide a reader that can be used to read the encoded data, and
+    /// a buffer to use for decoding.
     pub fn new(
         root: blake3::Hash,
         block_size: BlockSize,
@@ -291,10 +357,14 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         }
     }
 
+    /// Get a reference to the buffer used for decoding.
     pub fn buffer(&self) -> &[u8] {
         &self.buf
     }
 
+    /// Get a reference to the tree used for decoding.
+    ///
+    /// This is only available after the first chunk has been decoded.
     pub fn tree(&self) -> Option<&BaoTree> {
         match &self.inner {
             Position::Content { iter } => Some(iter.tree()),
@@ -486,7 +556,10 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     Ok(())
 }
 
-/// Decode a response into a file while updating an outboard
+/// Decode a response into a file while updating an outboard.
+///
+/// If you do not want to update an outboard, use [crate::outboard::EmptyOutboard] as
+/// the outboard.
 pub async fn decode_response_into<R, O, W>(
     ranges: &RangeSetRef<ChunkNum>,
     encoded: R,

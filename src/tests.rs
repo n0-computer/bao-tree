@@ -10,8 +10,8 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
 use crate::io::{
-    sync::{valid_ranges, Outboard},
-    DecodeResponseItem, Leaf,
+    sync::{valid_ranges, DecodeResponseItem, Outboard},
+    Leaf,
 };
 
 use super::{
@@ -758,7 +758,7 @@ proptest! {
     /// restricted pre-order iterator for the entire tree.
     #[test]
     fn pre_order_iter_comparison(len in 0..1000000u64, level in 0u8..4) {
-        let tree = BaoTree::new(ByteNum(len), BlockSize::new(level).unwrap());
+        let tree = BaoTree::new(ByteNum(len), BlockSize(level));
         let iter1 = tree.pre_order_nodes_iter().collect::<Vec<_>>();
         let iter2 = tree.ranges_pre_order_nodes_iter(&RangeSet2::all(), 0).map(|x| x.node).collect::<Vec<_>>();
         prop_assert_eq!(iter1, iter2);
