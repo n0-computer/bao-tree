@@ -8,10 +8,12 @@ use std::{
 use crate::{
     hash_block, hash_chunk,
     io::error::{DecodeError, EncodeError},
-    io::{Header, Leaf, Parent},
+    io::{
+        outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
+        Header, Leaf, Parent,
+    },
     iter::{BaoChunk, PreOrderChunkIterRef},
-    outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
-    outboard_size, range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
+    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
@@ -65,12 +67,12 @@ impl From<Leaf> for DecodeResponseItem {
 /// It is up to the implementor to decide how to store the hashes.
 ///
 /// In the original bao crate, the hashes are stored in a file in pre order.
-/// This is implemented for a generic io object in [crate::outboard::PreOrderOutboard]
-/// and for a memory region in [crate::outboard::PreOrderMemOutboard].
+/// This is implemented for a generic io object in [super::outboard::PreOrderOutboard]
+/// and for a memory region in [super::outboard::PreOrderMemOutboard].
 ///
 /// For files that grow over time, it is more efficient to store the hashes in post order.
-/// This is implemented for a generic io object in [crate::outboard::PostOrderOutboard]
-/// and for a memory region in [crate::outboard::PostOrderMemOutboard].
+/// This is implemented for a generic io object in [super::outboard::PostOrderOutboard]
+/// and for a memory region in [super::outboard::PostOrderMemOutboard].
 ///
 /// If you use a different storage engine, you can implement this trait for it. E.g.
 /// you could store the hashes in a database and use the node number as the key.
@@ -90,7 +92,7 @@ pub trait Outboard {
 ///
 /// This trait can be used to incrementally save an outboard when receiving data.
 /// If you want to just ignore outboard data, there is a special placeholder outboard
-/// implementation [crate::outboard::EmptyOutboard].
+/// implementation [super::outboard::EmptyOutboard].
 pub trait OutboardMut: Outboard {
     /// Set the length of the file for which this outboard is
     fn set_size(&mut self, len: ByteNum) -> io::Result<()>;
@@ -138,7 +140,7 @@ impl<R: ReadAt + Size> PreOrderOutboard<R> {
         data.read_exact_at(0, &mut content)?;
         let len = ByteNum(u64::from_le_bytes(content[0..8].try_into().unwrap()));
         let tree = BaoTree::new(len, block_size);
-        let expected_outboard_size = outboard_size(len.0, block_size);
+        let expected_outboard_size = super::outboard_size(len.0, block_size);
         let size = data.size()?;
         if size != Some(expected_outboard_size) {
             io_error!(
@@ -185,7 +187,7 @@ impl<R: ReadAt + Size> PostOrderOutboard<R> {
         let mut suffix = [0u8; 8];
         data.read_exact_at(outboard_size - 8, &mut suffix)?;
         let len = u64::from_le_bytes(suffix.try_into().unwrap());
-        let expected_outboard_size = crate::outboard_size(len, block_size);
+        let expected_outboard_size = super::outboard_size(len, block_size);
         if outboard_size != expected_outboard_size {
             io_error!(
                 "Expected outboard size of {} bytes, but got {} bytes",
@@ -239,7 +241,7 @@ impl PostOrderMemOutboard {
         };
         let suffix = &outboard[outboard.len() - 8..];
         let len = u64::from_le_bytes(suffix.try_into().unwrap());
-        let expected_outboard_size = outboard_size(len, block_size);
+        let expected_outboard_size = super::outboard_size(len, block_size);
         let outboard_size = outboard.len() as u64;
         if outboard_size != expected_outboard_size {
             io_error!(
@@ -556,7 +558,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
 
 /// Decode a response into a file while updating an outboard.
 ///
-/// If you do not want to update an outboard, use [crate::outboard::EmptyOutboard] as
+/// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
 /// the outboard.
 pub async fn decode_response_into<R, O, W>(
     ranges: &RangeSetRef<ChunkNum>,

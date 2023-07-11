@@ -18,10 +18,10 @@ use crate::{
     hash_block,
     io::{
         error::{DecodeError, EncodeError},
+        outboard::{PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
     iter::{BaoChunk, PreOrderChunkIter},
-    outboard::{PostOrderOutboard, PreOrderOutboard},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
@@ -57,12 +57,12 @@ impl From<Leaf> for BaoContentItem {
 /// It is up to the implementor to decide how to store the hashes.
 ///
 /// In the original bao crate, the hashes are stored in a file in pre order.
-/// This is implemented for a generic io object in [crate::outboard::PreOrderOutboard]
-/// and for a memory region in [crate::outboard::PreOrderMemOutboard].
+/// This is implemented for a generic io object in [super::outboard::PreOrderOutboard]
+/// and for a memory region in [super::outboard::PreOrderMemOutboard].
 ///
 /// For files that grow over time, it is more efficient to store the hashes in post order.
-/// This is implemented for a generic io object in [crate::outboard::PostOrderOutboard]
-/// and for a memory region in [crate::outboard::PostOrderMemOutboard].
+/// This is implemented for a generic io object in [super::outboard::PostOrderOutboard]
+/// and for a memory region in [super::outboard::PostOrderMemOutboard].
 ///
 /// If you use a different storage engine, you can implement this trait for it. E.g.
 /// you could store the hashes in a database and use the node number as the key.
@@ -96,7 +96,7 @@ pub trait Outboard {
 ///
 /// This trait can be used to incrementally save an outboard when receiving data.
 /// If you want to just ignore outboard data, there is a special placeholder outboard
-/// implementation [crate::outboard::EmptyOutboard].
+/// implementation [super::outboard::EmptyOutboard].
 pub trait OutboardMut: Outboard {
     /// Future returned by `save`
     type SaveFuture<'a>: Future<Output = io::Result<()>>
@@ -490,7 +490,7 @@ where
 
 /// Decode a response into a file while updating an outboard.
 ///
-/// If you do not want to update an outboard, use [crate::outboard::EmptyOutboard] as
+/// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
 /// the outboard.
 pub async fn decode_response_into<R, O, W>(
     ranges: RangeSet2<ChunkNum>,

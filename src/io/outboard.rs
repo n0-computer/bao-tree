@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use range_collections::RangeSet2;
 
-use super::{outboard_size, TreeNode};
+use super::TreeNode;
 use crate::{
     io::sync::{Outboard, OutboardMut},
     BaoTree, BlockSize, ByteNum,
@@ -266,7 +266,7 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
         };
         let len = ByteNum(u64::from_le_bytes(content[0..8].try_into().unwrap()));
         let tree = BaoTree::new(len, block_size);
-        let expected_outboard_size = outboard_size(len.0, block_size);
+        let expected_outboard_size = crate::io::outboard_size(len.0, block_size);
         if content.len() as u64 != expected_outboard_size {
             io_error!("invalid outboard size");
         }
@@ -349,7 +349,7 @@ impl PreOrderMemOutboardMut {
         };
         let len = ByteNum(u64::from_le_bytes(data[0..8].try_into().unwrap()));
         let tree = BaoTree::new(len, block_size);
-        let expected_outboard_size = outboard_size(len.0, block_size);
+        let expected_outboard_size = crate::io::outboard_size(len.0, block_size);
         if data.len() as u64 > expected_outboard_size {
             io_error!("outboard too large");
         }
@@ -412,8 +412,10 @@ impl Outboard for PreOrderMemOutboardMut {
 }
 
 fn load_raw_pre_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 64]> {
-    // this is slow because pre_order_offset uses a loop.
+    // this is a bit slow because pre_order_offset uses a loop.
     // pretty sure there is a way to write it as a single expression if you spend the time.
+    // but profiling still has this in the nanosecond range, so this is unlikely to be a
+    // bottleneck.
     let offset = tree.pre_order_offset(node)?;
     let offset = usize::try_from(offset * 64 + 8).unwrap();
     let slice = &data[offset..offset + 64];

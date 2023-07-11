@@ -16,9 +16,9 @@ use crate::io::{
 
 use super::{
     canonicalize_range,
+    io::outboard::{PostOrderMemOutboard, PreOrderMemOutboardMut},
     io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
     iter::{BaoChunk, NodeInfo},
-    outboard::{PostOrderMemOutboard, PreOrderMemOutboardMut},
     pre_order_offset_slow,
     tree::{ByteNum, ChunkNum},
     BaoTree, BlockSize, PostOrderNodeIter, TreeNode,
