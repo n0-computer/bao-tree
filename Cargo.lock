@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "bao-tree"
-version = "0.5.0-rc.1"
+version = "0.5.0"
 dependencies = [
  "abao",
  "bao",
@@ -100,6 +100,7 @@ dependencies = [
  "futures",
  "hex",
  "iroh-io",
+ "positioned-io",
  "proptest",
  "rand",
  "range-collections",
@@ -733,9 +734,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-io"
-version = "0.2.0-rc.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b759fb4d3a677920f98501ebc1ae898f0d01a15b39c557c758354c8c36791433"
+checksum = "65ab77680677309a40f5f3821d0bb4fe86ef14d6b733c87d204e8bc79be92a2d"
 dependencies = [
  "bytes",
  "futures",
@@ -1011,6 +1012,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38f6d39893cca0701371e3c27294f09797214b86f1fb951b89ade8ec04e2abab"
 dependencies = [
  "plotters-backend",
+]
+
+[[package]]
+name = "positioned-io"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09b9485cf7f528baf34edd811ec8283a168864912e11d0b7d3e0510738761114"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

@@ -1,23 +1,81 @@
 //! Syncronous IO
 use std::{
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Read, Write},
     ops::Range,
     result,
 };
 
-use blake3::guts::parent_cv;
-use bytes::BytesMut;
-use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
-use smallvec::SmallVec;
-
 use crate::{
     hash_block, hash_chunk,
     io::error::{DecodeError, EncodeError},
+    io::{
+        outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
+        Header, Leaf, Parent,
+    },
     iter::{BaoChunk, PreOrderChunkIterRef},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
+use blake3::guts::parent_cv;
+use bytes::BytesMut;
+pub use positioned_io::{ReadAt, Size, WriteAt};
+use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
+use smallvec::SmallVec;
 
-/// An outboard is a just a thing that knows how big it is and can get you the hashes for a node.
+macro_rules! io_error {
+    ($($arg:tt)*) => {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
+    };
+}
+
+/// An item of a decode response
+#[derive(Debug)]
+pub enum DecodeResponseItem {
+    /// We got the header and now know how big the overall size is
+    ///
+    /// Actually this is just how big the remote side *claims* the overall size is.
+    /// In an adversarial setting, this could be wrong.
+    Header(Header),
+    /// a parent node, to update the outboard
+    Parent(Parent),
+    /// a leaf node, to write to the file
+    Leaf(Leaf),
+}
+
+impl From<Header> for DecodeResponseItem {
+    fn from(h: Header) -> Self {
+        Self::Header(h)
+    }
+}
+
+impl From<Parent> for DecodeResponseItem {
+    fn from(p: Parent) -> Self {
+        Self::Parent(p)
+    }
+}
+
+impl From<Leaf> for DecodeResponseItem {
+    fn from(l: Leaf) -> Self {
+        Self::Leaf(l)
+    }
+}
+
+/// A binary merkle tree for blake3 hashes of a blob.
+///
+/// This trait contains information about the geometry of the tree, the root hash,
+/// and a method to load the hashes at a given node.
+///
+/// It is up to the implementor to decide how to store the hashes.
+///
+/// In the original bao crate, the hashes are stored in a file in pre order.
+/// This is implemented for a generic io object in [super::outboard::PreOrderOutboard]
+/// and for a memory region in [super::outboard::PreOrderMemOutboard].
+///
+/// For files that grow over time, it is more efficient to store the hashes in post order.
+/// This is implemented for a generic io object in [super::outboard::PostOrderOutboard]
+/// and for a memory region in [super::outboard::PostOrderMemOutboard].
+///
+/// If you use a different storage engine, you can implement this trait for it. E.g.
+/// you could store the hashes in a database and use the node number as the key.
 pub trait Outboard {
     /// The root hash
     fn root(&self) -> blake3::Hash;
@@ -27,6 +85,14 @@ pub trait Outboard {
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>>;
 }
 
+/// A mutable outboard.
+///
+/// This trait extends [Outboard] with methods to save a hash pair for a node and to set the
+/// length of the data file.
+///
+/// This trait can be used to incrementally save an outboard when receiving data.
+/// If you want to just ignore outboard data, there is a special placeholder outboard
+/// implementation [super::outboard::EmptyOutboard].
 pub trait OutboardMut: Outboard {
     /// Set the length of the file for which this outboard is
     fn set_size(&mut self, len: ByteNum) -> io::Result<()>;
@@ -64,6 +130,127 @@ impl<O: OutboardMut> OutboardMut for &mut O {
     }
     fn set_size(&mut self, len: ByteNum) -> io::Result<()> {
         (**self).set_size(len)
+    }
+}
+
+impl<R: ReadAt + Size> PreOrderOutboard<R> {
+    /// Create a new outboard from a reader, root hash, and block size.
+    pub fn new(root: blake3::Hash, block_size: BlockSize, data: R) -> io::Result<Self> {
+        let mut content = [0u8; 8];
+        data.read_exact_at(0, &mut content)?;
+        let len = ByteNum(u64::from_le_bytes(content[0..8].try_into().unwrap()));
+        let tree = BaoTree::new(len, block_size);
+        let expected_outboard_size = super::outboard_size(len.0, block_size);
+        let size = data.size()?;
+        if size != Some(expected_outboard_size) {
+            io_error!(
+                "Expected outboard size of {} bytes, but got {} bytes",
+                expected_outboard_size,
+                size.map(|s| s.to_string()).unwrap_or("unknown".to_string())
+            );
+        }
+        // zero pad the rest, if needed.
+        Ok(Self { root, tree, data })
+    }
+}
+
+impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+
+    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        let Some(offset) = self.tree.pre_order_offset(node) else {
+            return Ok(None);
+        };
+        let offset = offset * 64 + 8;
+        let mut content = [0u8; 64];
+        self.data.read_exact_at(offset, &mut content)?;
+        Ok(Some(parse_hash_pair(content)))
+    }
+}
+
+impl<R: ReadAt + Size> PostOrderOutboard<R> {
+    /// Create a new outboard from a reader, root hash, and block size.
+    pub fn new(root: blake3::Hash, block_size: BlockSize, data: R) -> io::Result<Self> {
+        // validate roughly that the outboard is correct
+        let Some(outboard_size) = data.size()? else {
+            io_error!("outboard must have a known size");
+        };
+        if outboard_size < 8 {
+            io_error!("outboard is too short");
+        };
+        let mut suffix = [0u8; 8];
+        data.read_exact_at(outboard_size - 8, &mut suffix)?;
+        let len = u64::from_le_bytes(suffix);
+        let expected_outboard_size = super::outboard_size(len, block_size);
+        if outboard_size != expected_outboard_size {
+            io_error!(
+                "Expected outboard size of {} bytes, but got {} bytes",
+                expected_outboard_size,
+                outboard_size
+            );
+        }
+        let tree = BaoTree::new(ByteNum(len), block_size);
+        Ok(Self { root, tree, data })
+    }
+}
+
+impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+
+    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        let Some(offset) = self.tree.post_order_offset(node) else {
+            return Ok(None);
+        };
+        let offset = offset.value() * 64 + 8;
+        let mut content = [0u8; 64];
+        self.data.read_exact_at(offset, &mut content)?;
+        Ok(Some(parse_hash_pair(content)))
+    }
+}
+
+impl PostOrderMemOutboard {
+    /// Load a post-order outboard from a reader, root hash, and block size.
+    pub fn load(
+        root: blake3::Hash,
+        data: impl ReadAt + Size,
+        block_size: BlockSize,
+    ) -> io::Result<Self> {
+        // validate roughly that the outboard is correct
+        let Some(size) = data.size()? else {
+            io_error!("outboard must have a known size");
+        };
+        let Ok(size) = usize::try_from(size) else {
+            io_error!("outboard size must be less than usize::MAX");
+        };
+        let mut outboard = vec![0; size];
+        data.read_exact_at(0, &mut outboard)?;
+        if outboard.len() < 8 {
+            io_error!("outboard must be at least 8 bytes");
+        };
+        let suffix = &outboard[outboard.len() - 8..];
+        let len = u64::from_le_bytes(suffix.try_into().unwrap());
+        let expected_outboard_size = super::outboard_size(len, block_size);
+        let outboard_size = outboard.len() as u64;
+        if outboard_size != expected_outboard_size {
+            io_error!(
+                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"                
+            );
+        }
+        let tree = BaoTree::new(ByteNum(len), block_size);
+        outboard.truncate(outboard.len() - 8);
+        Ok(Self::new(root, tree, outboard))
     }
 }
 
@@ -122,51 +309,6 @@ where
     Ok(validator.res)
 }
 
-/// A reader that can read a slice at a specified offset
-///
-/// For a file, this will be implemented by seeking to the offset and then reading the data.
-/// For other types of storage, seeking is not necessary. E.g. a Bytes or a memory mapped
-/// slice already allows random access.
-///
-/// This is similar to the io interface of sqlite.
-/// See xRead, xFileSize in <https://www.sqlite.org/c3ref/io_methods.html>
-#[allow(clippy::len_without_is_empty)]
-pub trait SliceReader {
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
-    fn len(&mut self) -> io::Result<u64>;
-}
-
-impl<R: Read + Seek> SliceReader for R {
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.seek(SeekFrom::Start(offset))?;
-        self.read_exact(buf)
-    }
-
-    fn len(&mut self) -> io::Result<u64> {
-        self.seek(SeekFrom::End(0))
-    }
-}
-
-/// A writer that can write a slice at a specified offset
-///
-/// Will extend the file if the offset is past the end of the file, just like posix
-/// and windows files do.
-///
-/// This is similar to the io interface of sqlite.
-/// See xWrite in <https://www.sqlite.org/c3ref/io_methods.html>
-pub trait SliceWriter {
-    fn write_at(&mut self, offset: u64, src: &[u8]) -> io::Result<()>;
-}
-
-impl<W: Write + Seek> SliceWriter for W {
-    fn write_at(&mut self, offset: u64, src: &[u8]) -> io::Result<()> {
-        self.seek(SeekFrom::Start(offset))?;
-        self.write_all(src)
-    }
-}
-
-use super::{DecodeResponseItem, Header, Leaf, Parent};
-
 // When this enum is used it is in the Header variant for the first 8 bytes, then stays in
 // the Content state for the remainder.  Since the Content is the largest part that this
 // size inbalance is fine, hence allow clippy::large_enum_variant.
@@ -183,6 +325,7 @@ enum Position<'a> {
     Content { iter: PreOrderChunkIterRef<'a> },
 }
 
+/// Iterator that can be used to decode a response to a range request
 #[derive(Debug)]
 pub struct DecodeResponseIter<'a, R> {
     inner: Position<'a>,
@@ -192,6 +335,11 @@ pub struct DecodeResponseIter<'a, R> {
 }
 
 impl<'a, R: Read> DecodeResponseIter<'a, R> {
+    /// Create a new iterator to decode a response.
+    ///
+    /// For decoding you need to know the root hash, block size, and the ranges that were requested.
+    /// Additionally you need to provide a reader that can be used to read the encoded data, and
+    /// a buffer to use for decoding.
     pub fn new(
         root: blake3::Hash,
         block_size: BlockSize,
@@ -209,10 +357,14 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         }
     }
 
+    /// Get a reference to the buffer used for decoding.
     pub fn buffer(&self) -> &[u8] {
         &self.buf
     }
 
+    /// Get a reference to the tree used for decoding.
+    ///
+    /// This is only available after the first chunk has been decoded.
     pub fn tree(&self) -> Option<&BaoTree> {
         match &self.inner {
             Position::Content { iter } => Some(iter.tree()),
@@ -296,15 +448,15 @@ impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
 /// Encode ranges relevant to a query from a reader and outboard to a writer
 ///
 /// This will not validate on writing, so data corruption will be detected on reading
-pub fn encode_ranges<D: SliceReader, O: Outboard, W: Write>(
+pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     data: D,
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
 ) -> result::Result<(), EncodeError> {
-    let mut data = data;
+    let data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.len()?);
+    let file_len = ByteNum(data.size()?.unwrap());
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -328,7 +480,7 @@ pub fn encode_ranges<D: SliceReader, O: Outboard, W: Write>(
             } => {
                 let start = start_chunk.to_bytes();
                 let buf = &mut buffer[..size];
-                data.read_at(start.0, buf)?;
+                data.read_exact_at(start.0, buf)?;
                 encoded.write_all(buf)?;
             }
         }
@@ -339,7 +491,7 @@ pub fn encode_ranges<D: SliceReader, O: Outboard, W: Write>(
 /// Encode ranges relevant to a query from a reader and outboard to a writer
 ///
 /// This function validates the data before writing
-pub fn encode_ranges_validated<D: SliceReader, O: Outboard, W: Write>(
+pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     data: D,
     outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
@@ -347,9 +499,9 @@ pub fn encode_ranges_validated<D: SliceReader, O: Outboard, W: Write>(
 ) -> result::Result<(), EncodeError> {
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
-    let mut data = data;
+    let data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.len()?);
+    let file_len = ByteNum(data.size()?.unwrap());
     let tree = outboard.tree();
     let ob_len = tree.size;
     if file_len != ob_len {
@@ -392,7 +544,7 @@ pub fn encode_ranges_validated<D: SliceReader, O: Outboard, W: Write>(
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
                 let buf = &mut buffer[..size];
-                data.read_at(start.0, buf)?;
+                data.read_exact_at(start.0, buf)?;
                 let actual = hash_block(start_chunk, buf, is_root);
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
@@ -404,7 +556,10 @@ pub fn encode_ranges_validated<D: SliceReader, O: Outboard, W: Write>(
     Ok(())
 }
 
-/// Decode a response into a file while updating an outboard
+/// Decode a response into a file while updating an outboard.
+///
+/// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
+/// the outboard.
 pub async fn decode_response_into<R, O, W>(
     ranges: &RangeSetRef<ChunkNum>,
     encoded: R,
@@ -414,7 +569,7 @@ pub async fn decode_response_into<R, O, W>(
 where
     O: OutboardMut,
     R: Read,
-    W: SliceWriter,
+    W: WriteAt,
 {
     let block_size = outboard.tree().block_size;
     let buffer = BytesMut::with_capacity(block_size.bytes());
@@ -428,7 +583,7 @@ where
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                target.write_at(offset.0, &data)?;
+                target.write_all_at(offset.0, &data)?;
             }
         }
     }
@@ -441,7 +596,7 @@ where
 /// Note that it is up to you to call flush.
 pub fn write_ranges(
     from: impl AsRef<[u8]>,
-    mut to: impl Write + Seek,
+    mut to: impl WriteAt,
     ranges: &RangeSetRef<u64>,
 ) -> io::Result<()> {
     let from = from.as_ref();
@@ -453,8 +608,7 @@ pub fn write_ranges(
         };
         let start = usize::try_from(range.start).unwrap();
         let end = usize::try_from(range.end).unwrap();
-        to.seek(SeekFrom::Start(range.start))?;
-        to.write_all(&from[start..end])?;
+        to.write_all_at(range.start, &from[start..end])?;
     }
     Ok(())
 }
@@ -566,14 +720,13 @@ fn read_parent(from: &mut impl Read) -> std::io::Result<(blake3::Hash, blake3::H
 
 /// seeks read the bytes for the range from the source
 fn read_range<'a>(
-    from: &mut (impl Read + Seek),
+    from: &mut impl ReadAt,
     range: Range<ByteNum>,
     buf: &'a mut [u8],
 ) -> std::io::Result<&'a [u8]> {
     let len = (range.end - range.start).to_usize();
-    from.seek(std::io::SeekFrom::Start(range.start.0))?;
     let buf = &mut buf[..len];
-    from.read_exact(buf)?;
+    from.read_exact_at(range.start.0, buf)?;
     Ok(buf)
 }
 
@@ -581,9 +734,9 @@ fn read_range<'a>(
 pub fn valid_file_ranges<O, R>(outboard: &O, reader: R) -> io::Result<RangeSet2<ChunkNum>>
 where
     O: Outboard,
-    R: Read + Seek,
+    R: ReadAt,
 {
-    struct RecursiveValidator<'a, O: Outboard, R: Read + Seek> {
+    struct RecursiveValidator<'a, O: Outboard, R: ReadAt> {
         tree: BaoTree,
         valid_nodes: TreeNode,
         res: RangeSet2<ChunkNum>,
@@ -592,7 +745,7 @@ where
         buffer: Vec<u8>,
     }
 
-    impl<'a, O: Outboard, R: Read + Seek> RecursiveValidator<'a, O, R> {
+    impl<'a, O: Outboard, R: ReadAt> RecursiveValidator<'a, O, R> {
         fn validate_rec(
             &mut self,
             parent_hash: &blake3::Hash,

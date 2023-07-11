@@ -1,3 +1,22 @@
+//! The tree for the bao file format
+//!
+//! This crate is similar to the [bao crate](https://crates.io/crates/bao), but
+//! takes a slightly different approach.
+//!
+//! The core struct is [BaoTree], which describes the geometry of the tree and
+//! various ways to traverse it. An individual node is identified by [TreeNode],
+//! which is just a newtype wrapper for an u64.
+//!
+//! [TreeNode] provides various helpers to e.g. get the offset of a node in
+//! different traversal orders.
+//!
+//! There are various newtypes for the different kinds of integers used in the
+//! tree, e.g. [ByteNum] for number of bytes, [ChunkNum] for number of chunks.
+//!
+//! All this is then used in the [io] module to implement the actual io, both
+//! synchronous and asynchronous.
+#![deny(missing_docs)]
+use io::outboard::PostOrderMemOutboard;
 use range_collections::{range_set::RangeSetEntry, RangeSetRef};
 use std::{
     fmt::{self, Debug},
@@ -13,15 +32,13 @@ use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 pub mod io;
-pub mod outboard;
-use outboard::*;
 
 #[cfg(test)]
 mod tests;
 
 /// Defines a Bao tree.
 ///
-/// This is just the specification of the tree, it does not contain any actual data
+/// This is just the specification of the tree, it does not contain any actual data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaoTree {
     /// Total number of bytes in the file
@@ -52,6 +69,7 @@ impl PostOrderOffset {
 }
 
 impl BaoTree {
+    /// Create a new empty BaoTree with the given block size
     pub fn empty(block_size: BlockSize) -> Self {
         Self::new(ByteNum(0), block_size)
     }
@@ -77,6 +95,7 @@ impl BaoTree {
         PostOrderMemOutboard::new(hash, tree, res)
     }
 
+    /// The size of the blob from which this tree was constructed, in bytes
     pub fn size(&self) -> ByteNum {
         self.size
     }
@@ -218,6 +237,7 @@ impl BaoTree {
         ByteNum(blocks.0 << (10 + self.block_size.0))
     }
 
+    /// The offset of the given node in the pre order traversal
     pub fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
         if self.is_persisted(node) {
             Some(pre_order_offset_slow(node.0, self.filled_size().0))
@@ -226,6 +246,7 @@ impl BaoTree {
         }
     }
 
+    /// The offset of the given node in the post order traversal
     pub fn post_order_offset(&self, node: TreeNode) -> Option<PostOrderOffset> {
         if self.is_sealed(node) {
             Some(PostOrderOffset::Stable(node.post_order_offset()))
@@ -279,6 +300,7 @@ impl ByteNum {
 }
 
 impl ChunkNum {
+    /// number of bytes that this number of chunks covers
     pub const fn to_bytes(&self) -> ByteNum {
         ByteNum(self.0 << 10)
     }
@@ -315,25 +337,12 @@ fn range_ok(range: &RangeSetRef<ChunkNum>, end: ChunkNum) -> bool {
 pub struct TreeNode(u64);
 
 /// A tree node for which we know that it is a leaf node.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct LeafNode(u64);
 
 impl From<LeafNode> for TreeNode {
     fn from(leaf: LeafNode) -> TreeNode {
         Self(leaf.0)
-    }
-}
-
-impl LeafNode {
-    #[inline]
-    pub fn block_range(&self) -> Range<BlockNum> {
-        BlockNum(self.0)..BlockNum(self.0 + 2)
-    }
-}
-
-impl fmt::Debug for LeafNode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "LeafNode({})", self.0)
     }
 }
 
@@ -355,7 +364,7 @@ impl TreeNode {
         Self(((blocks.0 + 1) / 2).next_power_of_two() - 1)
     }
 
-    // the middle of the tree node, in blocks
+    /// the middle of the tree node, in blocks
     pub const fn mid(&self) -> BlockNum {
         BlockNum(self.0 + 1)
     }
@@ -365,22 +374,26 @@ impl TreeNode {
         1 << self.level()
     }
 
+    /// The level of the node in the tree, 0 for leafs.
     #[inline]
     pub const fn level(&self) -> u32 {
         (!self.0).trailing_zeros()
     }
 
+    /// True if this is a leaf node.
     #[inline]
     pub const fn is_leaf(&self) -> bool {
         self.level() == 0
     }
 
+    /// Range of blocks that this node covers, given a block size
     pub fn byte_range(&self, block_size: BlockSize) -> Range<ByteNum> {
         let range = self.block_range();
         let shift = 10 + block_size.0;
         ByteNum(range.start.0 << shift)..ByteNum(range.end.0 << shift)
     }
 
+    /// Convert to a leaf node, if this is a leaf node.
     pub const fn as_leaf(&self) -> Option<LeafNode> {
         if self.is_leaf() {
             Some(LeafNode(self.0))
@@ -389,6 +402,7 @@ impl TreeNode {
         }
     }
 
+    /// Number of nodes below this node, excluding this node.
     #[inline]
     pub const fn count_below(&self) -> u64 {
         // go to representation where trailing zeros are the level
@@ -404,10 +418,12 @@ impl TreeNode {
         self.next_left_ancestor0().map(Self)
     }
 
+    /// Get the left child of this node, or None if it is a child node.
     pub fn left_child(&self) -> Option<Self> {
         self.left_child0().map(Self)
     }
 
+    /// Get the right child of this node, or None if it is a child node.
     pub fn right_child(&self) -> Option<Self> {
         self.right_child0().map(Self)
     }
@@ -463,6 +479,7 @@ impl TreeNode {
         })
     }
 
+    /// Get the range of nodes this node covers
     pub const fn node_range(&self) -> Range<Self> {
         let half_span = self.half_span();
         let nn = self.0;
@@ -471,6 +488,7 @@ impl TreeNode {
         Self(l)..Self(r)
     }
 
+    /// Get the range of blocks this node covers
     pub fn block_range(&self) -> Range<BlockNum> {
         let Range { start, end } = self.block_range0();
         BlockNum(start)..BlockNum(end)
@@ -486,6 +504,7 @@ impl TreeNode {
         mid - span..mid + span
     }
 
+    /// Get the post order offset of this node
     pub fn post_order_offset(&self) -> u64 {
         self.post_order_offset0()
     }
@@ -510,6 +529,7 @@ impl TreeNode {
         }
     }
 
+    /// Get the range of post order offsets this node covers
     pub fn post_order_range(&self) -> Range<u64> {
         self.post_order_range0()
     }
@@ -593,21 +613,4 @@ fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
         span = pspan;
     }
     left - (left.count_ones() as u64) + parent_count
-}
-
-/// The outboard size of a file of size `size` with a block size of `block_size`
-pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
-    BaoTree::outboard_size(ByteNum(size), block_size).0
-}
-
-/// The encoded size of a file of size `size` with a block size of `block_size`
-pub fn encoded_size(size: u64, block_size: BlockSize) -> u64 {
-    outboard_size(size, block_size) + size
-}
-
-/// Computes the pre order outboard of a file in memory.
-pub fn outboard(input: impl AsRef<[u8]>, block_size: BlockSize) -> (Vec<u8>, blake3::Hash) {
-    let outboard = BaoTree::outboard_post_order_mem(input, block_size).flip();
-    let hash = *outboard.hash();
-    (outboard.into_inner(), hash)
 }

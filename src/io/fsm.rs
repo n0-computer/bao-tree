@@ -8,25 +8,71 @@
 use std::{io, result};
 
 use blake3::guts::parent_cv;
-use bytes::BytesMut;
-use futures::Future;
-use iroh_io::AsyncSliceReader;
+use bytes::{Bytes, BytesMut};
+use futures::{future::LocalBoxFuture, Future, FutureExt};
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     hash_block,
+    io::{
+        error::{DecodeError, EncodeError},
+        outboard::{PostOrderOutboard, PreOrderOutboard},
+        Leaf, Parent,
+    },
     iter::{BaoChunk, PreOrderChunkIter},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
+pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::{
-    error::{DecodeError, EncodeError},
-    DecodeResponseItem, Leaf, Parent,
-};
+/// An item of bao content
+///
+/// We know that we are not going to get headers after the first item.
+#[derive(Debug)]
+pub enum BaoContentItem {
+    /// a parent node, to update the outboard
+    Parent(Parent),
+    /// a leaf node, to write to the file
+    Leaf(Leaf),
+}
 
-/// An outboard is a just a thing that knows how big it is and can get you the hashes for a node.
+impl From<Parent> for BaoContentItem {
+    fn from(p: Parent) -> Self {
+        Self::Parent(p)
+    }
+}
+
+impl From<Leaf> for BaoContentItem {
+    fn from(l: Leaf) -> Self {
+        Self::Leaf(l)
+    }
+}
+
+/// A binary merkle tree for blake3 hashes of a blob.
+///
+/// This trait contains information about the geometry of the tree, the root hash,
+/// and a method to load the hashes at a given node.
+///
+/// It is up to the implementor to decide how to store the hashes.
+///
+/// In the original bao crate, the hashes are stored in a file in pre order.
+/// This is implemented for a generic io object in [super::outboard::PreOrderOutboard]
+/// and for a memory region in [super::outboard::PreOrderMemOutboard].
+///
+/// For files that grow over time, it is more efficient to store the hashes in post order.
+/// This is implemented for a generic io object in [super::outboard::PostOrderOutboard]
+/// and for a memory region in [super::outboard::PostOrderMemOutboard].
+///
+/// If you use a different storage engine, you can implement this trait for it. E.g.
+/// you could store the hashes in a database and use the node number as the key.
+///
+/// The async version takes a mutable reference to load, not because it mutates
+/// the outboard (it doesn't), but to ensure that there is at most one outstanding
+/// load at a time.
+///
+/// Dropping the load future without polling it to completion is safe, but will
+/// possibly render the outboard unusable.
 pub trait Outboard {
     /// The root hash
     fn root(&self) -> blake3::Hash;
@@ -37,26 +83,45 @@ pub trait Outboard {
     where
         Self: 'a;
     /// load the hash pair for a node
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_>;
+    ///
+    /// This takes a &mut self not because it mutates the outboard (it doesn't),
+    /// but to ensure that there is only one outstanding load at a time.
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_>;
 }
 
-impl<'b, O: Outboard> Outboard for &'b O {
-    fn root(&self) -> blake3::Hash {
-        (**self).root()
-    }
+/// A mutable outboard.
+///
+/// This trait extends [Outboard] with methods to save a hash pair for a node and to set the
+/// length of the data file.
+///
+/// This trait can be used to incrementally save an outboard when receiving data.
+/// If you want to just ignore outboard data, there is a special placeholder outboard
+/// implementation [super::outboard::EmptyOutboard].
+pub trait OutboardMut: Outboard {
+    /// Future returned by `save`
+    type SaveFuture<'a>: Future<Output = io::Result<()>>
+    where
+        Self: 'a;
 
-    fn tree(&self) -> BaoTree {
-        (**self).tree()
-    }
+    /// Save a hash pair for a node
+    fn save(
+        &mut self,
+        node: TreeNode,
+        hash_pair: &(blake3::Hash, blake3::Hash),
+    ) -> Self::SaveFuture<'_>;
 
-    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
+    /// Future returned by `set_size`
+    type SetSizeFuture<'a>: Future<Output = io::Result<()>>
+    where
+        Self: 'a;
 
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
-        (**self).load(node)
-    }
+    /// Set the length of the file for which this outboard is
+    fn set_size(&mut self, len: ByteNum) -> Self::SetSizeFuture<'_>;
 }
 
 impl<'b, O: Outboard> Outboard for &'b mut O {
+    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
+
     fn root(&self) -> blake3::Hash {
         (**self).root()
     }
@@ -65,11 +130,71 @@ impl<'b, O: Outboard> Outboard for &'b mut O {
         (**self).tree()
     }
 
-    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
-
-    fn load(&self, node: TreeNode) -> Self::LoadFuture<'_> {
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
         (**self).load(node)
     }
+}
+
+impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
+    type LoadFuture<'a> = LocalBoxFuture<'a, io::Result<Option<(blake3::Hash, blake3::Hash)>>>
+        where R: 'a;
+
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
+        async move {
+            let Some(offset) = self.tree.pre_order_offset(node) else {
+                return Ok(None);
+            };
+            let offset = offset * 64 + 8;
+            let content = self.data.read_at(offset, 64).await?;
+            Ok(Some(parse_hash_pair(content)?))
+        }
+        .boxed_local()
+    }
+}
+
+impl<R: AsyncSliceReader> Outboard for PostOrderOutboard<R> {
+    type LoadFuture<'a> = LocalBoxFuture<'a, io::Result<Option<(blake3::Hash, blake3::Hash)>>>
+        where R: 'a;
+
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
+        async move {
+            let Some(offset) = self.tree.post_order_offset(node) else {
+                return Ok(None);
+            };
+            let offset = offset.value() * 64;
+            let content = self.data.read_at(offset, 64).await?;
+            Ok(Some(parse_hash_pair(content)?))
+        }
+        .boxed_local()
+    }
+}
+
+pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::Hash)> {
+    if buf.len() != 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "hash pair must be 64 bytes",
+        ));
+    }
+    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
+    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
+    Ok((l_hash, r_hash))
 }
 
 /// Response decoder state machine, at the start of a stream
@@ -149,11 +274,16 @@ pub struct ResponseDecoderReading<R>(Box<ResponseDecoderReadingInner<R>>);
 
 /// Next type for ResponseDecoderReading.
 #[derive(Debug)]
-pub enum ResponseDecoderReadingNext<M, D> {
-    /// More data is available
-    More(M),
-    /// The stream is done
-    Done(D),
+pub enum ResponseDecoderReadingNext<R> {
+    /// One more item, and you get back the state machine in the next state
+    More(
+        (
+            ResponseDecoderReading<R>,
+            std::result::Result<BaoContentItem, DecodeError>,
+        ),
+    ),
+    /// The stream is done, you get back the underlying reader
+    Done(R),
 }
 
 impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
@@ -171,10 +301,8 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         }))
     }
 
-    pub async fn next(
-        mut self,
-    ) -> ResponseDecoderReadingNext<(Self, std::result::Result<DecodeResponseItem, DecodeError>), R>
-    {
+    /// Proceed to the next state by reading the next chunk from the stream.
+    pub async fn next(mut self) -> ResponseDecoderReadingNext<R> {
         if let Some(chunk) = self.0.iter.next() {
             let item = self.next0(chunk).await;
             ResponseDecoderReadingNext::More((self, item))
@@ -183,14 +311,12 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         }
     }
 
+    /// Immediately return the underlying reader
     pub fn finish(self) -> R {
         self.0.encoded
     }
 
-    async fn next0(
-        &mut self,
-        chunk: BaoChunk,
-    ) -> std::result::Result<DecodeResponseItem, DecodeError> {
+    async fn next0(&mut self, chunk: BaoChunk) -> std::result::Result<BaoContentItem, DecodeError> {
         Ok(match chunk {
             BaoChunk::Parent {
                 is_root,
@@ -248,7 +374,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
 /// This will not validate on writing, so data corruption will be detected on reading
 pub async fn encode_ranges<D, O, W>(
     data: &mut D,
-    outboard: O,
+    mut outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
 ) -> result::Result<(), EncodeError>
@@ -295,7 +421,7 @@ where
 /// This function validates the data before writing
 pub async fn encode_ranges_validated<D, O, W>(
     data: &mut D,
-    outboard: O,
+    mut outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
 ) -> result::Result<(), EncodeError>
@@ -362,6 +488,44 @@ where
     Ok(())
 }
 
+/// Decode a response into a file while updating an outboard.
+///
+/// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
+/// the outboard.
+pub async fn decode_response_into<R, O, W>(
+    ranges: RangeSet2<ChunkNum>,
+    encoded: R,
+    mut outboard: O,
+    mut target: W,
+) -> io::Result<()>
+where
+    O: OutboardMut,
+    R: AsyncRead + Unpin,
+    W: AsyncSliceWriter,
+{
+    let start =
+        ResponseDecoderStart::new(outboard.root(), ranges, outboard.tree().block_size, encoded);
+    let (mut reading, size) = start.next().await?;
+    outboard.set_size(ByteNum(size)).await?;
+    loop {
+        let item = match reading.next().await {
+            ResponseDecoderReadingNext::Done(_reader) => break,
+            ResponseDecoderReadingNext::More((next, item)) => {
+                reading = next;
+                item?
+            }
+        };
+        match item {
+            BaoContentItem::Parent(Parent { node, pair }) => {
+                outboard.save(node, &pair).await?;
+            }
+            BaoContentItem::Leaf(Leaf { offset, data }) => {
+                target.write_bytes_at(offset.0, data).await?;
+            }
+        }
+    }
+    Ok(())
+}
 fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());

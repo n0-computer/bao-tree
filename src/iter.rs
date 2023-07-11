@@ -49,6 +49,7 @@ pub struct PreOrderPartialIterRef<'a> {
 }
 
 impl<'a> PreOrderPartialIterRef<'a> {
+    /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, range: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         let mut stack = SmallVec::new();
         stack.push((tree.root(), range));
@@ -61,6 +62,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
         }
     }
 
+    /// Get a reference to the tree.
     pub fn tree(&self) -> &BaoTree {
         &self.tree
     }
@@ -112,35 +114,6 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
     }
 }
 
-// use ouroboros::self_referencing;
-// #[self_referencing]
-// struct PreOrderPartialIterInner<R: 'static> {
-//     ranges: R,
-//     #[borrows(ranges)]
-//     #[not_covariant]
-//     iter: PreOrderPartialIterRef<'this>,
-// }
-
-// /// Same as PreOrderPartialIterRef, but owns the ranges so it can be converted into a stream conveniently.
-// pub struct PreOrderPartialIter<R: AsRef<RangeSetRef<ChunkNum>> + 'static>(
-//     PreOrderPartialIterInner<R>,
-// );
-
-// impl<R: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<R> {
-//     /// Create a new PreOrderPartialIter.
-//     ///
-//     /// ranges has to implement `AsRef<RangeSetRef<ChunkNum>>`, so you can pass e.g. a RangeSet2.
-//     pub fn new(tree: BaoTree, ranges: R) -> Self {
-//         Self(
-//             PreOrderPartialIterInnerBuilder {
-//                 ranges,
-//                 iter_builder: |ranges| PreOrderPartialIterRef::new(tree, ranges.as_ref(), 0),
-//             }
-//             .build(),
-//         )
-//     }
-// }
-
 /// Iterator over all nodes in a BaoTree in post-order.
 #[derive(Debug)]
 pub struct PostOrderNodeIter {
@@ -153,6 +126,7 @@ pub struct PostOrderNodeIter {
 }
 
 impl PostOrderNodeIter {
+    /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree) -> Self {
         Self {
             len: tree.filled_size(),
@@ -227,6 +201,7 @@ pub struct PreOrderNodeIter {
 }
 
 impl PreOrderNodeIter {
+    /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree) -> Self {
         Self {
             len: tree.filled_size(),
@@ -338,6 +313,7 @@ pub struct PostOrderChunkIter {
 }
 
 impl PostOrderChunkIter {
+    /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree) -> Self {
         Self {
             tree,
@@ -405,6 +381,7 @@ impl Iterator for PostOrderChunkIter {
 }
 
 impl BaoChunk {
+    /// Return the size of the chunk in bytes.
     pub fn size(&self) -> usize {
         match self {
             Self::Parent { .. } => 64,
@@ -434,6 +411,7 @@ pub struct PreOrderChunkIterRef<'a> {
 }
 
 impl<'a> PreOrderChunkIterRef<'a> {
+    /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, query: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         Self {
             inner: tree.ranges_pre_order_nodes_iter(query, min_level),
@@ -442,6 +420,7 @@ impl<'a> PreOrderChunkIterRef<'a> {
         }
     }
 
+    /// Return a reference to the underlying tree.
     pub fn tree(&self) -> &BaoTree {
         self.inner.tree()
     }
@@ -511,13 +490,14 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
 }
 
 self_cell! {
-    pub struct PreOrderChunkIterInner {
+    pub(crate) struct PreOrderChunkIterInner {
         owner: range_collections::RangeSet2<ChunkNum>,
         #[not_covariant]
         dependent: PreOrderChunkIterRef,
     }
 }
 
+/// An iterator that produces chunks in pre order
 pub struct PreOrderChunkIter(PreOrderChunkIterInner);
 
 impl fmt::Debug for PreOrderChunkIter {
@@ -527,6 +507,7 @@ impl fmt::Debug for PreOrderChunkIter {
 }
 
 impl PreOrderChunkIter {
+    /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: RangeSet2<ChunkNum>) -> Self {
         Self(PreOrderChunkIterInner::new(ranges, |ranges| {
             PreOrderChunkIterRef::new(tree, ranges, 0)
