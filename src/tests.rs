@@ -18,7 +18,7 @@ use super::{
     canonicalize_range,
     io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
     iter::{BaoChunk, NodeInfo},
-    outboard::{PostOrderMemOutboard, PostOrderMemOutboardRef, PreOrderMemOutboardMut},
+    outboard::{PostOrderMemOutboard, PreOrderMemOutboardMut},
     pre_order_offset_slow,
     tree::{ByteNum, ChunkNum},
     BaoTree, BlockSize, PostOrderNodeIter, TreeNode,
@@ -169,7 +169,7 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     let expected = encode_slice_reference(&data, range.clone()).0;
     let ob = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
     let hash = ob.root();
-    let outboard = ob.into_inner();
+    let outboard = ob.into_inner_with_suffix();
     // extend empty range to contain at least 1 byte
     if range.start == range.end {
         range.end.0 += 1;
@@ -182,13 +182,13 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     // for this we have to canonicalize the range before
     let ranges = canonicalize_range_owned(&ranges, ByteNum(data.len() as u64));
     let mut actual2 = Vec::new();
-    let ob = PostOrderMemOutboardRef::load(hash, &outboard, BlockSize::DEFAULT).unwrap();
-    encode_ranges(&data, ob, &ranges, Cursor::new(&mut actual2)).unwrap();
+    let ob = PostOrderMemOutboard::load(hash, &outboard, BlockSize::DEFAULT).unwrap();
+    encode_ranges(&data, &ob, &ranges, Cursor::new(&mut actual2)).unwrap();
     assert_eq!(expected.len(), actual2.len());
     assert_eq!(expected, actual2);
 
     let mut actual3 = Vec::new();
-    encode_ranges_validated(&data, ob, &ranges, Cursor::new(&mut actual3)).unwrap();
+    encode_ranges_validated(&data, &ob, &ranges, Cursor::new(&mut actual3)).unwrap();
     assert_eq!(expected.len(), actual3.len());
     assert_eq!(expected, actual3);
 }
@@ -297,7 +297,7 @@ fn bao_tree_outboard_levels() {
         let block_size = BlockSize(chunk_group_log);
         let ob = BaoTree::outboard_post_order_mem(&td, block_size);
         let hash = ob.root();
-        let outboard = ob.into_inner();
+        let outboard = ob.into_inner_with_suffix();
         assert_eq!(expected, hash);
         assert_eq!(
             ByteNum(outboard.len() as u64),
@@ -311,7 +311,7 @@ fn bao_tree_outboard_levels() {
 fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, block_size: BlockSize) {
     let ob = BaoTree::outboard_post_order_mem(&data, block_size);
     let root = ob.root();
-    let outboard = ob.into_inner();
+    let outboard = ob.into_inner_with_suffix();
     // extend empty range to contain at least 1 byte
     if range.start == range.end {
         range.end.0 += 1;
@@ -433,7 +433,7 @@ fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
     use make_test_data as td;
     let data = td(size);
     let po = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
-    let post = po.into_inner();
+    let post = po.into_inner_with_suffix();
     let (mut pre, _) = bao::encode::outboard(data);
     pre.splice(..8, []);
     let map = pre

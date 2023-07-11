@@ -4,7 +4,7 @@ use range_collections::RangeSet2;
 
 use super::{outboard_size, TreeNode};
 use crate::{io::sync::Outboard, BaoTree, BlockSize, ByteNum};
-use std::io::{self, Read};
+use std::io;
 
 macro_rules! io_error {
     ($($arg:tt)*) => {
@@ -79,151 +79,75 @@ impl crate::io::sync::OutboardMut for EmptyOutboard {
     }
 }
 
-/// An outboard that is stored in memory, in a byte slice.
-#[derive(Debug, Clone, Copy)]
-pub struct PostOrderMemOutboardRef<'a> {
-    root: blake3::Hash,
-    tree: BaoTree,
-    data: &'a [u8],
+/// A generic outboard in pre order
+pub struct PreOrderOutboard<R> {
+    /// root hash
+    pub(crate) root: blake3::Hash,
+    /// tree defining the data
+    pub(crate) tree: BaoTree,
+    /// hashes with length prefix
+    pub(crate) data: R,
 }
 
-impl<'a> PostOrderMemOutboardRef<'a> {
-    pub fn load(root: blake3::Hash, outboard: &'a [u8], block_size: BlockSize) -> io::Result<Self> {
-        // validate roughly that the outboard is correct
-        if outboard.len() < 8 {
-            io_error!("outboard must be at least 8 bytes");
-        };
-        let (data, size) = outboard.split_at(outboard.len() - 8);
-        let len = u64::from_le_bytes(size.try_into().unwrap());
-        let tree = BaoTree::new(ByteNum(len), block_size);
-        let expected_outboard_len = tree.outboard_hash_pairs() * 64;
-        if data.len() as u64 != expected_outboard_len {
-            io_error!(
-                "outboard length does not match expected outboard length: {} != {}",
-                outboard.len(),
-                expected_outboard_len
-            );
-        }
-        Ok(Self { root, tree, data })
-    }
-
-    pub fn flip(&self) -> PreOrderMemOutboardMut {
-        let tree = self.tree;
-        let mut data = vec![0; self.data.len() + 8];
-        data[0..8].copy_from_slice(tree.size.0.to_le_bytes().as_slice());
-        for node in self.tree.post_order_nodes_iter() {
-            if let Some((l, r)) = self.load(node).unwrap() {
-                let offset = tree.pre_order_offset(node).unwrap();
-                let offset = (offset as usize) * 64 + 8;
-                data[offset..offset + 32].copy_from_slice(l.as_bytes());
-                data[offset + 32..offset + 64].copy_from_slice(r.as_bytes());
-            }
-        }
-        PreOrderMemOutboardMut {
-            root: self.root,
-            tree,
-            data,
-            changes: None,
-        }
+impl<R> PreOrderOutboard<R> {
+    pub fn into_inner(self) -> R {
+        self.data
     }
 }
 
-impl<'a> crate::io::sync::Outboard for PostOrderMemOutboardRef<'a> {
-    fn root(&self) -> blake3::Hash {
-        self.root
-    }
-    fn tree(&self) -> BaoTree {
-        self.tree
-    }
-    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
-        Ok(load_raw_post_mem(&self.tree, self.data, node).map(parse_hash_pair))
-    }
+/// A generic outboard in post order
+pub struct PostOrderOutboard<R> {
+    /// root hash
+    pub(crate) root: blake3::Hash,
+    /// tree defining the data
+    pub(crate) tree: BaoTree,
+    /// hashes with length prefix
+    pub(crate) data: R,
 }
 
-impl<'a> crate::io::fsm::Outboard for PostOrderMemOutboardRef<'a> {
-    fn root(&self) -> blake3::Hash {
-        self.root
-    }
-    fn tree(&self) -> BaoTree {
-        self.tree
-    }
-    type LoadFuture<'b> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>
-        where 'a: 'b;
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        futures::future::ok(load_raw_post_mem(&self.tree, self.data, node).map(parse_hash_pair))
+impl<R> PostOrderOutboard<R> {
+    pub fn into_inner(self) -> R {
+        self.data
     }
 }
 
 /// Post-order outboard, stored in memory.
-///
-/// This is the default outboard type for bao-tree, and is faster than the pre-order outboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostOrderMemOutboard {
+pub struct PostOrderMemOutboard<T: AsRef<[u8]> = Vec<u8>> {
     /// root hash
     pub(crate) root: blake3::Hash,
     /// tree defining the data
     tree: BaoTree,
     /// hashes without length suffix
-    pub(crate) data: Vec<u8>,
+    pub(crate) data: T,
 }
 
 impl PostOrderMemOutboard {
-    pub fn new(root: blake3::Hash, tree: BaoTree, data: Vec<u8>) -> Self {
-        assert!(data.len() as u64 == tree.outboard_hash_pairs() * 64);
-        Self { root, tree, data }
-    }
-
-    pub fn load(
-        root: blake3::Hash,
-        mut data: impl Read,
-        block_size: BlockSize,
-    ) -> io::Result<Self> {
-        // validate roughly that the outboard is correct
-        let mut outboard = Vec::new();
-        data.read_to_end(&mut outboard)?;
-        if outboard.len() < 8 {
-            io_error!("outboard must be at least 8 bytes");
-        };
-        let suffix = &outboard[outboard.len() - 8..];
-        let len = u64::from_le_bytes(suffix.try_into().unwrap());
-        let expected_outboard_size = outboard_size(len, block_size);
-        let outboard_size = outboard.len() as u64;
-        if outboard_size != expected_outboard_size {
-            io_error!(
-                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"                
-            );
-        }
-        let tree = BaoTree::new(ByteNum(len), block_size);
-        outboard.truncate(outboard.len() - 8);
-        Ok(Self::new(root, tree, outboard))
-    }
-
-    /// The outboard data, without the length suffix.
-    pub fn outboard(&self) -> &[u8] {
-        &self.data
-    }
-
-    pub fn flip(&self) -> PreOrderMemOutboardMut {
-        self.as_outboard_ref().flip()
-    }
-
     /// returns the outboard data, with the length suffix.
-    pub fn into_inner(self) -> Vec<u8> {
+    pub fn into_inner_with_suffix(self) -> Vec<u8> {
         let mut res = self.data;
         res.extend_from_slice(self.tree.size.0.to_le_bytes().as_slice());
         res
     }
+}
 
-    pub fn as_outboard_ref(&self) -> PostOrderMemOutboardRef {
-        PostOrderMemOutboardRef {
-            root: self.root,
-            tree: self.tree,
-            data: &self.data,
-        }
+impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
+    pub(crate) fn new(root: blake3::Hash, tree: BaoTree, data: T) -> Self {
+        assert!(data.as_ref().len() as u64 == tree.outboard_hash_pairs() * 64);
+        Self { root, tree, data }
+    }
+
+    /// The outboard data, without the length suffix.
+    pub fn outboard(&self) -> &[u8] {
+        self.data.as_ref()
+    }
+
+    pub fn flip(&self) -> PreOrderMemOutboardMut {
+        flip_post(self.root, self.tree, self.data.as_ref())
     }
 }
 
-impl crate::io::sync::Outboard for PostOrderMemOutboard {
+impl<T: AsRef<[u8]>> crate::io::sync::Outboard for PostOrderMemOutboard<T> {
     fn root(&self) -> blake3::Hash {
         self.root
     }
@@ -231,20 +155,21 @@ impl crate::io::sync::Outboard for PostOrderMemOutboard {
         self.tree
     }
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
-        self.as_outboard_ref().load(node)
+        Ok(load_post(&self.tree, self.data.as_ref(), node))
     }
 }
 
-impl crate::io::fsm::Outboard for PostOrderMemOutboard {
+impl<T: AsRef<[u8]>> crate::io::fsm::Outboard for PostOrderMemOutboard<T> {
     fn root(&self) -> blake3::Hash {
         self.root
     }
     fn tree(&self) -> BaoTree {
         self.tree
     }
-    type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
+    type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>
+        where T: 'a;
     fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        crate::io::fsm::Outboard::load(&mut self.as_outboard_ref(), node)
+        futures::future::ok(load_post(&self.tree, self.data.as_ref(), node))
     }
 }
 
@@ -285,88 +210,26 @@ fn load_raw_post_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8;
     Some(slice.try_into().unwrap())
 }
 
-/// Pre-order outboard, stored in memory.
-///
-/// Mostly for compat with bao, not very fast.
-#[derive(Debug, Clone, Copy)]
-pub struct PreOrderMemOutboardRef<'a> {
-    /// root hash
-    root: blake3::Hash,
-    /// tree defining the data
-    tree: BaoTree,
-    /// hashes with length prefix
-    data: &'a [u8],
+fn load_post(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<(blake3::Hash, blake3::Hash)> {
+    load_raw_post_mem(tree, data, node).map(parse_hash_pair)
 }
 
-impl<'a> PreOrderMemOutboardRef<'a> {
-    pub fn new(root: blake3::Hash, block_size: BlockSize, data: &'a [u8]) -> io::Result<Self> {
-        if data.len() < 8 {
-            io_error!("outboard must be at least 8 bytes");
-        };
-        let len = ByteNum(u64::from_le_bytes(data[0..8].try_into().unwrap()));
-        let tree = BaoTree::new(len, block_size);
-        let expected_outboard_size = outboard_size(len.0, block_size);
-        let outboard_size = data.len() as u64;
-        if outboard_size != expected_outboard_size {
-            io_error!(
-                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"                
-            );
-        }
-        Ok(Self { root, tree, data })
-    }
-
-    /// The outboard data, including the length prefix.
-    pub fn outboard(&self) -> &[u8] {
-        self.data
-    }
-
-    pub fn hash(&self) -> &blake3::Hash {
-        &self.root
-    }
-
-    pub fn flip(&self) -> PostOrderMemOutboard {
-        let tree = self.tree;
-        let mut data = vec![0; self.data.len() - 8];
-        for node in self.tree.post_order_nodes_iter() {
-            if let Some((l, r)) = self.load(node).unwrap() {
-                let offset = tree.post_order_offset(node).unwrap().value();
-                let offset = usize::try_from(offset * 64).unwrap();
-                data[offset..offset + 32].copy_from_slice(l.as_bytes());
-                data[offset + 32..offset + 64].copy_from_slice(r.as_bytes());
-            }
-        }
-        PostOrderMemOutboard {
-            root: self.root,
-            tree,
-            data,
+fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutboardMut {
+    let mut out = vec![0; data.len() + 8];
+    out[0..8].copy_from_slice(tree.size.0.to_le_bytes().as_slice());
+    for node in tree.post_order_nodes_iter() {
+        if let Some((l, r)) = load_post(&tree, data, node) {
+            let offset = tree.pre_order_offset(node).unwrap();
+            let offset = (offset as usize) * 64 + 8;
+            out[offset..offset + 32].copy_from_slice(l.as_bytes());
+            out[offset + 32..offset + 64].copy_from_slice(r.as_bytes());
         }
     }
-}
-
-impl<'a> crate::io::sync::Outboard for PreOrderMemOutboardRef<'a> {
-    fn root(&self) -> blake3::Hash {
-        self.root
-    }
-    fn tree(&self) -> BaoTree {
-        self.tree
-    }
-    fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
-        Ok(load_raw_pre_mem(&self.tree, self.data, node).map(parse_hash_pair))
-    }
-}
-
-impl<'a> crate::io::fsm::Outboard for PreOrderMemOutboardRef<'a> {
-    fn root(&self) -> blake3::Hash {
-        self.root
-    }
-    fn tree(&self) -> BaoTree {
-        self.tree
-    }
-    type LoadFuture<'b> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>
-        where
-            'a: 'b;
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        futures::future::ok(load_raw_pre_mem(&self.tree, self.data, node).map(parse_hash_pair))
+    PreOrderMemOutboardMut {
+        root,
+        tree,
+        data: out,
+        changes: None,
     }
 }
 
@@ -409,16 +272,8 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
         self.data
     }
 
-    pub fn as_outboard_ref(&self) -> PreOrderMemOutboardRef {
-        PreOrderMemOutboardRef {
-            root: self.root,
-            tree: self.tree,
-            data: self.data.as_ref(),
-        }
-    }
-
     pub fn flip(&self) -> PostOrderMemOutboard {
-        self.as_outboard_ref().flip()
+        flip_pre(self.root, self.tree, self.data.as_ref())
     }
 }
 
@@ -430,7 +285,7 @@ impl<T: AsRef<[u8]>> crate::io::sync::Outboard for PreOrderMemOutboard<T> {
         self.tree
     }
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
-        self.as_outboard_ref().load(node)
+        Ok(load_pre(&self.tree, self.data.as_ref(), node))
     }
 }
 
@@ -443,7 +298,8 @@ impl<T: AsRef<[u8]> + 'static> crate::io::fsm::Outboard for PreOrderMemOutboard<
     }
     type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
     fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        crate::io::fsm::Outboard::load(&mut self.as_outboard_ref(), node)
+        let res = load_raw_pre_mem(&self.tree, self.data.as_ref(), node).map(parse_hash_pair);
+        futures::future::ok(res)
     }
 }
 
@@ -514,16 +370,8 @@ impl PreOrderMemOutboardMut {
         self.data
     }
 
-    pub fn as_outboard_ref(&self) -> PreOrderMemOutboardRef {
-        PreOrderMemOutboardRef {
-            root: self.root,
-            tree: self.tree,
-            data: &self.data,
-        }
-    }
-
     pub fn flip(&self) -> PostOrderMemOutboard {
-        self.as_outboard_ref().flip()
+        flip_pre(self.root, self.tree, self.data.as_ref())
     }
 }
 
@@ -535,7 +383,7 @@ impl Outboard for PreOrderMemOutboardMut {
         self.tree
     }
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
-        self.as_outboard_ref().load(node)
+        Ok(load_pre(&self.tree, &self.data, node))
     }
 }
 
@@ -548,7 +396,28 @@ fn load_raw_pre_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 
     Some(slice.try_into().unwrap())
 }
 
-fn parse_hash_pair(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {
+fn load_pre(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<(blake3::Hash, blake3::Hash)> {
+    load_raw_pre_mem(tree, data, node).map(parse_hash_pair)
+}
+
+fn flip_pre(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PostOrderMemOutboard {
+    let mut out = vec![0; data.len() - 8];
+    for node in tree.post_order_nodes_iter() {
+        if let Some((l, r)) = load_pre(&tree, data, node) {
+            let offset = tree.post_order_offset(node).unwrap().value();
+            let offset = usize::try_from(offset * 64).unwrap();
+            out[offset..offset + 32].copy_from_slice(l.as_bytes());
+            out[offset + 32..offset + 64].copy_from_slice(r.as_bytes());
+        }
+    }
+    PostOrderMemOutboard {
+        root,
+        tree,
+        data: out.into(),
+    }
+}
+
+pub(crate) fn parse_hash_pair(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
     (l_hash, r_hash)

@@ -8,8 +8,8 @@
 use std::{io, result};
 
 use blake3::guts::parent_cv;
-use bytes::BytesMut;
-use futures::Future;
+use bytes::{Bytes, BytesMut};
+use futures::{future::LocalBoxFuture, Future, FutureExt};
 use iroh_io::AsyncSliceReader;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::{
     hash_block,
     iter::{BaoChunk, PreOrderChunkIter},
+    outboard::{PostOrderOutboard, PreOrderOutboard},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 
@@ -25,6 +26,12 @@ use super::{
     error::{DecodeError, EncodeError},
     DecodeResponseItem, Leaf, Parent,
 };
+
+macro_rules! io_error {
+    ($($arg:tt)*) => {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
+    };
+}
 
 /// An outboard is a just a thing that knows how big it is and can get you the hashes for a node.
 pub trait Outboard {
@@ -44,6 +51,8 @@ pub trait Outboard {
 }
 
 impl<'b, O: Outboard> Outboard for &'b mut O {
+    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
+
     fn root(&self) -> blake3::Hash {
         (**self).root()
     }
@@ -52,11 +61,71 @@ impl<'b, O: Outboard> Outboard for &'b mut O {
         (**self).tree()
     }
 
-    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
-
     fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
         (**self).load(node)
     }
+}
+
+impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
+    type LoadFuture<'a> = LocalBoxFuture<'a, io::Result<Option<(blake3::Hash, blake3::Hash)>>>
+        where R: 'a;
+
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
+        async move {
+            let Some(offset) = self.tree.pre_order_offset(node) else {
+                return Ok(None);
+            };
+            let offset = offset * 64 + 8;
+            let content = self.data.read_at(offset, 64).await?;
+            Ok(Some(parse_hash_pair(content)?))
+        }
+        .boxed_local()
+    }
+}
+
+impl<R: AsyncSliceReader> Outboard for PostOrderOutboard<R> {
+    type LoadFuture<'a> = LocalBoxFuture<'a, io::Result<Option<(blake3::Hash, blake3::Hash)>>>
+        where R: 'a;
+
+    fn root(&self) -> blake3::Hash {
+        self.root
+    }
+
+    fn tree(&self) -> BaoTree {
+        self.tree
+    }
+
+    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
+        async move {
+            let Some(offset) = self.tree.post_order_offset(node) else {
+                return Ok(None);
+            };
+            let offset = offset.value() * 64;
+            let content = self.data.read_at(offset, 64).await?;
+            Ok(Some(parse_hash_pair(content)?))
+        }
+        .boxed_local()
+    }
+}
+
+pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::Hash)> {
+    if buf.len() != 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "hash pair must be 64 bytes",
+        ));
+    }
+    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
+    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
+    Ok((l_hash, r_hash))
 }
 
 /// Response decoder state machine, at the start of a stream

@@ -112,35 +112,6 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
     }
 }
 
-// use ouroboros::self_referencing;
-// #[self_referencing]
-// struct PreOrderPartialIterInner<R: 'static> {
-//     ranges: R,
-//     #[borrows(ranges)]
-//     #[not_covariant]
-//     iter: PreOrderPartialIterRef<'this>,
-// }
-
-// /// Same as PreOrderPartialIterRef, but owns the ranges so it can be converted into a stream conveniently.
-// pub struct PreOrderPartialIter<R: AsRef<RangeSetRef<ChunkNum>> + 'static>(
-//     PreOrderPartialIterInner<R>,
-// );
-
-// impl<R: AsRef<RangeSetRef<ChunkNum>> + 'static> PreOrderPartialIter<R> {
-//     /// Create a new PreOrderPartialIter.
-//     ///
-//     /// ranges has to implement `AsRef<RangeSetRef<ChunkNum>>`, so you can pass e.g. a RangeSet2.
-//     pub fn new(tree: BaoTree, ranges: R) -> Self {
-//         Self(
-//             PreOrderPartialIterInnerBuilder {
-//                 ranges,
-//                 iter_builder: |ranges| PreOrderPartialIterRef::new(tree, ranges.as_ref(), 0),
-//             }
-//             .build(),
-//         )
-//     }
-// }
-
 /// Iterator over all nodes in a BaoTree in post-order.
 #[derive(Debug)]
 pub struct PostOrderNodeIter {
