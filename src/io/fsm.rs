@@ -26,24 +26,24 @@ use crate::{
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-/// An item of a decode response
+/// An item of bao content
 ///
-/// This is used by both sync and tokio decoders
+/// We know that we are not going to get headers after the first item.
 #[derive(Debug)]
-pub enum DecodeResponseItem {
+pub enum BaoContentItem {
     /// a parent node, to update the outboard
     Parent(Parent),
     /// a leaf node, to write to the file
     Leaf(Leaf),
 }
 
-impl From<Parent> for DecodeResponseItem {
+impl From<Parent> for BaoContentItem {
     fn from(p: Parent) -> Self {
         Self::Parent(p)
     }
 }
 
-impl From<Leaf> for DecodeResponseItem {
+impl From<Leaf> for BaoContentItem {
     fn from(l: Leaf) -> Self {
         Self::Leaf(l)
     }
@@ -279,7 +279,7 @@ pub enum ResponseDecoderReadingNext<R> {
     More(
         (
             ResponseDecoderReading<R>,
-            std::result::Result<DecodeResponseItem, DecodeError>,
+            std::result::Result<BaoContentItem, DecodeError>,
         ),
     ),
     /// The stream is done, you get back the underlying reader
@@ -316,10 +316,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         self.0.encoded
     }
 
-    async fn next0(
-        &mut self,
-        chunk: BaoChunk,
-    ) -> std::result::Result<DecodeResponseItem, DecodeError> {
+    async fn next0(&mut self, chunk: BaoChunk) -> std::result::Result<BaoContentItem, DecodeError> {
         Ok(match chunk {
             BaoChunk::Parent {
                 is_root,
@@ -519,10 +516,10 @@ where
             }
         };
         match item {
-            DecodeResponseItem::Parent(Parent { node, pair }) => {
+            BaoContentItem::Parent(Parent { node, pair }) => {
                 outboard.save(node, &pair).await?;
             }
-            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+            BaoContentItem::Leaf(Leaf { offset, data }) => {
                 target.write_bytes_at(offset.0, data).await?;
             }
         }

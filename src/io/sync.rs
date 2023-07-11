@@ -26,8 +26,6 @@ macro_rules! io_error {
 }
 
 /// An item of a decode response
-///
-/// This is used by both sync and tokio decoders
 #[derive(Debug)]
 pub enum DecodeResponseItem {
     /// We got the header and now know how big the overall size is
