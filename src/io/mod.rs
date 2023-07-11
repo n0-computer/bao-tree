@@ -2,7 +2,8 @@
 use crate::{BaoTree, BlockSize, ByteNum, TreeNode};
 use bytes::Bytes;
 
-pub mod error;
+mod error;
+pub use error::*;
 #[cfg(feature = "tokio_fsm")]
 pub mod fsm;
 pub mod outboard;
