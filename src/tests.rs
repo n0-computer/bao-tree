@@ -183,12 +183,12 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     let ranges = canonicalize_range_owned(&ranges, ByteNum(data.len() as u64));
     let mut actual2 = Vec::new();
     let ob = PostOrderMemOutboardRef::load(hash, &outboard, BlockSize::DEFAULT).unwrap();
-    encode_ranges(Cursor::new(&data), ob, &ranges, Cursor::new(&mut actual2)).unwrap();
+    encode_ranges(&data, ob, &ranges, Cursor::new(&mut actual2)).unwrap();
     assert_eq!(expected.len(), actual2.len());
     assert_eq!(expected, actual2);
 
     let mut actual3 = Vec::new();
-    encode_ranges_validated(Cursor::new(&data), ob, &ranges, Cursor::new(&mut actual3)).unwrap();
+    encode_ranges_validated(&data, ob, &ranges, Cursor::new(&mut actual3)).unwrap();
     assert_eq!(expected.len(), actual3.len());
     assert_eq!(expected, actual3);
 }

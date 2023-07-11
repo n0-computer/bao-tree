@@ -100,6 +100,7 @@ dependencies = [
  "futures",
  "hex",
  "iroh-io",
+ "positioned-io",
  "proptest",
  "rand",
  "range-collections",
@@ -1011,6 +1012,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38f6d39893cca0701371e3c27294f09797214b86f1fb951b89ade8ec04e2abab"
 dependencies = [
  "plotters-backend",
+]
+
+[[package]]
+name = "positioned-io"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09b9485cf7f528baf34edd811ec8283a168864912e11d0b7d3e0510738761114"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
