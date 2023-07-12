@@ -611,7 +611,7 @@ impl Iterator for PostOrderTreeIterStack {
 pub fn decode_ranges_into_chunks<'a>(
     root: blake3::Hash,
     block_size: BlockSize,
-    encoded: &'a mut impl Read,
+    encoded: impl Read + 'a,
     ranges: &'a RangeSetRef<ChunkNum>,
     scratch: BytesMut,
 ) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
