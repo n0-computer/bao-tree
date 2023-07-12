@@ -373,7 +373,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
 ///
 /// This will not validate on writing, so data corruption will be detected on reading
 pub async fn encode_ranges<D, O, W>(
-    data: &mut D,
+    mut data: D,
     mut outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,
@@ -420,7 +420,7 @@ where
 ///
 /// This function validates the data before writing
 pub async fn encode_ranges_validated<D, O, W>(
-    data: &mut D,
+    mut data: D,
     mut outboard: O,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: W,

@@ -615,14 +615,14 @@ pub fn write_ranges(
 
 /// Compute the post order outboard for the given data, writing into a io::Write
 pub fn outboard_post_order(
-    data: &mut impl Read,
+    data: impl Read,
     size: u64,
     block_size: BlockSize,
-    outboard: &mut impl Write,
+    mut outboard: impl Write,
 ) -> io::Result<blake3::Hash> {
     let tree = BaoTree::new_with_start_chunk(ByteNum(size), block_size, ChunkNum(0));
     let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-    let hash = outboard_post_order_impl(tree, data, outboard, &mut buffer)?;
+    let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
     outboard.write_all(&size.to_le_bytes())?;
     Ok(hash)
 }
@@ -632,8 +632,8 @@ pub fn outboard_post_order(
 /// This is the internal version that takes a start chunk and does not append the size!
 pub(crate) fn outboard_post_order_impl(
     tree: BaoTree,
-    data: &mut impl Read,
-    outboard: &mut impl Write,
+    mut data: impl Read,
+    mut outboard: impl Write,
     buffer: &mut [u8],
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
@@ -703,14 +703,14 @@ pub(crate) fn blake3_hash_inner(
     Ok(stack.pop().unwrap())
 }
 
-fn read_len(from: &mut impl Read) -> std::io::Result<ByteNum> {
+fn read_len(mut from: impl Read) -> std::io::Result<ByteNum> {
     let mut buf = [0; 8];
     from.read_exact(&mut buf)?;
     let len = ByteNum(u64::from_le_bytes(buf));
     Ok(len)
 }
 
-fn read_parent(from: &mut impl Read) -> std::io::Result<(blake3::Hash, blake3::Hash)> {
+fn read_parent(mut from: impl Read) -> std::io::Result<(blake3::Hash, blake3::Hash)> {
     let mut buf = [0; 64];
     from.read_exact(&mut buf)?;
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
@@ -720,7 +720,7 @@ fn read_parent(from: &mut impl Read) -> std::io::Result<(blake3::Hash, blake3::H
 
 /// seeks read the bytes for the range from the source
 fn read_range<'a>(
-    from: &mut impl ReadAt,
+    from: impl ReadAt,
     range: Range<ByteNum>,
     buf: &'a mut [u8],
 ) -> std::io::Result<&'a [u8]> {
