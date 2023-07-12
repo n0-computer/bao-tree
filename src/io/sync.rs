@@ -719,11 +719,7 @@ fn read_parent(mut from: impl Read) -> std::io::Result<(blake3::Hash, blake3::Ha
 }
 
 /// seeks read the bytes for the range from the source
-fn read_range<'a>(
-    from: impl ReadAt,
-    range: Range<ByteNum>,
-    buf: &'a mut [u8],
-) -> std::io::Result<&'a [u8]> {
+fn read_range(from: impl ReadAt, range: Range<ByteNum>, buf: &mut [u8]) -> std::io::Result<&[u8]> {
     let len = (range.end - range.start).to_usize();
     let buf = &mut buf[..len];
     from.read_exact_at(range.start.0, buf)?;
