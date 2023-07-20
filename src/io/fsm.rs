@@ -316,6 +316,11 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         self.0.encoded
     }
 
+    /// The tree geometry
+    pub fn tree(&self) -> &BaoTree {
+        self.0.iter.tree()
+    }
+
     async fn next0(&mut self, chunk: BaoChunk) -> std::result::Result<BaoContentItem, DecodeError> {
         Ok(match chunk {
             BaoChunk::Parent {
