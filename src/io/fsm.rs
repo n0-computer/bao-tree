@@ -317,7 +317,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
     }
 
     /// The tree geometry
-    pub fn tree(&self) -> BaoTree {
+    pub fn tree(&self) -> &BaoTree {
         self.0.iter.tree()
     }
 

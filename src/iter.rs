@@ -515,8 +515,8 @@ impl PreOrderChunkIter {
     }
 
     /// The tree this iterator is iterating over.
-    pub fn tree(&self) -> BaoTree {
-        self.0.with_dependent(|_, iter| *iter.tree())
+    pub fn tree(&self) -> &BaoTree {
+        self.0.with_dependent(|_, iter| iter.tree())
     }
 }
 
