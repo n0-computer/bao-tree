@@ -10,7 +10,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
 use crate::io::{
-    sync::{valid_ranges, DecodeResponseItem, Outboard},
+    sync::{DecodeResponseItem, Outboard},
     Leaf,
 };
 
@@ -257,11 +257,20 @@ mod fsm_tests {
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
-fn validate_outboard_impl(
+fn validate_outboard_sync_impl(
     outboard: &PostOrderMemOutboard,
 ) -> (RangeSet2<ChunkNum>, RangeSet2<ChunkNum>) {
     let expected = RangeSet2::from(..outboard.tree().chunks());
-    let actual = valid_ranges(outboard).unwrap();
+    let actual = crate::io::sync::valid_ranges(outboard).unwrap();
+    (expected, actual)
+}
+
+/// range is a range of chunks. Just using u64 for convenience in tests
+fn validate_outboard_async_impl(
+    outboard: &mut PostOrderMemOutboard,
+) -> (RangeSet2<ChunkNum>, RangeSet2<ChunkNum>) {
+    let expected = RangeSet2::from(..outboard.tree().chunks());
+    let actual = futures::executor::block_on(crate::io::fsm::valid_ranges(outboard)).unwrap();
     (expected, actual)
 }
 
@@ -841,7 +850,10 @@ proptest! {
     fn validate_outboard_test(size in 0usize..32768, rand in any::<usize>()) {
         let data = make_test_data(size);
         let mut outboard = BaoTree::outboard_post_order_mem(data, BlockSize::DEFAULT);
-        let (expected, actual) = validate_outboard_impl(&outboard);
+        let (expected, actual) = validate_outboard_sync_impl(&outboard);
+        prop_assert_eq!(expected, actual);
+
+        let (expected, actual) = validate_outboard_async_impl(&mut outboard);
         prop_assert_eq!(expected, actual);
         if !outboard.data.is_empty() {
             // flip a random bit in the outboard
@@ -852,7 +864,10 @@ proptest! {
             let bit = bit % 8;
             outboard.data[byte] ^= 1 << bit;
             // Check that at least one range is invalid
-            let (expected, actual) = validate_outboard_impl(&outboard);
+            let (expected, actual) = validate_outboard_sync_impl(&outboard);
+            prop_assert_ne!(expected, actual);
+
+            let (expected, actual) = validate_outboard_async_impl(&mut outboard);
             prop_assert_ne!(expected, actual);
         }
     }

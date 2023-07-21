@@ -536,3 +536,64 @@ fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
     (l_hash, r_hash)
 }
+
+/// Given an outboard, return a range set of all valid ranges
+pub async fn valid_ranges<O>(outboard: &mut O) -> io::Result<RangeSet2<ChunkNum>>
+where
+    O: Outboard,
+{
+    struct RecursiveValidator<'a, O: Outboard> {
+        tree: BaoTree,
+        valid_nodes: TreeNode,
+        res: RangeSet2<ChunkNum>,
+        outboard: &'a mut O,
+    }
+
+    impl<'a, O: Outboard> RecursiveValidator<'a, O> {
+        fn validate_rec<'b>(
+            &'b mut self,
+            parent_hash: &'b blake3::Hash,
+            node: TreeNode,
+            is_root: bool,
+        ) -> LocalBoxFuture<'b, io::Result<()>> {
+            async move {
+                let (l_hash, r_hash) =
+                    if let Some((l_hash, r_hash)) = self.outboard.load(node).await? {
+                        let actual = parent_cv(&l_hash, &r_hash, is_root);
+                        if &actual != parent_hash {
+                            // we got a validation error. Simply continue without adding the range
+                            return Ok(());
+                        }
+                        (l_hash, r_hash)
+                    } else {
+                        (*parent_hash, blake3::Hash::from([0; 32]))
+                    };
+                if let Some(leaf) = node.as_leaf() {
+                    let start = self.tree.chunk_num(leaf);
+                    let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
+                    self.res |= RangeSet2::from(start..end);
+                } else {
+                    // recurse
+                    let left = node.left_child().unwrap();
+                    self.validate_rec(&l_hash, left, false).await?;
+                    let right = node.right_descendant(self.valid_nodes).unwrap();
+                    self.validate_rec(&r_hash, right, false).await?;
+                }
+                Ok(())
+            }
+            .boxed_local()
+        }
+    }
+    let tree = outboard.tree();
+    let root_hash = outboard.root();
+    let mut validator = RecursiveValidator {
+        tree,
+        valid_nodes: tree.filled_size(),
+        res: RangeSet2::empty(),
+        outboard,
+    };
+    validator
+        .validate_rec(&root_hash, tree.root(), true)
+        .await?;
+    Ok(validator.res)
+}
