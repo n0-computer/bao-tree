@@ -91,11 +91,11 @@ impl crate::io::sync::OutboardMut for EmptyOutboard {
 #[derive(Debug, Clone)]
 pub struct PreOrderOutboard<R> {
     /// root hash
-    pub(crate) root: blake3::Hash,
+    pub root: blake3::Hash,
     /// tree defining the data
-    pub(crate) tree: BaoTree,
+    pub tree: BaoTree,
     /// hashes with length prefix
-    pub(crate) data: R,
+    pub data: R,
 }
 
 impl<R> PreOrderOutboard<R> {

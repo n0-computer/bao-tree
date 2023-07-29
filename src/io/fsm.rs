@@ -154,7 +154,11 @@ impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
             };
             let offset = offset * 64 + 8;
             let content = self.data.read_at(offset, 64).await?;
-            Ok(Some(parse_hash_pair(content)?))
+            Ok(Some(if content.len() != 64 {
+                (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
+            } else {
+                parse_hash_pair(content)?
+            }))
         }
         .boxed_local()
     }
@@ -179,7 +183,11 @@ impl<R: AsyncSliceReader> Outboard for PostOrderOutboard<R> {
             };
             let offset = offset.value() * 64;
             let content = self.data.read_at(offset, 64).await?;
-            Ok(Some(parse_hash_pair(content)?))
+            Ok(Some(if content.len() != 64 {
+                (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
+            } else {
+                parse_hash_pair(content)?
+            }))
         }
         .boxed_local()
     }
@@ -244,6 +252,16 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
             tree, hash, ranges, encoded,
         )));
         Ok((state, size))
+    }
+
+    /// Hash of the blob we are currently getting
+    pub fn hash(&self) -> &blake3::Hash {
+        &self.hash
+    }
+
+    /// The ranges we requested
+    pub fn ranges(&self) -> &RangeSet2<ChunkNum> {
+        &self.ranges
     }
 }
 
@@ -557,6 +575,7 @@ where
             is_root: bool,
         ) -> LocalBoxFuture<'b, io::Result<()>> {
             async move {
+                // if there is an IO error reading the hash, we simply continue without adding the range
                 let (l_hash, r_hash) =
                     if let Some((l_hash, r_hash)) = self.outboard.load(node).await? {
                         let actual = parent_cv(&l_hash, &r_hash, is_root);
