@@ -81,10 +81,32 @@ impl crate::io::sync::OutboardMut for EmptyOutboard {
             ))
         }
     }
-    fn set_size(&mut self, size: ByteNum) -> io::Result<()> {
-        self.tree = BaoTree::new(size, self.tree.block_size);
-        Ok(())
+}
+
+impl crate::io::fsm::OutboardMut for EmptyOutboard {
+    fn save(
+        &mut self,
+        node: TreeNode,
+        _pair: &(blake3::Hash, blake3::Hash),
+    ) -> Self::SaveFuture<'_> {
+        let res = if self.tree.is_persisted(node) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid node for this outboard",
+            ))
+        };
+        futures::future::ready(res)
     }
+
+    type SaveFuture<'a> = futures::future::Ready<io::Result<()>>;
+
+    fn sync(&mut self) -> Self::SyncFuture<'_> {
+        futures::future::ready(Ok(()))
+    }
+
+    type SyncFuture<'a> = futures::future::Ready<io::Result<()>>;
 }
 
 /// A generic outboard in pre order
@@ -199,19 +221,6 @@ impl crate::io::sync::OutboardMut for PostOrderMemOutboard {
                 io::ErrorKind::InvalidInput,
                 "invalid node for this outboard",
             )),
-        }
-    }
-
-    fn set_size(&mut self, size: ByteNum) -> io::Result<()> {
-        if self.data.is_empty() {
-            self.tree = BaoTree::new(size, self.tree.block_size);
-            self.data = vec![0; usize::try_from(self.tree.outboard_hash_pairs() * 64).unwrap()];
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "cannot set size on non-empty outboard",
-            ))
         }
     }
 }
@@ -466,25 +475,6 @@ impl OutboardMut for PreOrderMemOutboardMut {
                 io::ErrorKind::InvalidInput,
                 "invalid node for this outboard",
             )),
-        }
-    }
-    fn set_size(&mut self, size: ByteNum) -> io::Result<()> {
-        if self.data.is_empty() {
-            if size == ByteNum(0) {
-                return Ok(());
-            }
-            self.tree = BaoTree::new(size, self.tree.block_size);
-            self.data = vec![0; usize::try_from(self.tree.outboard_hash_pairs() * 64 + 8).unwrap()];
-            self.data[0..8].copy_from_slice(&size.0.to_le_bytes());
-            if let Some(changes) = &mut self.changes {
-                *changes |= RangeSet2::from(0..8);
-            }
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "cannot set size on non-empty outboard",
-            ))
         }
     }
 }
