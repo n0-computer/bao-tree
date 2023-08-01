@@ -556,48 +556,6 @@ impl TreeNode {
     }
 }
 
-/// Hash a blake3 chunk.
-///
-/// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
-pub(crate) fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
-    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
-    let mut hasher = blake3::guts::ChunkState::new(chunk.0);
-    hasher.update(data);
-    hasher.finalize(is_root)
-}
-
-/// compute
-pub fn hash_block(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
-    // let res1 = hash_block_tree(start_chunk, data, is_root);
-    // let res2 = hash_block_chunk_group_state(start_chunk, data, is_root);
-    let res3 = blake3::guts::hash_block(start_chunk.0, data, is_root);
-    // if res1 != res3 {
-    //     println!("hash mismatch");
-    // }
-    // if res1 != res2 {
-    //     println!("hash mismatch");
-    //     println!("- {} {}", start_chunk, data.len());
-    //     let res2 = hash_block_chunk_group_state(start_chunk, data, is_root);
-    // } else {
-    //     println!("+ {} {}", start_chunk, data.len());
-    // }
-    res3
-}
-
-/// Hash a block.
-///
-/// `start_chunk` is the chunk index of the first chunk in the block, `data` is the block data,
-/// and `is_root` is true if this is the only block.
-///
-/// It is up to the user to make sure `data.len() <= 1024 * 2^chunk_group_log`
-/// It does not make sense to set start_chunk to a value that is not a multiple of 2^chunk_group_log.
-pub fn hash_block_tree(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
-    let mut buffer = [0u8; 1024];
-    let data_len = ByteNum(data.len() as u64);
-    let data = Cursor::new(data);
-    io::sync::blake3_hash_inner(data, data_len, start_chunk, is_root, &mut buffer).unwrap()
-}
-
 /// Slow iterative way to find the offset of a node in a pre-order traversal.
 ///
 /// I am sure there is a way that does not require a loop, but this will do for now.

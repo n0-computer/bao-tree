@@ -62,17 +62,7 @@ fn make_test_data(n: usize) -> Vec<u8> {
 ///
 /// using blake3_hash_inner which is used in hash_block.
 fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
-    let data = data.as_ref();
-    let cursor = Cursor::new(data);
-    let mut buffer = [0u8; 1024];
-    crate::io::sync::blake3_hash_inner(
-        cursor,
-        ByteNum(data.len() as u64),
-        ChunkNum(0),
-        true,
-        &mut buffer,
-    )
-    .unwrap()
+    blake3::hash(data.as_ref())
 }
 
 fn bao_tree_blake3_impl(data: Vec<u8>) -> (blake3::Hash, blake3::Hash) {

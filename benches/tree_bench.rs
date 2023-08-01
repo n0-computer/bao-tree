@@ -69,11 +69,6 @@ fn hash_benches_large(c: &mut Criterion) {
             bao_tree::hash_block_chunk_group_state(ChunkNum(0), &data, true);
         })
     });
-    c.bench_function("hash_block_tree", |b| {
-        b.iter(|| {
-            bao_tree::hash_block_tree(ChunkNum(0), &data, true);
-        })
-    });
 }
 
 fn hash_benches_small(c: &mut Criterion) {
@@ -86,11 +81,6 @@ fn hash_benches_small(c: &mut Criterion) {
     c.bench_function("hash_small_block", |b| {
         b.iter(|| {
             bao_tree::hash_block_chunk_group_state(ChunkNum(0), &data, true);
-        })
-    });
-    c.bench_function("hash_small_block_tree", |b| {
-        b.iter(|| {
-            bao_tree::hash_block_tree(ChunkNum(0), &data, true);
         })
     });
 }
