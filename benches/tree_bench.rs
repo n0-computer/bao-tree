@@ -1,4 +1,4 @@
-use bao_tree::{BaoTree, BlockSize, ByteNum, ChunkNum};
+use bao_tree::{blake3, BaoTree, BlockSize, ByteNum, ChunkNum};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use range_collections::RangeSet2;
 
@@ -44,7 +44,6 @@ fn iter_benches(c: &mut Criterion) {
         })
     });
 }
-
 
 fn hash_benches_large(c: &mut Criterion) {
     let data = (0..1024 * 16).map(|i| i as u8).collect::<Vec<_>>();
@@ -95,5 +94,11 @@ fn hash_benches_small(c: &mut Criterion) {
         })
     });
 }
-criterion_group!(benches, offset_benches, iter_benches, hash_benches_large, hash_benches_small);
+criterion_group!(
+    benches,
+    offset_benches,
+    iter_benches,
+    hash_benches_large,
+    hash_benches_small
+);
 criterion_main!(benches);

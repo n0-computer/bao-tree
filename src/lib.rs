@@ -32,6 +32,7 @@ use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 pub mod io;
+pub use iroh_blake3 as blake3;
 
 #[cfg(test)]
 mod tests;
@@ -565,7 +566,7 @@ pub(crate) fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3:
     hasher.finalize(is_root)
 }
 
-/// compute 
+/// compute
 pub fn hash_block(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
     // let res1 = hash_block_tree(start_chunk, data, is_root);
     // let res2 = hash_block_chunk_group_state(start_chunk, data, is_root);
@@ -634,7 +635,11 @@ fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
 }
 
 ///
-pub fn hash_block_chunk_group_state(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
+pub fn hash_block_chunk_group_state(
+    start_chunk: ChunkNum,
+    data: &[u8],
+    is_root: bool,
+) -> blake3::Hash {
     let mut state = ChunkGroupState::new(start_chunk.0);
     state.update(data);
     state.finalize(is_root)

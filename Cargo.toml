@@ -12,7 +12,7 @@ categories = ["data-structures"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-blake3 = "1.4.0"
+iroh-blake3 = "1.4.2"
 range-collections = "0.4.0"
 smallvec = "1"
 
@@ -46,5 +46,3 @@ harness = false
 [workspace]
 members = ["cli"]
 
-[patch.crates-io]
-blake3 = { git = "https://github.com/rklaehn/BLAKE3.git", branch = "more-guts" }

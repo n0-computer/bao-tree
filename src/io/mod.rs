@@ -1,5 +1,5 @@
 //! Implementation of bao streaming for std io and tokio io
-use crate::{BaoTree, BlockSize, ByteNum, TreeNode};
+use crate::{blake3, BaoTree, BlockSize, ByteNum, TreeNode};
 use bytes::Bytes;
 
 mod error;

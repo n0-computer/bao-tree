@@ -7,6 +7,7 @@
 //! without having to box the futures.
 use std::{io, result};
 
+use crate::blake3;
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};

@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    hash_block, hash_chunk,
+    blake3, hash_block, hash_chunk,
     io::error::{DecodeError, EncodeError},
     io::{
         outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
