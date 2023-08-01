@@ -116,7 +116,7 @@ pub trait OutboardMut: Sized {
         Self: 'a;
 
     /// sync to disk
-    fn sync<'a>(&'a mut self) -> Self::SyncFuture<'a>;
+    fn sync(&mut self) -> Self::SyncFuture<'_>;
 }
 
 impl<'b, O: Outboard> Outboard for &'b mut O {
@@ -189,7 +189,7 @@ impl<W: AsyncSliceWriter> OutboardMut for PreOrderOutboard<W> {
 
     type SyncFuture<'a> = W::SyncFuture<'a> where W: 'a;
 
-    fn sync<'a>(&'a mut self) -> Self::SyncFuture<'_> {
+    fn sync(&mut self) -> Self::SyncFuture<'_> {
         self.data.sync()
     }
 }
