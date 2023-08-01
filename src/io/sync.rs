@@ -93,9 +93,7 @@ pub trait Outboard {
 /// This trait can be used to incrementally save an outboard when receiving data.
 /// If you want to just ignore outboard data, there is a special placeholder outboard
 /// implementation [super::outboard::EmptyOutboard].
-pub trait OutboardMut: Outboard {
-    /// Set the length of the file for which this outboard is
-    fn set_size(&mut self, len: ByteNum) -> io::Result<()>;
+pub trait OutboardMut: Sized {
     /// Save a hash pair for a node
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()>;
 }
@@ -121,15 +119,6 @@ impl<O: Outboard> Outboard for &mut O {
     }
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
         (**self).load(node)
-    }
-}
-
-impl<O: OutboardMut> OutboardMut for &mut O {
-    fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
-        (**self).save(node, hash_pair)
-    }
-    fn set_size(&mut self, len: ByteNum) -> io::Result<()> {
-        (**self).set_size(len)
     }
 }
 
@@ -171,6 +160,20 @@ impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
         let mut content = [0u8; 64];
         self.data.read_exact_at(offset, &mut content)?;
         Ok(Some(parse_hash_pair(content)))
+    }
+}
+
+impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
+    fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
+        let Some(offset) = self.tree.pre_order_offset(node) else {
+            return Ok(());
+        };
+        let offset = offset * 64 + 8;
+        let mut content = [0u8; 64];
+        content[0..32].copy_from_slice(hash_pair.0.as_bytes());
+        content[32..64].copy_from_slice(hash_pair.1.as_bytes());
+        self.data.write_all_at(offset, &content)?;
+        Ok(())
     }
 }
 
@@ -448,6 +451,10 @@ impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
 /// Encode ranges relevant to a query from a reader and outboard to a writer
 ///
 /// This will not validate on writing, so data corruption will be detected on reading
+///
+/// It is possible to encode ranges from a partial file and outboard.
+/// This will either succeed if the requested ranges are all present, or fail
+/// as soon as a range is missing.
 pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     data: D,
     outboard: O,
@@ -456,12 +463,7 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
 ) -> result::Result<(), EncodeError> {
     let data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.size()?.unwrap());
     let tree = outboard.tree();
-    let ob_len = tree.size;
-    if file_len != ob_len {
-        return Err(EncodeError::SizeMismatch);
-    }
     if !range_ok(ranges, tree.chunks()) {
         return Err(EncodeError::InvalidQueryRange);
     }
@@ -490,7 +492,11 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
 
 /// Encode ranges relevant to a query from a reader and outboard to a writer
 ///
-/// This function validates the data before writing
+/// This function validates the data before writing.
+///
+/// It is possible to encode ranges from a partial file and outboard.
+/// This will either succeed if the requested ranges are all present, or fail
+/// as soon as a range is missing.
 pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     data: D,
     outboard: O,
@@ -501,12 +507,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     stack.push(outboard.root());
     let data = data;
     let mut encoded = encoded;
-    let file_len = ByteNum(data.size()?.unwrap());
     let tree = outboard.tree();
-    let ob_len = tree.size;
-    if file_len != ob_len {
-        return Err(EncodeError::SizeMismatch);
-    }
     if !range_ok(ranges, tree.chunks()) {
         return Err(EncodeError::InvalidQueryRange);
     }
@@ -561,25 +562,36 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
 /// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
 /// the outboard.
 pub async fn decode_response_into<R, O, W>(
+    root: blake3::Hash,
+    block_size: BlockSize,
     ranges: &RangeSetRef<ChunkNum>,
     encoded: R,
-    mut outboard: O,
+    create: impl FnOnce(BaoTree, blake3::Hash) -> io::Result<O>,
     mut target: W,
-) -> io::Result<()>
+) -> io::Result<Option<O>>
 where
     O: OutboardMut,
     R: Read,
     W: WriteAt,
 {
-    let block_size = outboard.tree().block_size;
     let buffer = BytesMut::with_capacity(block_size.bytes());
-    let iter = DecodeResponseIter::new(outboard.root(), block_size, encoded, ranges, buffer);
+    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges, buffer);
+    let mut outboard = None;
+    let mut tree = None;
+    let mut create = Some(create);
     for item in iter {
         match item? {
             DecodeResponseItem::Header(Header { size }) => {
-                outboard.set_size(size)?;
+                tree = Some(BaoTree::new(size, block_size));
             }
             DecodeResponseItem::Parent(Parent { node, pair }) => {
+                let outboard = if let Some(outboard) = outboard.as_mut() {
+                    outboard
+                } else {
+                    let create = create.take().unwrap();
+                    outboard = Some(create(tree.take().unwrap(), root)?);
+                    outboard.as_mut().unwrap()
+                };
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
@@ -587,7 +599,7 @@ where
             }
         }
     }
-    Ok(())
+    Ok(outboard)
 }
 
 /// Write ranges from memory to disk
