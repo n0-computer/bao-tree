@@ -8,6 +8,7 @@ use range_collections::RangeSet2;
 
 use super::TreeNode;
 use crate::{
+    blake3,
     io::sync::{Outboard, OutboardMut},
     BaoTree, BlockSize, ByteNum,
 };

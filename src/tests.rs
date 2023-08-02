@@ -9,9 +9,12 @@ use proptest::prelude::*;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
-use crate::io::{
-    sync::{DecodeResponseItem, Outboard},
-    Leaf,
+use crate::{
+    blake3,
+    io::{
+        sync::{DecodeResponseItem, Outboard},
+        Leaf,
+    },
 };
 
 use super::{
@@ -59,17 +62,7 @@ fn make_test_data(n: usize) -> Vec<u8> {
 ///
 /// using blake3_hash_inner which is used in hash_block.
 fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
-    let data = data.as_ref();
-    let cursor = Cursor::new(data);
-    let mut buffer = [0u8; 1024];
-    crate::io::sync::blake3_hash_inner(
-        cursor,
-        ByteNum(data.len() as u64),
-        ChunkNum(0),
-        true,
-        &mut buffer,
-    )
-    .unwrap()
+    blake3::hash(data.as_ref())
 }
 
 fn bao_tree_blake3_impl(data: Vec<u8>) -> (blake3::Hash, blake3::Hash) {
@@ -132,6 +125,7 @@ fn post_order_outboard_reference_2(data: &[u8]) -> PostOrderMemOutboard {
     let hash = encoder.finalize_post_order().unwrap();
     // remove the length suffix
     outboard.truncate(outboard.len() - 8);
+    let hash = blake3::Hash::from(*hash.as_bytes());
     PostOrderMemOutboard::new(
         hash,
         BaoTree::new(ByteNum(data.len() as u64), BlockSize::DEFAULT),
@@ -146,6 +140,7 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let mut encoder = bao::encode::Encoder::new_outboard(cursor);
     encoder.write_all(data).unwrap();
     let hash = encoder.finalize().unwrap();
+    let hash = blake3::Hash::from(*hash.as_bytes());
     let pre = PreOrderMemOutboardMut::new(hash, BlockSize::DEFAULT, outboard, false);
     pre.unwrap().flip()
 }
@@ -162,6 +157,7 @@ fn encode_slice_reference(data: &[u8], chunk_range: Range<ChunkNum>) -> (Vec<u8>
     );
     let mut res = Vec::new();
     encoder.read_to_end(&mut res).unwrap();
+    let hash = blake3::Hash::from(*hash.as_bytes());
     (res, hash)
 }
 

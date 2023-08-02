@@ -32,6 +32,7 @@ use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 pub mod io;
+pub use iroh_blake3 as blake3;
 
 #[cfg(test)]
 mod tests;
@@ -553,30 +554,6 @@ impl TreeNode {
         // producing None if without_lowest_bit is 0, which means that there is no next left ancestor
         without_lowest_bit.checked_sub(1)
     }
-}
-
-/// Hash a blake3 chunk.
-///
-/// `chunk` is the chunk index, `data` is the chunk data, and `is_root` is true if this is the only chunk.
-pub(crate) fn hash_chunk(chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
-    debug_assert!(data.len() <= blake3::guts::CHUNK_LEN);
-    let mut hasher = blake3::guts::ChunkState::new(chunk.0);
-    hasher.update(data);
-    hasher.finalize(is_root)
-}
-
-/// Hash a block.
-///
-/// `start_chunk` is the chunk index of the first chunk in the block, `data` is the block data,
-/// and `is_root` is true if this is the only block.
-///
-/// It is up to the user to make sure `data.len() <= 1024 * 2^chunk_group_log`
-/// It does not make sense to set start_chunk to a value that is not a multiple of 2^chunk_group_log.
-pub(crate) fn hash_block(start_chunk: ChunkNum, data: &[u8], is_root: bool) -> blake3::Hash {
-    let mut buffer = [0u8; 1024];
-    let data_len = ByteNum(data.len() as u64);
-    let data = Cursor::new(data);
-    io::sync::blake3_hash_inner(data, data_len, start_chunk, is_root, &mut buffer).unwrap()
 }
 
 /// Slow iterative way to find the offset of a node in a pre-order traversal.
