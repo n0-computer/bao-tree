@@ -1,4 +1,4 @@
-use bao_tree::{blake3, BaoTree, BlockSize, ByteNum, ChunkNum};
+use bao_tree::{blake3, BaoTree, BlockSize, ByteNum};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use range_collections::RangeSet2;
 
@@ -59,36 +59,12 @@ fn hash_benches_large(c: &mut Criterion) {
             hasher.finalize()
         })
     });
-    c.bench_function("hash_block_guts", |b| {
+    c.bench_function("hash_subtree", |b| {
         b.iter(|| {
-            blake3::guts::hash_block(0, &data, true);
-        })
-    });
-    c.bench_function("hash_block_chunk_group_state", |b| {
-        b.iter(|| {
-            bao_tree::hash_block_chunk_group_state(ChunkNum(0), &data, true);
+            blake3::guts::hash_subtree(0, &data, true);
         })
     });
 }
 
-fn hash_benches_small(c: &mut Criterion) {
-    let data = (0..1024).map(|i| i as u8).collect::<Vec<_>>();
-    c.bench_function("hash_small_blake3", |b| {
-        b.iter(|| {
-            blake3::hash(&data);
-        })
-    });
-    c.bench_function("hash_small_block", |b| {
-        b.iter(|| {
-            bao_tree::hash_block_chunk_group_state(ChunkNum(0), &data, true);
-        })
-    });
-}
-criterion_group!(
-    benches,
-    offset_benches,
-    iter_benches,
-    hash_benches_large,
-    hash_benches_small
-);
+criterion_group!(benches, offset_benches, iter_benches, hash_benches_large,);
 criterion_main!(benches);

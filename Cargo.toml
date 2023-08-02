@@ -12,7 +12,7 @@ categories = ["data-structures"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-iroh-blake3 = "1.4.2"
+iroh-blake3 = "1.4.3"
 range-collections = "0.4.1"
 smallvec = "1"
 

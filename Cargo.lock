@@ -858,9 +858,9 @@ dependencies = [
 
 [[package]]
 name = "iroh-blake3"
-version = "1.4.2"
+version = "1.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "041fea65048b0ecd24b843beb37ccc633c77c1f470bde22a6421353a69bb48f1"
+checksum = "f9446c3ff33feef14809b17e90178caa73bf184ed5054337485a0b002bc7197e"
 dependencies = [
  "arrayref",
  "arrayvec",

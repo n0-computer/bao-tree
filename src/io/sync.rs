@@ -15,7 +15,7 @@ use crate::{
     iter::{BaoChunk, PreOrderChunkIterRef},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
-use blake3::guts::{hash_block, parent_cv};
+use blake3::guts::{hash_subtree, parent_cv};
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
 use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
@@ -422,7 +422,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
             }) => {
                 self.buf.resize(size, 0);
                 self.encoded.read_exact(&mut self.buf)?;
-                let actual = hash_block(start_chunk.0, &self.buf, is_root);
+                let actual = hash_subtree(start_chunk.0, &self.buf, is_root);
                 let leaf_hash = self.stack.pop().unwrap();
                 if leaf_hash != actual {
                     return Err(DecodeError::LeafHashMismatch(start_chunk));
@@ -546,7 +546,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 let start = start_chunk.to_bytes();
                 let buf = &mut buffer[..size];
                 data.read_exact_at(start.0, buf)?;
-                let actual = hash_block(start_chunk.0, buf, is_root);
+                let actual = hash_subtree(start_chunk.0, buf, is_root);
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
@@ -668,7 +668,7 @@ pub(crate) fn outboard_post_order_impl(
             } => {
                 let buf = &mut buffer[..size];
                 data.read_exact(buf)?;
-                let hash = hash_block(start_chunk.0, buf, is_root);
+                let hash = hash_subtree(start_chunk.0, buf, is_root);
                 stack.push(hash);
             }
         }
@@ -732,13 +732,13 @@ where
                 if let Some(leaf) = node.as_leaf() {
                     let (s, m, e) = self.tree.leaf_byte_ranges3(leaf);
                     let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
-                    let actual = hash_block(s.chunks().0, l_data, false);
+                    let actual = hash_subtree(s.chunks().0, l_data, false);
                     if actual == l_hash {
                         self.res |= RangeSet2::from(s.chunks()..m.chunks());
                     }
 
                     let r_data = read_range(&mut self.reader, m..e, &mut self.buffer)?;
-                    let actual = hash_block(m.chunks().0, r_data, false);
+                    let actual = hash_subtree(m.chunks().0, r_data, false);
                     if actual == r_hash {
                         self.res |= RangeSet2::from(m.chunks()..e.chunks());
                     }
@@ -752,7 +752,7 @@ where
             } else if let Some(leaf) = node.as_leaf() {
                 let (s, m, _) = self.tree.leaf_byte_ranges3(leaf);
                 let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
-                let actual = hash_block(s.chunks().0, l_data, is_root);
+                let actual = hash_subtree(s.chunks().0, l_data, is_root);
                 if actual == *parent_hash {
                     self.res |= RangeSet2::from(s.chunks()..m.chunks());
                 }

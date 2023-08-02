@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
                 std::env::current_dir()?.join(format!("{}.{}", name.to_string_lossy(), extension))
             };
             let source = std::fs::File::open(&path)?;
-            let target = std::fs::File::create(&out)?;
+            let target = std::fs::File::create(out)?;
             let source = std::io::BufReader::with_capacity(1024 * 1024 * 16, source);
             let target = std::io::BufWriter::with_capacity(1024 * 1024 * 16, target);
             let t0 = std::time::Instant::now();

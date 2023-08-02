@@ -8,7 +8,7 @@
 use std::{io, result};
 
 use crate::blake3;
-use blake3::guts::{hash_block, parent_cv};
+use blake3::guts::{hash_subtree, parent_cv};
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};
 use range_collections::{RangeSet2, RangeSetRef};
@@ -413,7 +413,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 this.buf.resize(size, 0u8);
                 this.encoded.read_exact(&mut this.buf).await?;
                 let leaf_hash = this.stack.pop().unwrap();
-                let actual = hash_block(start_chunk.0, &this.buf, is_root);
+                let actual = hash_subtree(start_chunk.0, &this.buf, is_root);
                 if leaf_hash != actual {
                     return Err(DecodeError::LeafHashMismatch(start_chunk));
                 }
@@ -533,7 +533,7 @@ where
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
                 let bytes = data.read_at(start.0, size).await?;
-                let actual = hash_block(start_chunk.0, &bytes, is_root);
+                let actual = hash_subtree(start_chunk.0, &bytes, is_root);
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
