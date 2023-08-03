@@ -37,6 +37,32 @@ pub use iroh_blake3 as blake3;
 #[cfg(test)]
 mod tests;
 
+fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
+    if data.len().is_power_of_two() {
+        blake3::guts::hash_subtree(start_chunk, data, is_root)
+    } else {
+        recursive_hash_subtree(start_chunk, data, is_root)
+    }
+}
+
+/// This is a recursive version of [`hash_subtree`], for testing.
+fn recursive_hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
+    use blake3::guts::{ChunkState, CHUNK_LEN};
+    if data.len() <= CHUNK_LEN {
+        let mut hasher = ChunkState::new(start_chunk);
+        hasher.update(data);
+        hasher.finalize(is_root)
+    } else {
+        let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
+        let chunks = chunks.next_power_of_two();
+        let mid = chunks / 2;
+        let mid_bytes = mid * CHUNK_LEN;
+        let left = recursive_hash_subtree(start_chunk, &data[..mid_bytes], false);
+        let right = recursive_hash_subtree(start_chunk + mid as u64, &data[mid_bytes..], false);
+        blake3::guts::parent_cv(&left, &right, is_root)
+    }
+}
+
 /// Defines a Bao tree.
 ///
 /// This is just the specification of the tree, it does not contain any actual data.

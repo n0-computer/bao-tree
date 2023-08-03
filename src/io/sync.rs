@@ -5,6 +5,7 @@ use std::{
     result,
 };
 
+use crate::hash_subtree;
 use crate::{
     blake3,
     io::error::{DecodeError, EncodeError},
@@ -15,7 +16,7 @@ use crate::{
     iter::{BaoChunk, PreOrderChunkIterRef},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
-use blake3::guts::{hash_subtree, parent_cv};
+use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
 use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};

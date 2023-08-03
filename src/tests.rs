@@ -15,6 +15,7 @@ use crate::{
         sync::{DecodeResponseItem, Outboard},
         Leaf,
     },
+    recursive_hash_subtree,
 };
 
 use super::{
@@ -430,6 +431,26 @@ fn bao_tree_blake3_0() {
     assert_tuple_eq!(bao_tree_blake3_impl(td(2048)));
     assert_tuple_eq!(bao_tree_blake3_impl(td(2049)));
     assert_tuple_eq!(bao_tree_blake3_impl(td(10000)));
+}
+
+#[test]
+fn outboard_wrong_hash() {
+    let data = make_test_data(100000000);
+    let expected = blake3::hash(&data);
+    let actual = BaoTree::outboard_post_order_mem(&data, BlockSize(4)).root();
+    assert_eq!(expected, actual);
+}
+
+#[test]
+#[ignore]
+fn wrong_hash_small() {
+    let start_chunk = 3;
+    let len = 2049;
+    let is_root = false;
+    let data = make_test_data(len);
+    let expected = recursive_hash_subtree(start_chunk, &data, is_root);
+    let actual = blake3::guts::hash_subtree(start_chunk, &data, is_root);
+    assert_eq!(expected, actual);
 }
 
 // create the mapping from a node number to the offset in the pre order traversal,
@@ -866,5 +887,14 @@ proptest! {
             let (expected, actual) = validate_outboard_async_impl(&mut outboard);
             prop_assert_ne!(expected, actual);
         }
+    }
+
+    #[test]
+    fn hash_subtree_bs4(block in 0u64..100000, size in 0usize..1024 << 4) {
+        let chunk = block << 4;
+        let data = make_test_data(size);
+        let expected = recursive_hash_subtree(chunk, &data, false);
+        let actual = crate::hash_subtree(chunk, &data, false);
+        prop_assert_eq!(expected, actual);
     }
 }

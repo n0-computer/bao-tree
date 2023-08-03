@@ -7,8 +7,8 @@
 //! without having to box the futures.
 use std::{io, result};
 
-use crate::blake3;
-use blake3::guts::{hash_subtree, parent_cv};
+use crate::{blake3, hash_subtree};
+use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};
 use range_collections::{RangeSet2, RangeSetRef};
