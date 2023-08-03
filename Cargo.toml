@@ -1,6 +1,6 @@
 [package]
 name = "bao-tree"
-version = "0.6.0"
+version = "0.6.1"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
