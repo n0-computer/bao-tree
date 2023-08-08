@@ -164,6 +164,24 @@ impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
     }
 }
 
+impl<'b, O: OutboardMut> OutboardMut for &'b mut O {
+    type SaveFuture<'a> = O::SaveFuture<'a> where 'b: 'a;
+
+    fn save<'a>(
+        &'a mut self,
+        node: TreeNode,
+        hash_pair: &'a (blake3::Hash, blake3::Hash),
+    ) -> Self::SaveFuture<'a> {
+        (**self).save(node, hash_pair)
+    }
+
+    type SyncFuture<'a> = O::SyncFuture<'a> where 'b: 'a;
+
+    fn sync(&mut self) -> Self::SyncFuture<'_> {
+        (**self).sync()
+    }
+}
+
 impl<W: AsyncSliceWriter> OutboardMut for PreOrderOutboard<W> {
     type SaveFuture<'a> = LocalBoxFuture<'a, io::Result<()>>
         where W: 'a;
