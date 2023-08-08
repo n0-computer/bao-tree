@@ -99,6 +99,12 @@ pub trait OutboardMut: Sized {
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()>;
 }
 
+impl<O: OutboardMut> OutboardMut for &mut O {
+    fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
+        (**self).save(node, hash_pair)
+    }
+}
+
 impl<O: Outboard> Outboard for &O {
     fn root(&self) -> blake3::Hash {
         (**self).root()
