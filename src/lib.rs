@@ -32,17 +32,23 @@ use iter::*;
 use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 pub mod io;
+#[cfg(feature = "recursive_subtree_hash")]
+pub use blake3;
+#[cfg(feature = "simd_subtree_hash")]
 pub use iroh_blake3 as blake3;
 
 #[cfg(test)]
 mod tests;
 
 fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
+    #[cfg(feature = "simd_subtree_hash")]
     if data.len().is_power_of_two() {
         blake3::guts::hash_subtree(start_chunk, data, is_root)
     } else {
         recursive_hash_subtree(start_chunk, data, is_root)
     }
+    #[cfg(feature = "recursive_subtree_hash")]
+    recursive_hash_subtree(start_chunk, data, is_root)
 }
 
 /// This is a recursive version of [`hash_subtree`], for testing.

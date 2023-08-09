@@ -441,6 +441,7 @@ fn outboard_wrong_hash() {
     assert_eq!(expected, actual);
 }
 
+#[cfg(feature = "simd_subtree_hash")]
 #[test]
 #[ignore]
 fn wrong_hash_small() {

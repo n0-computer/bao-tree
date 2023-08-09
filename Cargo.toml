@@ -12,7 +12,8 @@ categories = ["data-structures"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-iroh-blake3 = "1.4.3"
+iroh-blake3 = { version = "1.4.3", optional = true }
+blake3 = { version = "1.4.1", optional = true }
 range-collections = "0.4.1"
 smallvec = "1"
 
@@ -25,7 +26,9 @@ positioned-io = { version = "0.3.1", default_features = false }
 
 [features]
 tokio_fsm = ["tokio", "futures", "iroh-io"]
-default = ["tokio_fsm"]
+default = ["tokio_fsm", "simd_subtree_hash"]
+simd_subtree_hash = ["iroh-blake3"]
+recursive_subtree_hash = ["blake3"]
 
 [dev-dependencies]
 hex = "0.4.3"
