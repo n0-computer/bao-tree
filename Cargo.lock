@@ -178,6 +178,7 @@ dependencies = [
  "iroh-blake3",
  "iroh-io",
  "positioned-io",
+ "proc-macro2",
  "proptest",
  "rand",
  "range-collections",
