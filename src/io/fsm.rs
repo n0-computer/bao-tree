@@ -287,18 +287,27 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
     /// Read the size and go into the next state
     ///
     /// The only thing that can go wrong here is an io error when reading the size.
-    pub async fn next(self) -> std::result::Result<(ResponseDecoderReading<R>, u64), io::Error> {
+    pub async fn next(self) -> std::result::Result<(ResponseDecoderReading<R>, u64), DecodeError> {
         let Self {
             ranges,
             block_size,
             hash,
             mut encoded,
         } = self;
-        let size = ByteNum(encoded.read_u64_le().await?);
+        let size = match encoded.read_u64_le().await {
+            Ok(bytes) => ByteNum(bytes),
+            Err(e) => {
+                return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                    DecodeError::NotFound
+                } else {
+                    DecodeError::Io(e)
+                })
+            }
+        };
         let tree = BaoTree::new(size, block_size);
         // make sure the range is valid and canonical
         if !range_ok(&ranges, size.chunks()) {
-            return Err(DecodeError::InvalidQueryRange.into());
+            return Err(DecodeError::InvalidQueryRange);
         }
         let state = ResponseDecoderReading(Box::new(ResponseDecoderReadingInner::new(
             tree, hash, ranges, encoded,
@@ -406,7 +415,13 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
             } => {
                 let mut buf = [0u8; 64];
                 let this = &mut self.0;
-                this.encoded.read_exact(&mut buf).await?;
+                if let Err(e) = this.encoded.read_exact(&mut buf).await {
+                    return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                        DecodeError::ParentNotFound(node)
+                    } else {
+                        DecodeError::Io(e)
+                    });
+                }
                 let pair @ (l_hash, r_hash) = read_parent(&buf);
                 let parent_hash = this.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
@@ -433,7 +448,13 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 // this will resize always to chunk group size, except for the last chunk
                 let this = &mut self.0;
                 this.buf.resize(size, 0u8);
-                this.encoded.read_exact(&mut this.buf).await?;
+                if let Err(e) = this.encoded.read_exact(&mut this.buf).await {
+                    return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                        DecodeError::LeafNotFound(start_chunk)
+                    } else {
+                        DecodeError::Io(e)
+                    });
+                }
                 let leaf_hash = this.stack.pop().unwrap();
                 let actual = hash_subtree(start_chunk.0, &this.buf, is_root);
                 if leaf_hash != actual {

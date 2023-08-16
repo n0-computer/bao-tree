@@ -9,12 +9,18 @@ use std::{fmt, io};
 /// This can either be a io error or a more specific error like a hash mismatch
 #[derive(Debug)]
 pub enum DecodeError {
+    /// We got an EOF when reading the size, indicating that the remote end does not have the blob
+    NotFound,
+    /// The query range was invalid
+    InvalidQueryRange,
+    /// We got an EOF while reading a parent hash pair, indicating that the remote end does not have the outboard
+    ParentNotFound(TreeNode),
+    /// We got an EOF while reading a chunk, indicating that the remote end does not have the data
+    LeafNotFound(ChunkNum),
     /// The hash of a parent did not match the expected hash
     ParentHashMismatch(TreeNode),
     /// The hash of a leaf did not match the expected hash
     LeafHashMismatch(ChunkNum),
-    /// The query range was invalid
-    InvalidQueryRange,
     /// There was an error reading from the underlying io
     Io(io::Error),
 }
@@ -48,11 +54,14 @@ impl From<DecodeError> for io::Error {
             ),
             DecodeError::LeafHashMismatch(chunk) => io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("leaf hash mismatch at {}", chunk.to_bytes().0),
+                format!("leaf hash mismatch (offset {})", chunk.to_bytes().0),
             ),
             DecodeError::InvalidQueryRange => {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
             }
+            DecodeError::LeafNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
+            DecodeError::ParentNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
+            DecodeError::NotFound => io::Error::new(io::ErrorKind::UnexpectedEof, e),
         }
     }
 }
@@ -69,8 +78,6 @@ impl From<io::Error> for DecodeError {
 /// or a size mismatch.
 #[derive(Debug)]
 pub enum EncodeError {
-    /// There was an error reading from the underlying io
-    Io(io::Error),
     /// The hash of a parent did not match the expected hash
     ParentHashMismatch(TreeNode),
     /// The hash of a leaf did not match the expected hash
@@ -79,6 +86,8 @@ pub enum EncodeError {
     InvalidQueryRange,
     /// File size does not match size in outboard
     SizeMismatch,
+    /// There was an error reading from the underlying io
+    Io(io::Error),
 }
 
 impl fmt::Display for EncodeError {
