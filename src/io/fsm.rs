@@ -294,12 +294,16 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
             hash,
             mut encoded,
         } = self;
-        let size = encoded.read_u64_le().await?;
-        let tree = BaoTree::new(ByteNum(size), block_size);
+        let size = ByteNum(encoded.read_u64_le().await?);
+        let tree = BaoTree::new(size, block_size);
+        // make sure the range is valid and canonical
+        if !range_ok(&ranges, size.chunks()) {
+            return Err(DecodeError::InvalidQueryRange.into());
+        }
         let state = ResponseDecoderReading(Box::new(ResponseDecoderReadingInner::new(
             tree, hash, ranges, encoded,
         )));
-        Ok((state, size))
+        Ok((state, size.0))
     }
 
     /// Hash of the blob we are currently getting

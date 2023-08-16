@@ -9,14 +9,14 @@ use std::{fmt, io};
 /// This can either be a io error or a more specific error like a hash mismatch
 #[derive(Debug)]
 pub enum DecodeError {
-    /// There was an error reading from the underlying io
-    Io(io::Error),
     /// The hash of a parent did not match the expected hash
     ParentHashMismatch(TreeNode),
     /// The hash of a leaf did not match the expected hash
     LeafHashMismatch(ChunkNum),
     /// The query range was invalid
     InvalidQueryRange,
+    /// There was an error reading from the underlying io
+    Io(io::Error),
 }
 
 impl fmt::Display for DecodeError {
