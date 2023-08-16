@@ -389,16 +389,13 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 block_size,
                 ranges: range,
             } => {
-                let size = match read_len(&mut self.encoded) {
-                    Ok(size) => size,
-                    Err(e) => {
-                        return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
-                            DecodeError::NotFound
-                        } else {
-                            DecodeError::Io(e)
-                        });
+                let size = read_len(&mut self.encoded).map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        DecodeError::NotFound
+                    } else {
+                        DecodeError::Io(e)
                     }
-                };
+                })?;
                 // make sure the range is valid and canonical
                 if !range_ok(range, size.chunks()) {
                     return Err(DecodeError::InvalidQueryRange);
@@ -417,16 +414,13 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 right,
                 node,
             }) => {
-                let pair @ (l_hash, r_hash) = match read_parent(&mut self.encoded) {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
-                            DecodeError::ParentNotFound(node)
-                        } else {
-                            DecodeError::Io(e)
-                        });
+                let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded).map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        DecodeError::ParentNotFound(node)
+                    } else {
+                        DecodeError::Io(e)
                     }
-                };
+                })?;
                 let parent_hash = self.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
                 if parent_hash != actual {
@@ -446,13 +440,13 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 start_chunk,
             }) => {
                 self.buf.resize(size, 0);
-                if let Err(e) = self.encoded.read_exact(&mut self.buf) {
-                    return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                self.encoded.read_exact(&mut self.buf).map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
                         DecodeError::LeafNotFound(start_chunk)
                     } else {
                         DecodeError::Io(e)
-                    });
-                }
+                    }
+                })?;
                 let actual = hash_subtree(start_chunk.0, &self.buf, is_root);
                 let leaf_hash = self.stack.pop().unwrap();
                 if leaf_hash != actual {

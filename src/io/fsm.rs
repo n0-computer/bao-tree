@@ -294,16 +294,13 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
             hash,
             mut encoded,
         } = self;
-        let size = match encoded.read_u64_le().await {
-            Ok(bytes) => ByteNum(bytes),
-            Err(e) => {
-                return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
-                    DecodeError::NotFound
-                } else {
-                    DecodeError::Io(e)
-                })
+        let size = ByteNum(encoded.read_u64_le().await.map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                DecodeError::NotFound
+            } else {
+                DecodeError::Io(e)
             }
-        };
+        })?);
         let tree = BaoTree::new(size, block_size);
         // make sure the range is valid and canonical
         if !range_ok(&ranges, size.chunks()) {
@@ -415,13 +412,13 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
             } => {
                 let mut buf = [0u8; 64];
                 let this = &mut self.0;
-                if let Err(e) = this.encoded.read_exact(&mut buf).await {
-                    return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                this.encoded.read_exact(&mut buf).await.map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
                         DecodeError::ParentNotFound(node)
                     } else {
                         DecodeError::Io(e)
-                    });
-                }
+                    }
+                })?;
                 let pair @ (l_hash, r_hash) = read_parent(&buf);
                 let parent_hash = this.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
@@ -448,13 +445,13 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 // this will resize always to chunk group size, except for the last chunk
                 let this = &mut self.0;
                 this.buf.resize(size, 0u8);
-                if let Err(e) = this.encoded.read_exact(&mut this.buf).await {
-                    return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                this.encoded.read_exact(&mut this.buf).await.map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
                         DecodeError::LeafNotFound(start_chunk)
                     } else {
                         DecodeError::Io(e)
-                    });
-                }
+                    }
+                })?;
                 let leaf_hash = this.stack.pop().unwrap();
                 let actual = hash_subtree(start_chunk.0, &this.buf, is_root);
                 if leaf_hash != actual {
