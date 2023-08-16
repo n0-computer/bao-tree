@@ -26,6 +26,8 @@ use crate::{
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
+use super::StartDecodeError;
+
 /// An item of bao content
 ///
 /// We know that we are not going to get headers after the first item.
@@ -287,7 +289,7 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
     /// Read the size and go into the next state
     ///
     /// The only thing that can go wrong here is an io error when reading the size.
-    pub async fn next(self) -> std::result::Result<(ResponseDecoderReading<R>, u64), DecodeError> {
+    pub async fn next(self) -> std::result::Result<(ResponseDecoderReading<R>, u64), StartDecodeError> {
         let Self {
             ranges,
             block_size,
@@ -296,15 +298,15 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
         } = self;
         let size = ByteNum(encoded.read_u64_le().await.map_err(|e| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
-                DecodeError::NotFound
+                StartDecodeError::NotFound
             } else {
-                DecodeError::Io(e)
+                StartDecodeError::Io(e)
             }
         })?);
         let tree = BaoTree::new(size, block_size);
         // make sure the range is valid and canonical
         if !range_ok(&ranges, size.chunks()) {
-            return Err(DecodeError::InvalidQueryRange);
+            return Err(StartDecodeError::InvalidQueryRange);
         }
         let state = ResponseDecoderReading(Box::new(ResponseDecoderReadingInner::new(
             tree, hash, ranges, encoded,

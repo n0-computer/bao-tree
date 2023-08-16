@@ -4,6 +4,43 @@
 use crate::{ChunkNum, TreeNode};
 use std::{fmt, io};
 
+/// Error when starting to decode from a reader
+#[derive(Debug)]
+pub enum StartDecodeError {
+    /// We got an EOF when reading the size, indicating that the remote end does not have the blob
+    NotFound,
+    /// The query range was invalid for the given size
+    InvalidQueryRange,
+    /// A generic io error
+    Io(io::Error),
+}
+
+impl fmt::Display for StartDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+impl std::error::Error for StartDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<StartDecodeError> for io::Error {
+    fn from(e: StartDecodeError) -> Self {
+        use StartDecodeError::*;
+        match e {
+            Io(e) => e,
+            InvalidQueryRange => io::Error::new(io::ErrorKind::InvalidInput, "invalid query range"),
+            NotFound => io::Error::new(io::ErrorKind::UnexpectedEof, e),
+        }
+    }
+}
+
 /// Error when decoding from a reader
 ///
 /// This can either be a io error or a more specific error like a hash mismatch
@@ -34,7 +71,7 @@ impl fmt::Display for DecodeError {
 impl std::error::Error for DecodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            DecodeError::Io(e) => Some(e),
+            Self::Io(e) => Some(e),
             _ => None,
         }
     }
