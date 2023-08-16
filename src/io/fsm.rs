@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     io::{
-        error::{DecodeError, EncodeError},
+        error::EncodeError,
         outboard::{PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
@@ -25,6 +25,8 @@ use crate::{
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
+
+use super::{DecodeError, StartDecodeError};
 
 /// An item of bao content
 ///
@@ -287,19 +289,31 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
     /// Read the size and go into the next state
     ///
     /// The only thing that can go wrong here is an io error when reading the size.
-    pub async fn next(self) -> std::result::Result<(ResponseDecoderReading<R>, u64), io::Error> {
+    pub async fn next(
+        self,
+    ) -> std::result::Result<(ResponseDecoderReading<R>, u64), StartDecodeError> {
         let Self {
             ranges,
             block_size,
             hash,
             mut encoded,
         } = self;
-        let size = encoded.read_u64_le().await?;
-        let tree = BaoTree::new(ByteNum(size), block_size);
+        let size = ByteNum(encoded.read_u64_le().await.map_err(|e| {
+            if e.kind() == io::ErrorKind::UnexpectedEof {
+                StartDecodeError::NotFound
+            } else {
+                StartDecodeError::Io(e)
+            }
+        })?);
+        let tree = BaoTree::new(size, block_size);
+        // make sure the range is valid and canonical
+        if !range_ok(&ranges, size.chunks()) {
+            return Err(StartDecodeError::InvalidQueryRange);
+        }
         let state = ResponseDecoderReading(Box::new(ResponseDecoderReadingInner::new(
             tree, hash, ranges, encoded,
         )));
-        Ok((state, size))
+        Ok((state, size.0))
     }
 
     /// Hash of the blob we are currently getting
@@ -402,7 +416,13 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
             } => {
                 let mut buf = [0u8; 64];
                 let this = &mut self.0;
-                this.encoded.read_exact(&mut buf).await?;
+                this.encoded.read_exact(&mut buf).await.map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        DecodeError::ParentNotFound(node)
+                    } else {
+                        DecodeError::Io(e)
+                    }
+                })?;
                 let pair @ (l_hash, r_hash) = read_parent(&buf);
                 let parent_hash = this.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
@@ -429,7 +449,13 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 // this will resize always to chunk group size, except for the last chunk
                 let this = &mut self.0;
                 this.buf.resize(size, 0u8);
-                this.encoded.read_exact(&mut this.buf).await?;
+                this.encoded.read_exact(&mut this.buf).await.map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        DecodeError::LeafNotFound(start_chunk)
+                    } else {
+                        DecodeError::Io(e)
+                    }
+                })?;
                 let leaf_hash = this.stack.pop().unwrap();
                 let actual = hash_subtree(start_chunk.0, &this.buf, is_root);
                 if leaf_hash != actual {
