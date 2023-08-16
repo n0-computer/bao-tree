@@ -41,15 +41,93 @@ impl From<StartDecodeError> for io::Error {
     }
 }
 
-/// Error when decoding from a reader
+/// Error when decoding from a reader, both when reading the size and after
 ///
-/// This can either be a io error or a more specific error like a hash mismatch
+/// This is an union of [`StartDecodeError`] and [`DecodeError`] for convenience.
 #[derive(Debug)]
-pub enum DecodeError {
+pub enum AnyDecodeError {
     /// We got an EOF when reading the size, indicating that the remote end does not have the blob
     NotFound,
     /// The query range was invalid
     InvalidQueryRange,
+    /// We got an EOF while reading a parent hash pair, indicating that the remote end does not have the outboard
+    ParentNotFound(TreeNode),
+    /// We got an EOF while reading a chunk, indicating that the remote end does not have the data
+    LeafNotFound(ChunkNum),
+    /// The hash of a parent did not match the expected hash
+    ParentHashMismatch(TreeNode),
+    /// The hash of a leaf did not match the expected hash
+    LeafHashMismatch(ChunkNum),
+    /// There was an error reading from the underlying io
+    Io(io::Error),
+}
+
+impl From<DecodeError> for AnyDecodeError {
+    fn from(e: DecodeError) -> Self {
+        match e {
+            DecodeError::Io(e) => Self::Io(e),
+            DecodeError::ParentHashMismatch(node) => Self::ParentHashMismatch(node),
+            DecodeError::LeafHashMismatch(chunk) => Self::LeafHashMismatch(chunk),
+            DecodeError::LeafNotFound(chunk) => Self::LeafNotFound(chunk),
+            DecodeError::ParentNotFound(node) => Self::ParentNotFound(node),
+        }
+    }
+}
+
+impl From<StartDecodeError> for AnyDecodeError {
+    fn from(e: StartDecodeError) -> Self {
+        match e {
+            StartDecodeError::Io(e) => Self::Io(e),
+            StartDecodeError::InvalidQueryRange => Self::InvalidQueryRange,
+            StartDecodeError::NotFound => Self::NotFound,
+        }
+    }
+}
+
+impl fmt::Display for AnyDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+impl std::error::Error for AnyDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<AnyDecodeError> for io::Error {
+    fn from(e: AnyDecodeError) -> Self {
+        match e {
+            AnyDecodeError::Io(e) => e,
+            AnyDecodeError::ParentHashMismatch(node) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "parent hash mismatch (level {}, block {})",
+                    node.level(),
+                    node.mid().0
+                ),
+            ),
+            AnyDecodeError::LeafHashMismatch(chunk) => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("leaf hash mismatch (offset {})", chunk.to_bytes().0),
+            ),
+            AnyDecodeError::InvalidQueryRange => {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
+            }
+            AnyDecodeError::LeafNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
+            AnyDecodeError::ParentNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
+            AnyDecodeError::NotFound => io::Error::new(io::ErrorKind::UnexpectedEof, e),
+        }
+    }
+}
+
+/// Error when decoding from a reader, after the size has been read
+#[derive(Debug)]
+pub enum DecodeError {
     /// We got an EOF while reading a parent hash pair, indicating that the remote end does not have the outboard
     ParentNotFound(TreeNode),
     /// We got an EOF while reading a chunk, indicating that the remote end does not have the data
@@ -93,19 +171,9 @@ impl From<DecodeError> for io::Error {
                 io::ErrorKind::InvalidData,
                 format!("leaf hash mismatch (offset {})", chunk.to_bytes().0),
             ),
-            DecodeError::InvalidQueryRange => {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
-            }
             DecodeError::LeafNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
             DecodeError::ParentNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
-            DecodeError::NotFound => io::Error::new(io::ErrorKind::UnexpectedEof, e),
         }
-    }
-}
-
-impl From<io::Error> for DecodeError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
     }
 }
 

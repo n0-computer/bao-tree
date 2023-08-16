@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     io::{
-        error::{DecodeError, EncodeError},
+        error::EncodeError,
         outboard::{PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
@@ -26,7 +26,7 @@ use crate::{
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::StartDecodeError;
+use super::{DecodeError, StartDecodeError};
 
 /// An item of bao content
 ///
@@ -289,7 +289,9 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
     /// Read the size and go into the next state
     ///
     /// The only thing that can go wrong here is an io error when reading the size.
-    pub async fn next(self) -> std::result::Result<(ResponseDecoderReading<R>, u64), StartDecodeError> {
+    pub async fn next(
+        self,
+    ) -> std::result::Result<(ResponseDecoderReading<R>, u64), StartDecodeError> {
         let Self {
             ranges,
             block_size,

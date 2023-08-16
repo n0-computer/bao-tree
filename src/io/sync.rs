@@ -8,7 +8,7 @@ use std::{
 use crate::hash_subtree;
 use crate::{
     blake3,
-    io::error::{DecodeError, EncodeError},
+    io::error::{AnyDecodeError, EncodeError},
     io::{
         outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
         Header, Leaf, Parent,
@@ -382,7 +382,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         }
     }
 
-    fn next0(&mut self) -> result::Result<Option<DecodeResponseItem>, DecodeError> {
+    fn next0(&mut self) -> result::Result<Option<DecodeResponseItem>, AnyDecodeError> {
         let inner = match &mut self.inner {
             Position::Content { ref mut iter } => iter,
             Position::Header {
@@ -391,14 +391,14 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
             } => {
                 let size = read_len(&mut self.encoded).map_err(|e| {
                     if e.kind() == io::ErrorKind::UnexpectedEof {
-                        DecodeError::NotFound
+                        AnyDecodeError::NotFound
                     } else {
-                        DecodeError::Io(e)
+                        AnyDecodeError::Io(e)
                     }
                 })?;
                 // make sure the range is valid and canonical
                 if !range_ok(range, size.chunks()) {
-                    return Err(DecodeError::InvalidQueryRange);
+                    return Err(AnyDecodeError::InvalidQueryRange);
                 }
                 let tree = BaoTree::new(size, *block_size);
                 self.inner = Position::Content {
@@ -416,15 +416,15 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
             }) => {
                 let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded).map_err(|e| {
                     if e.kind() == io::ErrorKind::UnexpectedEof {
-                        DecodeError::ParentNotFound(node)
+                        AnyDecodeError::ParentNotFound(node)
                     } else {
-                        DecodeError::Io(e)
+                        AnyDecodeError::Io(e)
                     }
                 })?;
                 let parent_hash = self.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
                 if parent_hash != actual {
-                    return Err(DecodeError::ParentHashMismatch(node));
+                    return Err(AnyDecodeError::ParentHashMismatch(node));
                 }
                 if right {
                     self.stack.push(r_hash);
@@ -442,15 +442,15 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 self.buf.resize(size, 0);
                 self.encoded.read_exact(&mut self.buf).map_err(|e| {
                     if e.kind() == io::ErrorKind::UnexpectedEof {
-                        DecodeError::LeafNotFound(start_chunk)
+                        AnyDecodeError::LeafNotFound(start_chunk)
                     } else {
-                        DecodeError::Io(e)
+                        AnyDecodeError::Io(e)
                     }
                 })?;
                 let actual = hash_subtree(start_chunk.0, &self.buf, is_root);
                 let leaf_hash = self.stack.pop().unwrap();
                 if leaf_hash != actual {
-                    return Err(DecodeError::LeafHashMismatch(start_chunk));
+                    return Err(AnyDecodeError::LeafHashMismatch(start_chunk));
                 }
                 Ok(Some(
                     Leaf {
@@ -466,7 +466,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
 }
 
 impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
-    type Item = result::Result<DecodeResponseItem, DecodeError>;
+    type Item = result::Result<DecodeResponseItem, AnyDecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next0().transpose()
