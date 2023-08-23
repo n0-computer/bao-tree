@@ -298,13 +298,12 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
             hash,
             mut encoded,
         } = self;
-        let size = ByteNum(encoded.read_u64_le().await.map_err(|e| {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                StartDecodeError::NotFound
-            } else {
-                StartDecodeError::Io(e)
-            }
-        })?);
+        let size = ByteNum(
+            encoded
+                .read_u64_le()
+                .await
+                .map_err(|e| StartDecodeError::maybe_not_found(e))?,
+        );
         let tree = BaoTree::new(size, block_size);
         // make sure the range is valid and canonical
         if !range_ok(&ranges, size.chunks()) {
@@ -416,13 +415,10 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
             } => {
                 let mut buf = [0u8; 64];
                 let this = &mut self.0;
-                this.encoded.read_exact(&mut buf).await.map_err(|e| {
-                    if e.kind() == io::ErrorKind::UnexpectedEof {
-                        DecodeError::ParentNotFound(node)
-                    } else {
-                        DecodeError::Io(e)
-                    }
-                })?;
+                this.encoded
+                    .read_exact(&mut buf)
+                    .await
+                    .map_err(|e| DecodeError::maybe_parent_not_found(e, node))?;
                 let pair @ (l_hash, r_hash) = read_parent(&buf);
                 let parent_hash = this.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
@@ -449,13 +445,10 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 // this will resize always to chunk group size, except for the last chunk
                 let this = &mut self.0;
                 this.buf.resize(size, 0u8);
-                this.encoded.read_exact(&mut this.buf).await.map_err(|e| {
-                    if e.kind() == io::ErrorKind::UnexpectedEof {
-                        DecodeError::LeafNotFound(start_chunk)
-                    } else {
-                        DecodeError::Io(e)
-                    }
-                })?;
+                this.encoded
+                    .read_exact(&mut this.buf)
+                    .await
+                    .map_err(|e| DecodeError::maybe_leaf_not_found(e, start_chunk))?;
                 let leaf_hash = this.stack.pop().unwrap();
                 let actual = hash_subtree(start_chunk.0, &this.buf, is_root);
                 if leaf_hash != actual {
@@ -502,15 +495,24 @@ where
         match item {
             BaoChunk::Parent { node, .. } => {
                 let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
-                encoded.write_all(l_hash.as_bytes()).await?;
-                encoded.write_all(r_hash.as_bytes()).await?;
+                encoded
+                    .write_all(l_hash.as_bytes())
+                    .await
+                    .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
+                encoded
+                    .write_all(r_hash.as_bytes())
+                    .await
+                    .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
             BaoChunk::Leaf {
                 start_chunk, size, ..
             } => {
                 let start = start_chunk.to_bytes();
                 let bytes = data.read_at(start.0, size).await?;
-                encoded.write_all(&bytes).await?;
+                encoded
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
         }
     }
@@ -566,8 +568,14 @@ where
                 if left {
                     stack.push(l_hash);
                 }
-                encoded.write_all(l_hash.as_bytes()).await?;
-                encoded.write_all(r_hash.as_bytes()).await?;
+                encoded
+                    .write_all(l_hash.as_bytes())
+                    .await
+                    .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
+                encoded
+                    .write_all(r_hash.as_bytes())
+                    .await
+                    .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
             BaoChunk::Leaf {
                 start_chunk,
@@ -581,7 +589,10 @@ where
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
-                encoded.write_all(&bytes).await?;
+                encoded
+                    .write_all(&bytes)
+                    .await
+                    .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
         }
     }
