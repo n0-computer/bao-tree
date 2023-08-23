@@ -41,6 +41,16 @@ impl From<StartDecodeError> for io::Error {
     }
 }
 
+impl StartDecodeError {
+    pub(crate) fn maybe_not_found(e: io::Error) -> Self {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            Self::NotFound
+        } else {
+            Self::Io(e)
+        }
+    }
+}
+
 /// Error when decoding from a reader, both when reading the size and after
 ///
 /// This is an union of [`StartDecodeError`] and [`DecodeError`] for convenience.
@@ -177,16 +187,39 @@ impl From<DecodeError> for io::Error {
     }
 }
 
+impl DecodeError {
+    pub(crate) fn maybe_parent_not_found(e: io::Error, node: TreeNode) -> Self {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            Self::ParentNotFound(node)
+        } else {
+            Self::Io(e)
+        }
+    }
+
+    pub(crate) fn maybe_leaf_not_found(e: io::Error, chunk: ChunkNum) -> Self {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            Self::LeafNotFound(chunk)
+        } else {
+            Self::Io(e)
+        }
+    }
+}
+
 /// Error when encoding from outboard and data
 ///
 /// This can either be a io error or a more specific error like a hash mismatch
-/// or a size mismatch.
+/// or a size mismatch. If the remote end stops listening while we are writing,
+/// the error will indicate which parent or chunk we were writing at the time.
 #[derive(Debug)]
 pub enum EncodeError {
     /// The hash of a parent did not match the expected hash
     ParentHashMismatch(TreeNode),
     /// The hash of a leaf did not match the expected hash
     LeafHashMismatch(ChunkNum),
+    /// We got a ConnectionReset while writing a parent hash pair, indicating that the remote end stopped listening
+    ParentWrite(TreeNode),
+    /// We got a ConnectionReset while writing a chunk, indicating that the remote end stopped listening
+    LeafWrite(ChunkNum),
     /// The query range was invalid
     InvalidQueryRange,
     /// File size does not match size in outboard
@@ -226,6 +259,18 @@ impl From<EncodeError> for io::Error {
                 io::ErrorKind::InvalidData,
                 format!("leaf hash mismatch at {}", chunk.to_bytes().0),
             ),
+            EncodeError::ParentWrite(node) => io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                format!(
+                    "parent write failed (level {}, block {})",
+                    node.level(),
+                    node.mid().0
+                ),
+            ),
+            EncodeError::LeafWrite(chunk) => io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                format!("leaf write failed at {}", chunk.to_bytes().0),
+            ),
             EncodeError::InvalidQueryRange => {
                 io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
             }
@@ -239,5 +284,23 @@ impl From<EncodeError> for io::Error {
 impl From<io::Error> for EncodeError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+impl EncodeError {
+    pub(crate) fn maybe_parent_write(e: io::Error, node: TreeNode) -> Self {
+        if e.kind() == io::ErrorKind::ConnectionReset {
+            Self::ParentWrite(node)
+        } else {
+            Self::Io(e)
+        }
+    }
+
+    pub(crate) fn maybe_leaf_write(e: io::Error, chunk: ChunkNum) -> Self {
+        if e.kind() == io::ErrorKind::ConnectionReset {
+            Self::LeafWrite(chunk)
+        } else {
+            Self::Io(e)
+        }
     }
 }
