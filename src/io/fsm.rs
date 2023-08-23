@@ -302,7 +302,7 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
             encoded
                 .read_u64_le()
                 .await
-                .map_err(|e| StartDecodeError::maybe_not_found(e))?,
+                .map_err(StartDecodeError::maybe_not_found)?,
         );
         let tree = BaoTree::new(size, block_size);
         // make sure the range is valid and canonical

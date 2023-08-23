@@ -391,8 +391,8 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 block_size,
                 ranges: range,
             } => {
-                let size = read_len(&mut self.encoded)
-                    .map_err(|e| StartDecodeError::maybe_not_found(e))?;
+                let size =
+                    read_len(&mut self.encoded).map_err(StartDecodeError::maybe_not_found)?;
                 // make sure the range is valid and canonical
                 if !range_ok(range, size.chunks()) {
                     return Err(AnyDecodeError::InvalidQueryRange);
