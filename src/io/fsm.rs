@@ -412,6 +412,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 right,
                 left,
                 node,
+                ..
             } => {
                 let mut buf = [0u8; 64];
                 let this = &mut self.0;
@@ -555,6 +556,7 @@ where
                 left,
                 right,
                 node,
+                ..
             } => {
                 let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);

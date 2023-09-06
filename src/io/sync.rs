@@ -410,6 +410,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 left,
                 right,
                 node,
+                ..
             }) => {
                 let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)
                     .map_err(|e| DecodeError::maybe_parent_not_found(e, node))?;
@@ -534,6 +535,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 left,
                 right,
                 node,
+                ..
             } => {
                 let (l_hash, r_hash) = outboard.load(node)?.unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);

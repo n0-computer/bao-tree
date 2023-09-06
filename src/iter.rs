@@ -40,8 +40,9 @@ pub struct PreOrderPartialIterRef<'a> {
     tree: BaoTree,
     /// number of valid nodes, needed in node.right_descendant
     tree_filled_size: TreeNode,
-    /// minimum level of *full* nodes to visit
-    min_level: u8,
+    /// the maximum level that is skipped from the traversal if it is fully
+    /// included in the query range.
+    max_skip_level: u8,
     /// is root
     is_root: bool,
     /// stack of nodes to visit
@@ -50,13 +51,13 @@ pub struct PreOrderPartialIterRef<'a> {
 
 impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, range: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
         let mut stack = SmallVec::new();
-        stack.push((tree.root(), range));
+        stack.push((tree.root(), ranges));
         Self {
             tree,
             tree_filled_size: tree.filled_size(),
-            min_level,
+            max_skip_level,
             stack,
             is_root: tree.start_chunk == 0,
         }
@@ -88,7 +89,7 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
             let (l_ranges, r_ranges) = ranges.split(mid);
             // we can't recurse if the node is a leaf
             // we don't want to recurse if the node is full and below the minimum level
-            let query_leaf = node.is_leaf() || (full && node.level() < self.min_level as u32);
+            let query_leaf = node.is_leaf() || (full && node.level() <= self.max_skip_level as u32);
             // recursion is just pushing the children onto the stack
             if !query_leaf {
                 let l = node.left_child().unwrap();
@@ -412,9 +413,9 @@ pub struct PreOrderChunkIterRef<'a> {
 
 impl<'a> PreOrderChunkIterRef<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, query: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
         Self {
-            inner: tree.ranges_pre_order_nodes_iter(query, min_level),
+            inner: tree.ranges_pre_order_nodes_iter(ranges, max_skip_level),
             stack: Default::default(),
             index: 0,
         }
@@ -454,6 +455,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                 is_half_leaf,
                 l_ranges,
                 r_ranges,
+                query_leaf,
                 ..
             } = self.inner.next()?;
             if let Some(leaf) = node.as_leaf() {
@@ -478,12 +480,28 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
             }
             // the last leaf is a special case, since it does not have a parent if it is <= half full
             if !is_half_leaf {
-                break Some(BaoChunk::Parent {
-                    is_root,
-                    left: !l_ranges.is_empty(),
-                    right: !r_ranges.is_empty(),
-                    node,
-                });
+                let chunk = if query_leaf && !node.is_leaf() {
+                    // the node is a leaf for the purpose of this query despite not being a leaf,
+                    // so we need to return a BaoChunk::Leaf spanning the whole node
+                    let tree = self.tree();
+                    let bytes = tree.byte_range(node);
+                    let start_chunk = bytes.start.chunks();
+                    let size = (bytes.end.0 - bytes.start.0) as usize;
+                    BaoChunk::Leaf {
+                        start_chunk,
+                        is_root,
+                        size,
+                    }
+                } else {
+                    // the node is not a leaf, so we need to return a BaoChunk::Parent
+                    BaoChunk::Parent {
+                        is_root,
+                        left: !l_ranges.is_empty(),
+                        right: !r_ranges.is_empty(),
+                        node,
+                    }
+                };
+                break Some(chunk);
             }
         }
     }

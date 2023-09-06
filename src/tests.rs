@@ -6,7 +6,7 @@ use std::{
 
 use bytes::BytesMut;
 use proptest::prelude::*;
-use range_collections::{RangeSet2, RangeSetRef};
+use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 
 use crate::{
@@ -692,13 +692,13 @@ fn iterate_reference(tree: &BaoTree) -> Vec<TreeNode> {
 fn iterate_part_preorder_reference<'a>(
     tree: &BaoTree,
     ranges: &'a RangeSetRef<ChunkNum>,
-    min_level: u8,
+    max_skip_level: u8,
 ) -> Vec<NodeInfo<'a>> {
     fn iterate_part_rec<'a>(
         tree: &BaoTree,
         node: TreeNode,
         ranges: &'a RangeSetRef<ChunkNum>,
-        min_level: u8,
+        max_skip_level: u32,
         is_root: bool,
         res: &mut Vec<NodeInfo<'a>>,
     ) {
@@ -714,7 +714,7 @@ fn iterate_part_preorder_reference<'a>(
         // split the ranges into left and right
         let (l_ranges, r_ranges) = ranges.split(mid);
 
-        let query_leaf = node.is_leaf() || (full && node.level() < min_level as u32);
+        let query_leaf = node.is_leaf() || (full && node.level() <= max_skip_level);
         let is_half_leaf = !tree.is_persisted(node);
         // push no matter if leaf or not
         res.push(NodeInfo {
@@ -731,13 +731,20 @@ fn iterate_part_preorder_reference<'a>(
             let valid_nodes = tree.filled_size();
             let l = node.left_child().unwrap();
             let r = node.right_descendant(valid_nodes).unwrap();
-            iterate_part_rec(tree, l, l_ranges, min_level, false, res);
-            iterate_part_rec(tree, r, r_ranges, min_level, false, res);
+            iterate_part_rec(tree, l, l_ranges, max_skip_level, false, res);
+            iterate_part_rec(tree, r, r_ranges, max_skip_level, false, res);
         }
     }
     let mut res = Vec::new();
     let can_be_root = tree.start_chunk == 0;
-    iterate_part_rec(tree, tree.root(), ranges, min_level, can_be_root, &mut res);
+    iterate_part_rec(
+        tree,
+        tree.root(),
+        ranges,
+        max_skip_level as u32,
+        can_be_root,
+        &mut res,
+    );
     res
 }
 
@@ -769,7 +776,51 @@ fn size_and_slice() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
     })
 }
 
+fn get_leaf_ranges(
+    tree: BaoTree,
+    ranges: &RangeSetRef<ChunkNum>,
+    max_skip_level: u8,
+) -> impl Iterator<Item = Range<u64>> + '_ {
+    tree.ranges_pre_order_chunks_iter_ref(&ranges, max_skip_level)
+        .filter_map(|e| {
+            if let BaoChunk::Leaf {
+                start_chunk, size, ..
+            } = e
+            {
+                let start = start_chunk.to_bytes().0;
+                let end = start + (size as u64);
+                Some(start..end)
+            } else {
+                None
+            }
+        })
+}
+
+/// Compute the union of an iterator of ranges. The ranges should be non-overlapping, otherwise
+/// the result is None
+fn range_union<K: RangeSetEntry>(
+    ranges: impl IntoIterator<Item = Range<K>>,
+) -> Option<RangeSet2<K>> {
+    let mut res = RangeSet2::empty();
+    for r in ranges.into_iter() {
+        let part = RangeSet2::from(r);
+        if part.intersects(&res) {
+            return None;
+        }
+        res |= part;
+    }
+    Some(res)
+}
+
 proptest! {
+
+    #[test]
+    fn max_skip_level(size in 0..32786u64, block_size in 0..2u8, max_skip_level in 0..2u8) {
+        let tree = BaoTree::new(ByteNum(size), BlockSize(block_size));
+        let ranges = RangeSet2::all();
+        let leaf_ranges = get_leaf_ranges(tree, &ranges, max_skip_level).collect::<Vec<_>>();
+        prop_assert_eq!(range_union(leaf_ranges), Some(RangeSet2::from(0..size)));
+    }
 
     #[test]
     fn flip(len in 0usize..32768) {
