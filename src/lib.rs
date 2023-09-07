@@ -127,6 +127,12 @@ impl BaoTree {
         self.size
     }
 
+    fn byte_range(&self, node: TreeNode) -> Range<ByteNum> {
+        let start = node.block_range().start.to_bytes(self.block_size);
+        let end = node.block_range().end.to_bytes(self.block_size);
+        start..end.min(self.size)
+    }
+
     /// Compute the byte ranges for a leaf node
     ///
     /// Returns two ranges, the first is the left range, the second is the right range
@@ -156,9 +162,9 @@ impl BaoTree {
     pub fn ranges_pre_order_chunks_iter_ref<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
-        min_level: u8,
+        max_skip_level: u8,
     ) -> PreOrderChunkIterRef<'a> {
-        PreOrderChunkIterRef::new(*self, ranges, min_level)
+        PreOrderChunkIterRef::new(*self, ranges, max_skip_level)
     }
 
     /// Traverse the entire tree in post order as [TreeNode]s
@@ -177,12 +183,16 @@ impl BaoTree {
     /// in pre order as [NodeInfo]s
     ///
     /// This is mostly used internally by the [PreOrderChunkIterRef]
+    ///
+    /// When `max_skip_level` is set to a value greater than 0, the iterator will
+    /// skip all branch nodes that are at a level <= max_skip_level if they are fully
+    /// covered by the ranges.
     pub fn ranges_pre_order_nodes_iter<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
-        min_level: u8,
+        max_skip_level: u8,
     ) -> PreOrderPartialIterRef<'a> {
-        PreOrderPartialIterRef::new(*self, ranges, min_level)
+        PreOrderPartialIterRef::new(*self, ranges, max_skip_level)
     }
 
     /// Create a new BaoTree with a start chunk
@@ -410,11 +420,15 @@ impl TreeNode {
     /// True if this is a leaf node.
     #[inline]
     pub const fn is_leaf(&self) -> bool {
-        self.level() == 0
+        (self.0 & 1) == 0
     }
 
     /// Range of blocks that this node covers, given a block size
-    pub fn byte_range(&self, block_size: BlockSize) -> Range<ByteNum> {
+    ///
+    /// Note that this will give the untruncated range, which may be larger than
+    /// the actual tree. To get the exact byte range for a tree, use
+    /// [BaoTree::byte_range];
+    fn byte_range(&self, block_size: BlockSize) -> Range<ByteNum> {
         let range = self.block_range();
         let shift = 10 + block_size.0;
         ByteNum(range.start.0 << shift)..ByteNum(range.end.0 << shift)

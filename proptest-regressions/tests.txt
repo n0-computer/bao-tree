@@ -8,3 +8,4 @@ cc 73099129db055455a3bbc7d234245d91ff55e14747d1de01a6094a3cf0d14242 # shrinks to
 cc e200e6c22767b6f57374c80604bf8992c5a8c3b8bc992d852a9d6b297f61a819 # shrinks to size = 0, rand = 0
 cc 5ff14d5e2b7437325d271e12752dcd2ace7517710bb8c3827471936544c745a0 # shrinks to (len, start, size) = (16603, 0, 1), level = 5
 cc 9159464c869fd52b888e0de6ae8f138e0e5025e0a7ceb5c8f543a5a251b34997 # shrinks to (len, start, size) = (13497, 0, 1), level = 2
+cc b78aa2a3a1bb7083933ddfe98e50995d114abbff9543766831b56b34f95fe346 # shrinks to (len, start, size) = (0, 0, 0)

@@ -410,6 +410,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 left,
                 right,
                 node,
+                ..
             }) => {
                 let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)
                     .map_err(|e| DecodeError::maybe_parent_not_found(e, node))?;
@@ -430,6 +431,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 size,
                 is_root,
                 start_chunk,
+                ..
             }) => {
                 self.buf.resize(size, 0);
                 self.encoded
@@ -534,6 +536,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 left,
                 right,
                 node,
+                ..
             } => {
                 let (l_hash, r_hash) = outboard.load(node)?.unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
@@ -554,6 +557,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 start_chunk,
                 size,
                 is_root,
+                ..
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
@@ -678,6 +682,7 @@ pub(crate) fn outboard_post_order_impl(
                 size,
                 is_root,
                 start_chunk,
+                ..
             } => {
                 let buf = &mut buffer[..size];
                 data.read_exact(buf)?;

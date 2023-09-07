@@ -9,7 +9,7 @@ macro_rules! index_newtype {
     ) => {
         $(#[$outer])*
         #[repr(transparent)]
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
         pub struct $name(pub $wrapped);
 
         impl std::fmt::Debug for $name {

@@ -412,6 +412,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 right,
                 left,
                 node,
+                ..
             } => {
                 let mut buf = [0u8; 64];
                 let this = &mut self.0;
@@ -441,6 +442,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 size,
                 is_root,
                 start_chunk,
+                ..
             } => {
                 // this will resize always to chunk group size, except for the last chunk
                 let this = &mut self.0;
@@ -555,6 +557,7 @@ where
                 left,
                 right,
                 node,
+                ..
             } => {
                 let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
@@ -581,6 +584,7 @@ where
                 start_chunk,
                 size,
                 is_root,
+                ..
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
