@@ -442,6 +442,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 size,
                 is_root,
                 start_chunk,
+                ..
             } => {
                 // this will resize always to chunk group size, except for the last chunk
                 let this = &mut self.0;
@@ -583,6 +584,7 @@ where
                 start_chunk,
                 size,
                 is_root,
+                ..
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();

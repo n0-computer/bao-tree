@@ -719,6 +719,7 @@ fn iterate_part_preorder_reference<'a>(
         // push no matter if leaf or not
         res.push(NodeInfo {
             node,
+            ranges,
             l_ranges,
             r_ranges,
             full,
@@ -781,7 +782,7 @@ fn get_leaf_ranges(
     ranges: &RangeSetRef<ChunkNum>,
     max_skip_level: u8,
 ) -> impl Iterator<Item = Range<u64>> + '_ {
-    tree.ranges_pre_order_chunks_iter_ref(&ranges, max_skip_level)
+    tree.ranges_pre_order_chunks_iter_ref(ranges, max_skip_level)
         .filter_map(|e| {
             if let BaoChunk::Leaf {
                 start_chunk, size, ..

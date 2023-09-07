@@ -13,10 +13,15 @@ use crate::{BaoTree, ChunkNum, TreeNode};
 /// Extended node info.
 ///
 /// Some of the information is redundant, but it is convenient to have it all in one place.
+///
+/// Usually this is used within an iterator, so we hope that the compiler will optimize away
+/// the redundant information.
 #[derive(Debug, PartialEq, Eq)]
 pub struct NodeInfo<'a> {
     /// the node
     pub node: TreeNode,
+    /// ranges of the node and it's two children
+    pub ranges: &'a RangeSetRef<ChunkNum>,
     /// left child intersection with the query range
     pub l_ranges: &'a RangeSetRef<ChunkNum>,
     /// right child intersection with the query range
@@ -104,6 +109,7 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
             // emit the node in any case
             break Some(NodeInfo {
                 node,
+                ranges,
                 l_ranges,
                 r_ranges,
                 full,
@@ -275,7 +281,10 @@ enum Prev {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// A chunk describeds what to read or write next
-pub enum BaoChunk {
+///
+/// In some cases you want additional information about what part of the chunk matches the query.
+/// That is what the `R` type parameter is for. By default it is `()`.
+pub enum BaoChunk<R = ()> {
     /// expect a 64 byte parent node.
     ///
     /// To validate, use parent_cv using the is_root value
@@ -288,6 +297,8 @@ pub enum BaoChunk {
         left: bool,
         /// The tree node, useful for error reporting
         node: TreeNode,
+        /// Additional information about what part of the chunk matches the query
+        ranges: R,
     },
     /// expect data of size `size`
     ///
@@ -299,7 +310,52 @@ pub enum BaoChunk {
         is_root: bool,
         /// Start chunk, to be passed to hash_block
         start_chunk: ChunkNum,
+        /// Additional information about what part of the chunk matches the query
+        ranges: R,
     },
+}
+
+impl<T> BaoChunk<T> {
+    /// Create a dummy empty range
+    fn empty(ranges: T) -> Self {
+        Self::Leaf {
+            size: 0,
+            is_root: false,
+            start_chunk: ChunkNum(0),
+            ranges,
+        }
+    }
+
+    /// Map the ranges of the chunk. Convenient way to get rid of a lifetime
+    /// by just mapping to a type without a lifetime.
+    fn map_ranges<U>(self, f: impl Fn(T) -> U) -> BaoChunk<U> {
+        match self {
+            Self::Parent {
+                is_root,
+                left,
+                right,
+                node,
+                ranges,
+            } => BaoChunk::Parent {
+                is_root,
+                left,
+                right,
+                node,
+                ranges: f(ranges),
+            },
+            Self::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ranges,
+            } => BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ranges: f(ranges),
+            },
+        }
+    }
 }
 
 /// Iterator over all chunks in a BaoTree in post-order.
@@ -356,6 +412,7 @@ impl Iterator for PostOrderChunkIter {
                     is_root,
                     left: true,
                     right: true,
+                    ranges: (),
                 });
             }
             if let Some(leaf) = node.as_leaf() {
@@ -369,12 +426,14 @@ impl Iterator for PostOrderChunkIter {
                         is_root: false,
                         start_chunk: r_start_chunk,
                         size: (e - m).to_usize(),
+                        ranges: (),
                     });
                 };
                 break Some(BaoChunk::Leaf {
                     is_root: is_root && is_half_leaf,
                     start_chunk: l_start_chunk,
                     size: (m - s).to_usize(),
+                    ranges: (),
                 });
             }
         }
@@ -391,12 +450,13 @@ impl BaoChunk {
     }
 }
 
-impl Default for BaoChunk {
+impl<T: Default> Default for BaoChunk<T> {
     fn default() -> Self {
         Self::Leaf {
             is_root: true,
             size: 0,
             start_chunk: ChunkNum(0),
+            ranges: T::default(),
         }
     }
 }
@@ -407,7 +467,7 @@ impl Default for BaoChunk {
 pub struct PreOrderChunkIterRef<'a> {
     inner: PreOrderPartialIterRef<'a>,
     // stack with 2 elements, since we can only have 2 items in flight
-    stack: [BaoChunk; 2],
+    stack: [BaoChunk<&'a RangeSetRef<ChunkNum>>; 2],
     index: usize,
 }
 
@@ -416,7 +476,8 @@ impl<'a> PreOrderChunkIterRef<'a> {
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
         Self {
             inner: tree.ranges_pre_order_nodes_iter(ranges, max_skip_level),
-            stack: Default::default(),
+            // todo: get rid of this when &RangeSetRef has a default
+            stack: [BaoChunk::empty(ranges), BaoChunk::empty(ranges)],
             index: 0,
         }
     }
@@ -426,12 +487,12 @@ impl<'a> PreOrderChunkIterRef<'a> {
         self.inner.tree()
     }
 
-    fn push(&mut self, item: BaoChunk) {
+    fn push(&mut self, item: BaoChunk<&'a RangeSetRef<ChunkNum>>) {
         self.stack[self.index] = item;
         self.index += 1;
     }
 
-    fn pop(&mut self) -> Option<BaoChunk> {
+    fn pop(&mut self) -> Option<BaoChunk<&'a RangeSetRef<ChunkNum>>> {
         if self.index > 0 {
             self.index -= 1;
             Some(self.stack[self.index])
@@ -442,7 +503,7 @@ impl<'a> PreOrderChunkIterRef<'a> {
 }
 
 impl<'a> Iterator for PreOrderChunkIterRef<'a> {
-    type Item = BaoChunk;
+    type Item = BaoChunk<&'a RangeSetRef<ChunkNum>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -453,6 +514,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                 node,
                 is_root,
                 is_half_leaf,
+                ranges,
                 l_ranges,
                 r_ranges,
                 query_leaf,
@@ -468,6 +530,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                         is_root: false,
                         start_chunk: r_start_chunk,
                         size: (e - m).to_usize(),
+                        ranges: r_ranges,
                     });
                 };
                 if !l_ranges.is_empty() {
@@ -475,6 +538,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                         is_root: is_root && is_half_leaf,
                         start_chunk: l_start_chunk,
                         size: (m - s).to_usize(),
+                        ranges: l_ranges,
                     });
                 };
             }
@@ -491,6 +555,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                         start_chunk,
                         is_root,
                         size,
+                        ranges,
                     }
                 } else {
                     // the node is not a leaf, so we need to return a BaoChunk::Parent
@@ -499,6 +564,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                         left: !l_ranges.is_empty(),
                         right: !r_ranges.is_empty(),
                         node,
+                        ranges,
                     }
                 };
                 break Some(chunk);
@@ -542,6 +608,7 @@ impl Iterator for PreOrderChunkIter {
     type Item = BaoChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.with_dependent_mut(|_, iter| iter.next())
+        self.0
+            .with_dependent_mut(|_, iter| iter.next().map(|x| x.map_ranges(|_| ())))
     }
 }
