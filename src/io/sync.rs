@@ -399,9 +399,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                     println!("{:?}", elem);
                     match elem {
                         ResponseChunk::Leaf {
-                            start_chunk,
-                            size,
-                            ..
+                            start_chunk, size, ..
                         } => {
                             println!(
                                 "{:?}",
@@ -409,9 +407,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                             )
                         }
                         ResponseChunk::Parent { node, .. } => {
-                            if let Some(node) = node {
-                                println!("{:?}", tree.byte_range(node))
-                            }
+                            println!("{:?}", tree.byte_range(node))
                         }
                     }
                 }
@@ -427,6 +423,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 left,
                 right,
                 node,
+                ..
             }) => {
                 let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)
                     .map_err(|e| DecodeError::maybe_parent_not_found(e, node))?;
@@ -560,7 +557,11 @@ pub(crate) fn bao_encode_selected_recursive(
         let emit_parent = !ranges.is_empty() && !(ranges.is_all() && level <= max_skip_level);
         let hash_offset = if emit_parent {
             // make some room for the hashes
-            println!("emit parent {} {}", res.len(), data.len());
+            println!(
+                "emit parent left: {} right: {}",
+                !l_ranges.is_empty(),
+                !r_ranges.is_empty()
+            );
             res.extend_from_slice(&[0xFFu8; 64]);
             Some(res.len() - 64)
         } else {
@@ -587,6 +588,7 @@ pub(crate) fn bao_encode_selected_recursive(
         if let Some(o) = hash_offset {
             res[o..o + 32].copy_from_slice(left.as_bytes());
             res[o + 32..o + 64].copy_from_slice(right.as_bytes());
+            println!("writing virtua {}", hex::encode(&res[o..o + 64]));
         }
         blake3::guts::parent_cv(&left, &right, is_root)
     }
@@ -618,7 +620,6 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     // write header
     encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
-        println!("encoding {:?}", item);
         match item {
             BaoChunk::Parent {
                 is_root,
@@ -639,8 +640,11 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 if left {
                     stack.push(l_hash);
                 }
-                encoded.write_all(l_hash.as_bytes())?;
-                encoded.write_all(r_hash.as_bytes())?;
+                let mut pair = [0u8; 64];
+                pair[..32].copy_from_slice(l_hash.as_bytes());
+                pair[32..].copy_from_slice(r_hash.as_bytes());
+                println!("writing parent {} {:?}", hex::encode(&pair), node);
+                encoded.write_all(&pair)?;
             }
             BaoChunk::Leaf {
                 start_chunk,
@@ -710,16 +714,14 @@ where
                 tree = Some(BaoTree::new(size, block_size));
             }
             DecodeResponseItem::Parent(Parent { node, pair }) => {
-                if let Some(node) = node {
-                    let outboard = if let Some(outboard) = outboard.as_mut() {
-                        outboard
-                    } else {
-                        let create = create.take().unwrap();
-                        outboard = Some(create(tree.take().unwrap(), root)?);
-                        outboard.as_mut().unwrap()
-                    };
-                    outboard.save(node, &pair)?;
-                }
+                let outboard = if let Some(outboard) = outboard.as_mut() {
+                    outboard
+                } else {
+                    let create = create.take().unwrap();
+                    outboard = Some(create(tree.take().unwrap(), root)?);
+                    outboard.as_mut().unwrap()
+                };
+                outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
                 target.write_all_at(offset.0, &data)?;

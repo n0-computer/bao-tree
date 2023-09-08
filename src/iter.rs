@@ -287,13 +287,15 @@ pub enum ResponseChunk {
     /// To validate, use parent_cv using the is_root value
     Parent {
         /// The tree node, useful for error reporting
-        node: Option<TreeNode>,
+        node: TreeNode,
         /// This is the root, to be passed to parent_cv
         is_root: bool,
         /// Push the left hash to the stack, since it will be needed later
         left: bool,
         /// Push the right hash to the stack, since it will be needed later
         right: bool,
+        ///
+        is_subchunk: bool,
     },
     /// expect data of size `size`
     ///
@@ -643,10 +645,11 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                     ..
                 } => {
                     break Some(ResponseChunk::Parent {
-                        node: Some(node),
+                        node,
                         is_root,
                         right,
                         left,
+                        is_subchunk: false,
                     });
                 }
                 BaoChunk::Leaf {
@@ -679,10 +682,11 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                                     ..
                                 } => {
                                     self.buffer.push(ResponseChunk::Parent {
-                                        node: None,
+                                        node,
                                         is_root,
                                         left,
                                         right,
+                                        is_subchunk: true,
                                     });
                                 }
                                 BaoChunk::Leaf {

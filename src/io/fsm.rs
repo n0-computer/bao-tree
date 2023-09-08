@@ -419,7 +419,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 this.encoded
                     .read_exact(&mut buf)
                     .await
-                    .map_err(|e| DecodeError::maybe_parent_not_found(e, Some(node)))?;
+                    .map_err(|e| DecodeError::maybe_parent_not_found(e, node))?;
                 let pair @ (l_hash, r_hash) = read_parent(&buf);
                 let parent_hash = this.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
@@ -434,13 +434,9 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 }
                 // Validate after pushing the children so that we could in principle continue
                 if parent_hash != actual {
-                    return Err(DecodeError::ParentHashMismatch(Some(node)));
+                    return Err(DecodeError::ParentHashMismatch(node));
                 }
-                Parent {
-                    pair,
-                    node: Some(node),
-                }
-                .into()
+                Parent { pair, node }.into()
             }
             BaoChunk::Leaf {
                 size,
@@ -659,18 +655,16 @@ where
         };
         match item {
             BaoContentItem::Parent(Parent { node, pair }) => {
-                if let Some(node) = node {
-                    let outboard = if let Some(outboard) = outboard.as_mut() {
-                        outboard
-                    } else {
-                        let tree = reading.tree();
-                        let create = create.take().unwrap();
-                        let new = create(root, *tree).await?;
-                        outboard = Some(new);
-                        outboard.as_mut().unwrap()
-                    };
-                    outboard.save(node, &pair).await?;
-                }
+                let outboard = if let Some(outboard) = outboard.as_mut() {
+                    outboard
+                } else {
+                    let tree = reading.tree();
+                    let create = create.take().unwrap();
+                    let new = create(root, *tree).await?;
+                    outboard = Some(new);
+                    outboard.as_mut().unwrap()
+                };
+                outboard.save(node, &pair).await?;
             }
             BaoContentItem::Leaf(Leaf { offset, data }) => {
                 target.write_bytes_at(offset.0, data).await?;

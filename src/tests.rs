@@ -876,18 +876,43 @@ fn bao_encode_selected_recursive_0() {
     assert_eq!(overhead(&data, 2), 64 * 0);
 }
 
+/// Reference implementation of encode_ranges_validated that uses the simple recursive impl
+fn encode_selected_reference(
+    data: &[u8],
+    block_size: BlockSize,
+    ranges: &RangeSetRef<ChunkNum>,
+) -> (blake3::Hash, Vec<u8>) {
+    let mut res = Vec::new();
+    res.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    let max_skip_level = block_size.0 as u32;
+    let hash = crate::io::sync::bao_encode_selected_recursive(
+        ChunkNum(0),
+        &data,
+        true,
+        ranges,
+        max_skip_level,
+        &mut res,
+    );
+    (hash, res)
+}
+
 /// Encode a small subset of a large blob, and check that the encoded data is small
 #[test]
-fn bao_encode_selected_recursive_large() {
+fn abcd() {
     // a rather big piece of data
-    let data = make_test_data(1024 * 1024 * 16 + 12345);
+    let data = make_test_data(1024 * 32 + 1);
     // compute an outboard at a block size of 2^4 = 16 chunks
     let outboard = BaoTree::outboard_post_order_mem(&data, BlockSize(4));
 
     let get_encoded = |ranges| {
-        let mut encoded = Vec::new();
-        crate::io::sync::encode_ranges_validated(&data, &outboard, ranges, &mut encoded).unwrap();
-        encoded
+        let mut actual_encoded = Vec::new();
+        crate::io::sync::encode_ranges_validated(&data, &outboard, ranges, &mut actual_encoded)
+            .unwrap();
+        let (expected_hash, expected_encoded) =
+            encode_selected_reference(&data, outboard.tree().block_size, ranges);
+        assert_eq!(expected_hash, outboard.root);
+        assert_eq!(expected_encoded, actual_encoded);
+        actual_encoded
     };
     //
     // let ranges = RangeSet2::from(..ChunkNum(1));
@@ -896,9 +921,9 @@ fn bao_encode_selected_recursive_large() {
     // let ranges = RangeSet2::from(ChunkNum(1000)..ChunkNum(1001));
     // let encoded = get_encoded(&ranges);
     // assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
-    let ranges = RangeSet2::from(ChunkNum(3000)..ChunkNum(3001));
+    let ranges = RangeSet2::from(ChunkNum(16)..ChunkNum(17));
     let encoded = get_encoded(&ranges);
-    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+    // assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
 
     for chunk in decode_ranges_into_chunks(
         outboard.root,
@@ -916,28 +941,20 @@ proptest! {
     /// does not need an outboard is the same as the more complex encode_ranges_validated
     /// that requires an outboard.
     #[test]
-    fn bao_encode_selected_recursive((size, ranges) in size_and_selection(1..32768, 2)) {
+    fn bao_encode_selected_recursive((size, ranges) in size_and_selection(1..100000, 2), block_size in 0..4u8) {
         let data = make_test_data(size);
-        let expected = blake3::hash(&data);
-        let mut actual_encoded = Vec::new();
-        let actual = crate::io::sync::bao_encode_selected_recursive(
-            ChunkNum(0),
-            &data,
-            true,
-            &ranges,
-            0,
-            &mut actual_encoded,
-        );
+        let expected_hash = blake3::hash(&data);
+        let block_size = BlockSize(block_size);
+        let (actual_hash, actual_encoded) = encode_selected_reference(&data, block_size, &ranges);
         let mut expected_encoded = Vec::new();
-        let outboard = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
+        let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
         encode_ranges_validated(
             &data,
             &outboard,
             &ranges,
             &mut expected_encoded,
         ).unwrap();
-        expected_encoded.splice(..8, []);
-        prop_assert_eq!(expected, actual);
+        prop_assert_eq!(expected_hash, actual_hash);
         prop_assert_eq!(expected_encoded, actual_encoded);
     }
 

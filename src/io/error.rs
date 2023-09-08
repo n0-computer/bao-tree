@@ -61,11 +61,11 @@ pub enum AnyDecodeError {
     /// The query range was invalid
     InvalidQueryRange,
     /// We got an EOF while reading a parent hash pair, indicating that the remote end does not have the outboard
-    ParentNotFound(Option<TreeNode>),
+    ParentNotFound(TreeNode),
     /// We got an EOF while reading a chunk, indicating that the remote end does not have the data
     LeafNotFound(ChunkNum),
     /// The hash of a parent did not match the expected hash
-    ParentHashMismatch(Option<TreeNode>),
+    ParentHashMismatch(TreeNode),
     /// The hash of a leaf did not match the expected hash
     LeafHashMismatch(ChunkNum),
     /// There was an error reading from the underlying io
@@ -115,7 +115,11 @@ impl From<AnyDecodeError> for io::Error {
             AnyDecodeError::Io(e) => e,
             AnyDecodeError::ParentHashMismatch(node) => io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("parent hash mismatch {:?}", node,),
+                format!(
+                    "parent hash mismatch (level {}, block {})",
+                    node.level(),
+                    node.mid().0
+                ),
             ),
             AnyDecodeError::LeafHashMismatch(chunk) => io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -135,11 +139,11 @@ impl From<AnyDecodeError> for io::Error {
 #[derive(Debug)]
 pub enum DecodeError {
     /// We got an EOF while reading a parent hash pair, indicating that the remote end does not have the outboard
-    ParentNotFound(Option<TreeNode>),
+    ParentNotFound(TreeNode),
     /// We got an EOF while reading a chunk, indicating that the remote end does not have the data
     LeafNotFound(ChunkNum),
     /// The hash of a parent did not match the expected hash
-    ParentHashMismatch(Option<TreeNode>),
+    ParentHashMismatch(TreeNode),
     /// The hash of a leaf did not match the expected hash
     LeafHashMismatch(ChunkNum),
     /// There was an error reading from the underlying io
@@ -167,7 +171,11 @@ impl From<DecodeError> for io::Error {
             DecodeError::Io(e) => e,
             DecodeError::ParentHashMismatch(node) => io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("parent hash mismatch {:?}", node,),
+                format!(
+                    "parent hash mismatch (level {}, block {})",
+                    node.level(),
+                    node.mid().0
+                ),
             ),
             DecodeError::LeafHashMismatch(chunk) => io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -180,7 +188,7 @@ impl From<DecodeError> for io::Error {
 }
 
 impl DecodeError {
-    pub(crate) fn maybe_parent_not_found(e: io::Error, node: Option<TreeNode>) -> Self {
+    pub(crate) fn maybe_parent_not_found(e: io::Error, node: TreeNode) -> Self {
         if e.kind() == io::ErrorKind::UnexpectedEof {
             Self::ParentNotFound(node)
         } else {
