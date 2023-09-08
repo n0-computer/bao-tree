@@ -9,8 +9,6 @@ use std::{fmt, io};
 pub enum StartDecodeError {
     /// We got an EOF when reading the size, indicating that the remote end does not have the blob
     NotFound,
-    /// The query range was invalid for the given size
-    InvalidQueryRange,
     /// A generic io error
     Io(io::Error),
 }
@@ -35,7 +33,6 @@ impl From<StartDecodeError> for io::Error {
         use StartDecodeError::*;
         match e {
             Io(e) => e,
-            InvalidQueryRange => io::Error::new(io::ErrorKind::InvalidInput, "invalid query range"),
             NotFound => io::Error::new(io::ErrorKind::UnexpectedEof, e),
         }
     }
@@ -58,8 +55,6 @@ impl StartDecodeError {
 pub enum AnyDecodeError {
     /// We got an EOF when reading the size, indicating that the remote end does not have the blob
     NotFound,
-    /// The query range was invalid
-    InvalidQueryRange,
     /// We got an EOF while reading a parent hash pair, indicating that the remote end does not have the outboard
     ParentNotFound(TreeNode),
     /// We got an EOF while reading a chunk, indicating that the remote end does not have the data
@@ -88,7 +83,6 @@ impl From<StartDecodeError> for AnyDecodeError {
     fn from(e: StartDecodeError) -> Self {
         match e {
             StartDecodeError::Io(e) => Self::Io(e),
-            StartDecodeError::InvalidQueryRange => Self::InvalidQueryRange,
             StartDecodeError::NotFound => Self::NotFound,
         }
     }
@@ -125,9 +119,6 @@ impl From<AnyDecodeError> for io::Error {
                 io::ErrorKind::InvalidData,
                 format!("leaf hash mismatch (offset {})", chunk.to_bytes().0),
             ),
-            AnyDecodeError::InvalidQueryRange => {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
-            }
             AnyDecodeError::LeafNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
             AnyDecodeError::ParentNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
             AnyDecodeError::NotFound => io::Error::new(io::ErrorKind::UnexpectedEof, e),
@@ -220,8 +211,6 @@ pub enum EncodeError {
     ParentWrite(TreeNode),
     /// We got a ConnectionReset while writing a chunk, indicating that the remote end stopped listening
     LeafWrite(ChunkNum),
-    /// The query range was invalid
-    InvalidQueryRange,
     /// File size does not match size in outboard
     SizeMismatch,
     /// There was an error reading from the underlying io
@@ -271,9 +260,6 @@ impl From<EncodeError> for io::Error {
                 io::ErrorKind::ConnectionReset,
                 format!("leaf write failed at {}", chunk.to_bytes().0),
             ),
-            EncodeError::InvalidQueryRange => {
-                io::Error::new(io::ErrorKind::InvalidInput, "invalid query range")
-            }
             EncodeError::SizeMismatch => {
                 io::Error::new(io::ErrorKind::InvalidData, "size mismatch")
             }

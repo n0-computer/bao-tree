@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use crate::{
     blake3,
     io::{
-        sync::{select_nodes_recursive, DecodeResponseItem, Outboard},
+        sync::{DecodeResponseItem, Outboard},
         Leaf,
     },
     iter::{ResponseChunk, ResponseIterRef},
@@ -311,21 +311,21 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
 fn bao_tree_slice_roundtrip_cases() {
     use make_test_data as td;
     let cases = [
-        // (0, 0..1),
-        // (1, 0..1),
-        // (1023, 0..1),
-        // (1024, 0..1),
-        // (1025, 0..1),
-        // (2047, 0..1),
-        // (2048, 0..1),
+        (0, 0..1),
+        (1, 0..1),
+        (1023, 0..1),
+        (1024, 0..1),
+        (1025, 0..1),
+        (2047, 0..1),
+        (2048, 0..1),
         (10000, 0..1),
-        // (20000, 0..1),
-        // (24 * 1024 + 1, 0..25),
-        // (1025, 1..2),
-        // (2047, 1..2),
-        // (2048, 1..2),
-        // (10000, 1..2),
-        // (20000, 1..2),
+        (20000, 0..1),
+        (24 * 1024 + 1, 0..25),
+        (1025, 1..2),
+        (2047, 1..2),
+        (2048, 1..2),
+        (10000, 1..2),
+        (20000, 1..2),
     ];
     for chunk_group_log in 1..4 {
         let block_size = BlockSize(chunk_group_log);
@@ -848,41 +848,32 @@ fn encode_selected_reference(
 
 /// Encode a small subset of a large blob, and check that the encoded data is small
 #[test]
-fn abcd() {
+fn encode_single_chunk_large() {
     // a rather big piece of data
-    let data = make_test_data(1024 * 32 + 1);
+    let data = make_test_data(1024 * 1024 * 16 + 12345);
     // compute an outboard at a block size of 2^4 = 16 chunks
     let outboard = BaoTree::outboard_post_order_mem(&data, BlockSize(4));
 
+    // encode the given ranges
     let get_encoded = |ranges| {
         let mut actual_encoded = Vec::new();
         crate::io::sync::encode_ranges_validated(&data, &outboard, ranges, &mut actual_encoded)
             .unwrap();
-        let (expected_hash, expected_encoded) =
-            encode_selected_reference(&data, outboard.tree().block_size, ranges);
-        assert_eq!(expected_hash, outboard.root);
-        assert_eq!(expected_encoded, actual_encoded);
         actual_encoded
     };
-    //
-    // let ranges = RangeSet2::from(..ChunkNum(1));
-    // let encoded = get_encoded(&ranges);
-    // assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
-    // let ranges = RangeSet2::from(ChunkNum(1000)..ChunkNum(1001));
-    // let encoded = get_encoded(&ranges);
-    // assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
-    let ranges = RangeSet2::from(ChunkNum(16)..ChunkNum(17));
-    let encoded = get_encoded(&ranges);
-    // assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
 
-    for chunk in decode_ranges_into_chunks(
-        outboard.root,
-        outboard.tree().block_size,
-        &encoded[..],
-        &ranges,
-    ) {
-        println!("{:?}", chunk);
-    }
+    // check the expected size for various ranges
+    let ranges = RangeSet2::from(..ChunkNum(1));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+
+    let ranges = RangeSet2::from(ChunkNum(1000)..ChunkNum(1001));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+
+    let ranges = RangeSet2::from(ChunkNum(3000)..ChunkNum(3001));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
 }
 
 fn last_chunk(size: u64) -> Range<u64> {
@@ -895,7 +886,7 @@ fn last_chunk(size: u64) -> Range<u64> {
     }
 }
 
-fn select_last_block_impl(size: u64, block_size: u8) -> (Vec<Range<u64>>, Vec<Range<u64>>) {
+fn select_last_chunk_impl(size: u64, block_size: u8) -> (Vec<Range<u64>>, Vec<Range<u64>>) {
     let range = RangeSet2::from(ChunkNum(u64::MAX)..);
     let selection =
         ResponseIterRef::new(BaoTree::new(ByteNum(size), BlockSize(block_size)), &range)
@@ -918,39 +909,31 @@ fn encode_last_chunk_impl(size: u64, block_size: u8) -> (Vec<u8>, Vec<u8>) {
     let data = make_test_data(size as usize);
     let outboard = BaoTree::outboard_post_order_mem(&data, BlockSize(block_size));
     let mut encoded1 = Vec::new();
-    encode_ranges_validated(
-        &data,
-        &outboard,
-        &range,
-        &mut encoded1,
-    ).unwrap();
+    encode_ranges_validated(&data, &outboard, &range, &mut encoded1).unwrap();
     let lc = last_chunk(size);
     let sc = ByteNum(lc.start).chunks();
     let ec = ByteNum(lc.end).chunks();
     let mut encoded2 = Vec::new();
-    encode_ranges_validated(
-        &data,
-        &outboard,
-        &RangeSet2::from(sc..ec),
-        &mut encoded2,
-    ).unwrap();
+    encode_ranges_validated(&data, &outboard, &RangeSet2::from(sc..ec), &mut encoded2).unwrap();
     (encoded1, encoded2)
 }
 
 #[test]
-fn select_last_block_0() {
-    assert_tuple_eq!(select_last_block_impl(1, 0));
+fn select_last_chunk_0() {
+    assert_tuple_eq!(select_last_chunk_impl(1, 0));
 }
 
 proptest! {
 
+    /// Check that a query outside the valid range always selects the last chunk
     #[test]
-    fn select_last_block(size in 1..100000u64, block_size in 0..4u8) {
-        assert_tuple_eq!(select_last_block_impl(size, block_size));
+    fn select_last_chunk(size in 1..100000u64, block_size in 0..4u8) {
+        assert_tuple_eq!(select_last_chunk_impl(size, block_size));
     }
 
+    /// Check that a query outside the valid range always encodes the last chunk
     #[test]
-    fn encode_last_block(size in 1..100000u64, block_size in 0..4u8) {
+    fn encode_last_chunk(size in 1..100000u64, block_size in 0..4u8) {
         assert_tuple_eq!(encode_last_chunk_impl(size, block_size));
     }
 
