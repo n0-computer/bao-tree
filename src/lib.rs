@@ -79,10 +79,6 @@ pub struct BaoTree {
     size: ByteNum,
     /// Log base 2 of the chunk group size
     block_size: BlockSize,
-    /// true if this is a self-contained tree, false if it is part of a larger tree
-    is_root: bool,
-    /// start chunk of the tree, can only be non-zero if this is not a self-contained tree
-    start_chunk: ChunkNum,
 }
 
 /// An offset of a node in a post-order outboard
@@ -107,7 +103,7 @@ impl PostOrderOffset {
 impl BaoTree {
     /// Create a new self contained BaoTree
     pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
-        Self::new_with_start_chunk(size, block_size, true, ChunkNum(0))
+        Self { size, block_size }
     }
 
     /// Compute the post order outboard for the given data, returning a in mem data structure
@@ -199,27 +195,6 @@ impl BaoTree {
         PreOrderPartialIterRef::new(*self, ranges, max_skip_level)
     }
 
-    /// Create a new BaoTree with a start chunk
-    ///
-    /// This is used for trees that are part of a larger file.
-    /// The start chunk is the chunk number of the first chunk in the tree.
-    ///
-    /// This is mostly used internally.
-    pub fn new_with_start_chunk(
-        size: ByteNum,
-        block_size: BlockSize,
-        is_root: bool,
-        start_chunk: ChunkNum,
-    ) -> Self {
-        debug_assert!((start_chunk == 0) || !is_root);
-        Self {
-            size,
-            block_size,
-            start_chunk,
-            is_root,
-        }
-    }
-
     /// Root of the tree
     pub fn root(&self) -> TreeNode {
         TreeNode::root(self.blocks())
@@ -259,7 +234,7 @@ impl BaoTree {
     pub const fn chunk_num(&self, node: LeafNode) -> ChunkNum {
         // block number of a leaf node is just the node number
         // multiply by chunk_group_size to get the chunk number
-        ChunkNum((node.0 << self.block_size.0) + self.start_chunk.0)
+        ChunkNum(node.0 << self.block_size.0)
     }
 
     /// true if the given node is complete/sealed
