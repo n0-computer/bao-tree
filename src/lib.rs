@@ -82,7 +82,7 @@ pub struct BaoTree {
     /// true if this is a self-contained tree, false if it is part of a larger tree
     is_root: bool,
     /// start chunk of the tree, can only be non-zero if this is not a self-contained tree
-    root: TreeNode,
+    start_chunk: ChunkNum,
 }
 
 /// An offset of a node in a post-order outboard
@@ -107,9 +107,7 @@ impl PostOrderOffset {
 impl BaoTree {
     /// Create a new self contained BaoTree
     pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
-        // compute the root from the size and block size
-        let root = TreeNode::root(size.blocks(block_size).max(BlockNum(1)));
-        Self::new_with_root(size, block_size, root, true)
+        Self::new_with_start_chunk(size, block_size, true, ChunkNum(0))
     }
 
     /// Compute the post order outboard for the given data, returning a in mem data structure
@@ -137,12 +135,6 @@ impl BaoTree {
         let start = node.block_range().start.to_bytes(self.block_size);
         let end = node.block_range().end.to_bytes(self.block_size);
         start..end.min(self.size)
-    }
-
-    fn chunk_range(&self, node: TreeNode) -> Range<ChunkNum> {
-        let start = node.block_range().start.to_chunks(self.block_size);
-        let end = node.block_range().end.to_chunks(self.block_size);
-        start..end.min(self.size.chunks())
     }
 
     /// Compute the byte ranges for a leaf node
@@ -213,40 +205,38 @@ impl BaoTree {
     /// The start chunk is the chunk number of the first chunk in the tree.
     ///
     /// This is mostly used internally.
-    fn new_with_root(size: ByteNum, block_size: BlockSize, root: TreeNode, is_root: bool) -> Self {
+    pub fn new_with_start_chunk(
+        size: ByteNum,
+        block_size: BlockSize,
+        is_root: bool,
+        start_chunk: ChunkNum,
+    ) -> Self {
+        debug_assert!((start_chunk == 0) || !is_root);
         Self {
             size,
             block_size,
-            root,
+            start_chunk,
             is_root,
         }
     }
 
     /// Root of the tree
-    ///
-    /// For a self-contained tree, this is the global root of the tree.
-    /// For a tree that is part of a larger tree, this is the root of the
-    /// subtree that this tree represents.
     pub fn root(&self) -> TreeNode {
-        self.root
+        TreeNode::root(self.blocks())
     }
 
     /// Number of blocks in the tree
     ///
     /// At chunk group size 1, this is the same as the number of chunks
-    /// Even a tree with 0 bytes size has a single block.
+    /// Even a tree with 0 bytes size has a single block
     pub fn blocks(&self) -> BlockNum {
-        let range = self.root.block_range();
-        let min = range.start;
-        let max = range.end.min(self.size.blocks(self.block_size));
         // handle the case of an empty tree having 1 block
-        (max - min).max(BlockNum(1))
+        self.size.blocks(self.block_size).max(BlockNum(1))
     }
 
     /// Number of chunks in the tree
     pub fn chunks(&self) -> ChunkNum {
-        let range = self.chunk_range(self.root);
-        range.end - range.start
+        self.size.chunks()
     }
 
     /// Number of hash pairs in the outboard
@@ -269,7 +259,7 @@ impl BaoTree {
     pub const fn chunk_num(&self, node: LeafNode) -> ChunkNum {
         // block number of a leaf node is just the node number
         // multiply by chunk_group_size to get the chunk number
-        ChunkNum(node.0 << self.block_size.0)
+        ChunkNum((node.0 << self.block_size.0) + self.start_chunk.0)
     }
 
     /// true if the given node is complete/sealed
