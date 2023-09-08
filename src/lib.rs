@@ -72,7 +72,9 @@ pub struct BaoTree {
     size: ByteNum,
     /// Log base 2 of the chunk group size
     block_size: BlockSize,
-    /// start chunk of the tree, 0 for self-contained trees
+    /// true if this is a self-contained tree, false if it is part of a larger tree
+    is_root: bool,
+    /// start chunk of the tree, can only be non-zero if this is not a self-contained tree
     start_chunk: ChunkNum,
 }
 
@@ -103,7 +105,7 @@ impl BaoTree {
 
     /// Create a new BaoTree
     pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
-        Self::new_with_start_chunk(size, block_size, ChunkNum(0))
+        Self::new_with_start_chunk(size, block_size, true, ChunkNum(0))
     }
 
     /// Compute the post order outboard for the given data, returning a in mem data structure
@@ -112,7 +114,7 @@ impl BaoTree {
         block_size: BlockSize,
     ) -> PostOrderMemOutboard {
         let data = data.as_ref();
-        let tree = Self::new_with_start_chunk(ByteNum(data.len() as u64), block_size, ChunkNum(0));
+        let tree = Self::new(ByteNum(data.len() as u64), block_size);
         let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
         let mut res = Vec::with_capacity(outboard_len);
         let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
@@ -204,12 +206,15 @@ impl BaoTree {
     pub fn new_with_start_chunk(
         size: ByteNum,
         block_size: BlockSize,
+        is_root: bool,
         start_chunk: ChunkNum,
     ) -> Self {
+        debug_assert!((start_chunk == 0) || !is_root);
         Self {
             size,
             block_size,
             start_chunk,
+            is_root,
         }
     }
 

@@ -649,7 +649,7 @@ pub fn outboard_post_order(
     block_size: BlockSize,
     mut outboard: impl Write,
 ) -> io::Result<blake3::Hash> {
-    let tree = BaoTree::new_with_start_chunk(ByteNum(size), block_size, ChunkNum(0));
+    let tree = BaoTree::new(ByteNum(size), block_size);
     let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
     let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
     outboard.write_all(&size.to_le_bytes())?;

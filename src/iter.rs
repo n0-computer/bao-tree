@@ -64,7 +64,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
             tree_filled_size: tree.filled_size(),
             max_skip_level,
             stack,
-            is_root: tree.start_chunk == 0,
+            is_root: tree.is_root,
         }
     }
 
