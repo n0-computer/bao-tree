@@ -22,6 +22,7 @@ futures = { version = "0.3", optional = true }
 self_cell = { version = "1" }
 iroh-io = { version = "0.2.2", features = ["tokio-io"], default_features = false, optional = true }
 positioned-io = { version = "0.3.1", default_features = false }
+hex = "0.4.3"
 
 [features]
 tokio_fsm = ["tokio", "futures", "iroh-io"]

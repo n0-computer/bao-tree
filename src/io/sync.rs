@@ -5,7 +5,6 @@ use std::{
     result,
 };
 
-use crate::hash_subtree;
 use crate::{
     blake3,
     io::error::{AnyDecodeError, EncodeError},
@@ -13,9 +12,10 @@ use crate::{
         outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
         Header, Leaf, Parent,
     },
-    iter::{BaoChunk, PreOrderChunkIterRef},
+    iter::BaoChunk,
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
+use crate::{hash_subtree, iter::ResponseIterRef};
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
@@ -334,7 +334,7 @@ enum Position<'a> {
         block_size: BlockSize,
     },
     /// currently reading the tree, all the info we need is in the iter
-    Content { iter: PreOrderChunkIterRef<'a> },
+    Content { iter: ResponseIterRef<'a> },
 }
 
 /// Iterator that can be used to decode a response to a range request
@@ -387,19 +387,35 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     fn next0(&mut self) -> result::Result<Option<DecodeResponseItem>, AnyDecodeError> {
         let inner = match &mut self.inner {
             Position::Content { ref mut iter } => iter,
-            Position::Header {
-                block_size,
-                ranges: range,
-            } => {
+            Position::Header { block_size, ranges } => {
                 let size =
                     read_len(&mut self.encoded).map_err(StartDecodeError::maybe_not_found)?;
                 // make sure the range is valid and canonical
-                if !range_ok(range, size.chunks()) {
+                if !range_ok(ranges, size.chunks()) {
                     return Err(AnyDecodeError::InvalidQueryRange);
                 }
                 let tree = BaoTree::new(size, *block_size);
+                for elem in ResponseIterRef::new(tree, ranges, 0) {
+                    println!("{:?}", elem);
+                    match elem {
+                        BaoChunk::Leaf {
+                            start_chunk,
+                            size,
+                            is_root,
+                            ranges,
+                        } => {
+                            println!(
+                                "{:?}",
+                                start_chunk.to_bytes().0..start_chunk.to_bytes().0 + (size as u64)
+                            )
+                        }
+                        BaoChunk::Parent { node, .. } => {
+                            println!("{:?}", tree.byte_range(node))
+                        }
+                    }
+                }
                 self.inner = Position::Content {
-                    iter: tree.ranges_pre_order_chunks_iter_ref(range, 0),
+                    iter: ResponseIterRef::new(tree, ranges, 0),
                 };
                 return Ok(Some(Header { size }.into()));
             }
@@ -440,6 +456,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 let actual = hash_subtree(start_chunk.0, &self.buf, is_root);
                 let leaf_hash = self.stack.pop().unwrap();
                 if leaf_hash != actual {
+                    println!("{}", hex::encode(&self.buf));
                     return Err(AnyDecodeError::LeafHashMismatch(start_chunk));
                 }
                 Ok(Some(
@@ -505,6 +522,76 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     Ok(())
 }
 
+/// Encode ranges relevant to a query from a slice and outboard to a buffer
+///
+/// This will compute the root hash, so it will have to traverse the entire tree.
+/// The `ranges` parameter just controls which parts of the data are written.
+///
+/// Except for writing to a buffer, this is the same as [hash_subtree].
+pub(crate) fn bao_encode_selected_recursive(
+    start_chunk: ChunkNum,
+    data: &[u8],
+    is_root: bool,
+    ranges: &RangeSetRef<ChunkNum>,
+    max_skip_level: u32,
+    res: &mut Vec<u8>,
+) -> blake3::Hash {
+    use blake3::guts::{ChunkState, CHUNK_LEN};
+    if data.len() <= CHUNK_LEN {
+        if !ranges.is_empty() {
+            res.extend_from_slice(data);
+        }
+        let mut hasher = ChunkState::new(start_chunk.0);
+        hasher.update(data);
+        hasher.finalize(is_root)
+    } else {
+        let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
+        let chunks = chunks.next_power_of_two();
+        let level = chunks.trailing_zeros();
+        let mid = chunks / 2;
+        let mid_bytes = mid * CHUNK_LEN;
+        let mid_chunk = start_chunk + (mid as u64);
+        let (l_ranges, r_ranges) = ranges.split(mid_chunk);
+        // for empty ranges, we don't want to emit anything.
+        // for full ranges where the level is at or below max_skip_level, we want to emit
+        // just the data.
+        //
+        // todo: maybe call into blake3::guts::hash_subtree directly for this case? it would be faster.
+        let emit_parent = !ranges.is_empty() && !(ranges.is_all() && level <= max_skip_level);
+        let hash_offset = if emit_parent {
+            // make some room for the hashes
+            println!("emit parent {} {}", res.len() - 8, data.len());
+            res.extend_from_slice(&[0xFFu8; 64]);
+            Some(res.len() - 64)
+        } else {
+            None
+        };
+        // recurse to the left and right to compute the hashes and emit data
+        let left = bao_encode_selected_recursive(
+            start_chunk,
+            &data[..mid_bytes],
+            false,
+            l_ranges,
+            max_skip_level,
+            res,
+        );
+        let right = bao_encode_selected_recursive(
+            mid_chunk,
+            &data[mid_bytes..],
+            false,
+            r_ranges,
+            max_skip_level,
+            res,
+        );
+        // backfill the hashes if needed
+        if let Some(o) = hash_offset {
+            res[o..o + 32].copy_from_slice(left.as_bytes());
+            res[o + 32..o + 64].copy_from_slice(right.as_bytes());
+        }
+        blake3::guts::parent_cv(&left, &right, is_root)
+    }
+}
+
 /// Encode ranges relevant to a query from a reader and outboard to a writer
 ///
 /// This function validates the data before writing.
@@ -527,9 +614,11 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
         return Err(EncodeError::InvalidQueryRange);
     }
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let mut out_buf = Vec::new();
     // write header
     encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
+        println!("encoding {:?}", item);
         match item {
             BaoChunk::Parent {
                 is_root,
@@ -557,17 +646,36 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 start_chunk,
                 size,
                 is_root,
+                ranges,
                 ..
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
                 let buf = &mut buffer[..size];
                 data.read_exact_at(start.0, buf)?;
-                let actual = hash_subtree(start_chunk.0, buf, is_root);
+                let (actual, to_write) = if !ranges.is_all() {
+                    // we need to encode just a part of the data
+                    //
+                    // write into an out buffer to ensure we detect mismatches
+                    // before writing to the output.
+                    out_buf.clear();
+                    let actual = bao_encode_selected_recursive(
+                        start_chunk,
+                        buf,
+                        is_root,
+                        ranges,
+                        tree.block_size.0 as u32,
+                        &mut out_buf,
+                    );
+                    (actual, &out_buf[..])
+                } else {
+                    let actual = hash_subtree(start_chunk.0, buf, is_root);
+                    (actual, &buf[..])
+                };
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
-                encoded.write_all(buf)?;
+                encoded.write_all(to_write)?;
             }
         }
     }

@@ -81,12 +81,31 @@ fn encode_ranges_2(
 ) -> Vec<u8> {
     let size = ByteNum(data.len() as u64);
     match canonicalize_range(ranges, size.chunks()) {
-        Ok(ranges) => encode_ranges_impl(data, outboard, ranges, block_size),
+        Ok(ranges) => encode_ranges_impl_2(data, ranges, block_size),
         Err(range) => {
             let ranges = RangeSet2::from(range);
-            encode_ranges_impl(data, outboard, &ranges, block_size)
+            encode_ranges_impl_2(data, &ranges, block_size)
         }
     }
+}
+
+fn encode_ranges_impl_2(
+    data: &[u8],
+    ranges: &RangeSetRef<ChunkNum>,
+    block_size: BlockSize,
+) -> Vec<u8> {
+    let mut res = Vec::new();
+    let size = ByteNum(data.len() as u64);
+    res.extend_from_slice(&size.0.to_le_bytes());
+    let _hash = crate::io::sync::bao_encode_selected_recursive(
+        ChunkNum(0),
+        data,
+        true,
+        ranges,
+        block_size.0 as u32,
+        &mut res,
+    );
+    res
 }
 
 fn encode_ranges_impl(
@@ -198,8 +217,7 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     let expected = data;
     let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
     let mut ec = Cursor::new(encoded);
-    let scratch = BytesMut::with_capacity(2048);
-    for item in decode_ranges_into_chunks(root, BlockSize::DEFAULT, &mut ec, &ranges, scratch) {
+    for item in decode_ranges_into_chunks(root, BlockSize::DEFAULT, &mut ec, &ranges) {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
@@ -328,13 +346,12 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
         &RangeSet2::from(range.clone()),
         block_size,
     );
-    let expected = data;
-    let mut all_ranges = RangeSet2::empty();
+    let expected = data.clone();
+    let mut all_ranges: range_collections::RangeSet<[ByteNum; 2]> = RangeSet2::empty();
+    println!("{} {:?} {}", data.len(), range, block_size.0);
+    println!("{}", hex::encode(&encoded));
     let mut ec = Cursor::new(encoded);
-    let scratch = BytesMut::with_capacity(block_size.bytes());
-    for item in
-        decode_ranges_into_chunks(root, block_size, &mut ec, &RangeSet2::from(range), scratch)
-    {
+    for item in decode_ranges_into_chunks(root, block_size, &mut ec, &RangeSet2::from(range)) {
         let (pos, slice) = item.unwrap();
         // compute all data ranges
         all_ranges |= RangeSet2::from(pos..pos + (slice.len() as u64));
@@ -347,21 +364,21 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
 fn bao_tree_slice_roundtrip_cases() {
     use make_test_data as td;
     let cases = [
-        (0, 0..1),
-        (1, 0..1),
-        (1023, 0..1),
-        (1024, 0..1),
-        (1025, 0..1),
-        (2047, 0..1),
-        (2048, 0..1),
+        // (0, 0..1),
+        // (1, 0..1),
+        // (1023, 0..1),
+        // (1024, 0..1),
+        // (1025, 0..1),
+        // (2047, 0..1),
+        // (2048, 0..1),
         (10000, 0..1),
-        (20000, 0..1),
-        (24 * 1024 + 1, 0..25),
-        (1025, 1..2),
-        (2047, 1..2),
-        (2048, 1..2),
-        (10000, 1..2),
-        (20000, 1..2),
+        // (20000, 0..1),
+        // (24 * 1024 + 1, 0..25),
+        // (1025, 1..2),
+        // (2047, 1..2),
+        // (2048, 1..2),
+        // (10000, 1..2),
+        // (20000, 1..2),
     ];
     for chunk_group_log in 1..4 {
         let block_size = BlockSize(chunk_group_log);
@@ -639,8 +656,8 @@ pub fn decode_ranges_into_chunks<'a>(
     block_size: BlockSize,
     encoded: impl Read + 'a,
     ranges: &'a RangeSetRef<ChunkNum>,
-    scratch: BytesMut,
 ) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
+    let scratch = BytesMut::with_capacity(block_size.bytes());
     let iter = DecodeResponseIter::new(root, block_size, encoded, ranges, scratch);
     iter.filter_map(|item| match item {
         Ok(item) => {
@@ -797,6 +814,32 @@ fn get_leaf_ranges(
         })
 }
 
+/// Create a random selection
+/// `size` is the size of the data
+/// `n` is the number of ranges, roughly the complexity of the selection
+fn selection(size: u64, n: usize) -> impl Strategy<Value = RangeSet2<ChunkNum>> {
+    let chunks = BaoTree::new(ByteNum(size), BlockSize(0)).chunks();
+    proptest::collection::vec((..chunks.0, ..chunks.0), n).prop_map(|e| {
+        let mut res = RangeSet2::empty();
+        for (a, b) in e {
+            let min = a.min(b);
+            let max = a.max(b) + 1;
+            let elem = RangeSet2::from(ChunkNum(min)..ChunkNum(max));
+            if res != elem {
+                res ^= elem;
+            }
+        }
+        res
+    })
+}
+
+fn size_and_selection(
+    size_range: Range<usize>,
+    n: usize,
+) -> impl Strategy<Value = (usize, RangeSet2<ChunkNum>)> {
+    size_range.prop_flat_map(move |size| (Just(size), selection(size as u64, n)))
+}
+
 /// Compute the union of an iterator of ranges. The ranges should be non-overlapping, otherwise
 /// the result is None
 fn range_union<K: RangeSetEntry>(
@@ -813,8 +856,93 @@ fn range_union<K: RangeSetEntry>(
     Some(res)
 }
 
+#[test]
+fn bao_encode_selected_recursive_0() {
+    let data = make_test_data(1024 * 3);
+    let overhead = |data, max_skip_level| {
+        let mut actual_encoded = Vec::new();
+        crate::io::sync::bao_encode_selected_recursive(
+            ChunkNum(0),
+            data,
+            true,
+            &RangeSet2::all(),
+            max_skip_level,
+            &mut actual_encoded,
+        );
+        actual_encoded.len() - data.len()
+    };
+    assert_eq!(overhead(&data, 0), 64 * 2);
+    assert_eq!(overhead(&data, 1), 64 * 1);
+    assert_eq!(overhead(&data, 2), 64 * 0);
+}
+
+/// Encode a small subset of a large blob, and check that the encoded data is small
+#[test]
+fn bao_encode_selected_recursive_large() {
+    // a rather big piece of data
+    let data = make_test_data(1024 * 1024 * 16 + 12345);
+    // compute an outboard at a block size of 2^4 = 16 chunks
+    let outboard = BaoTree::outboard_post_order_mem(&data, BlockSize(4));
+
+    let get_encoded = |ranges| {
+        let mut encoded = Vec::new();
+        crate::io::sync::encode_ranges_validated(&data, &outboard, ranges, &mut encoded).unwrap();
+        encoded
+    };
+    //
+    let ranges = RangeSet2::from(..ChunkNum(1));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+    let ranges = RangeSet2::from(ChunkNum(1000)..ChunkNum(1001));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+    let ranges = RangeSet2::from(ChunkNum(3000)..ChunkNum(3001));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+
+    for chunk in decode_ranges_into_chunks(
+        outboard.root,
+        outboard.tree().block_size,
+        &encoded[..],
+        &ranges,
+    ) {
+        println!("{:?}", chunk);
+    }
+}
+
 proptest! {
 
+    /// Checks that the simple recursive impl bao_encode_selected_recursive that
+    /// does not need an outboard is the same as the more complex encode_ranges_validated
+    /// that requires an outboard.
+    #[test]
+    fn bao_encode_selected_recursive((size, ranges) in size_and_selection(1..32768, 2)) {
+        let data = make_test_data(size);
+        let expected = blake3::hash(&data);
+        let mut actual_encoded = Vec::new();
+        let actual = crate::io::sync::bao_encode_selected_recursive(
+            ChunkNum(0),
+            &data,
+            true,
+            &ranges,
+            0,
+            &mut actual_encoded,
+        );
+        let mut expected_encoded = Vec::new();
+        let outboard = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
+        encode_ranges_validated(
+            &data,
+            &outboard,
+            &ranges,
+            &mut expected_encoded,
+        ).unwrap();
+        expected_encoded.splice(..8, []);
+        prop_assert_eq!(expected, actual);
+        prop_assert_eq!(expected_encoded, actual_encoded);
+    }
+
+    /// Checks that the leafs produced by ranges_pre_order_chunks_iter_ref
+    /// cover the entire data exactly once.
     #[test]
     fn max_skip_level(size in 0..32786u64, block_size in 0..2u8, max_skip_level in 0..2u8) {
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_size));

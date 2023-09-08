@@ -8,7 +8,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use self_cell::self_cell;
 use smallvec::SmallVec;
 
-use crate::{BaoTree, ChunkNum, TreeNode};
+use crate::{BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode};
 
 /// Extended node info.
 ///
@@ -289,14 +289,14 @@ pub enum BaoChunk<R = ()> {
     ///
     /// To validate, use parent_cv using the is_root value
     Parent {
-        /// This is the root, to be passed to parent_cv
-        is_root: bool,
-        /// Push the right hash to the stack, since it will be needed later
-        right: bool,
-        /// Push the left hash to the stack, since it will be needed later
-        left: bool,
         /// The tree node, useful for error reporting
         node: TreeNode,
+        /// This is the root, to be passed to parent_cv
+        is_root: bool,
+        /// Push the left hash to the stack, since it will be needed later
+        left: bool,
+        /// Push the right hash to the stack, since it will be needed later
+        right: bool,
         /// Additional information about what part of the chunk matches the query
         ranges: R,
     },
@@ -304,12 +304,12 @@ pub enum BaoChunk<R = ()> {
     ///
     /// To validate, use hash_block using the is_root and start_chunk values
     Leaf {
+        /// Start chunk, to be passed to hash_block
+        start_chunk: ChunkNum,
         /// Size of the data to expect. Will be chunk_group_bytes for all but the last block.
         size: usize,
         /// This is the root, to be passed to hash_block
         is_root: bool,
-        /// Start chunk, to be passed to hash_block
-        start_chunk: ChunkNum,
         /// Additional information about what part of the chunk matches the query
         ranges: R,
     },
@@ -573,6 +573,114 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
     }
 }
 
+/// An iterator that produces chunks in pre order.
+///
+/// This wraps a `PreOrderPartialIterRef` and iterates over the chunk groups
+/// all the way down to individual chunks if needed.
+#[derive(Debug)]
+pub struct ResponseIterRef<'a> {
+    inner: PreOrderChunkIterRef<'a>,
+    buffer: SmallVec<[BaoChunk; 10]>,
+}
+
+impl<'a> ResponseIterRef<'a> {
+    /// Create a new iterator over the tree.
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
+        Self {
+            inner: PreOrderChunkIterRef::new(tree, ranges, max_skip_level),
+            buffer: SmallVec::new(),
+        }
+    }
+
+    /// Return a reference to the underlying tree.
+    pub fn tree(&self) -> &BaoTree {
+        self.inner.tree()
+    }
+}
+impl<'a> Iterator for ResponseIterRef<'a> {
+    type Item = BaoChunk;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(item) = self.buffer.pop() {
+                break Some(item);
+            }
+            match self.inner.next()? {
+                BaoChunk::Parent {
+                    node,
+                    is_root,
+                    right,
+                    left,
+                    ..
+                } => {
+                    break Some(BaoChunk::Parent {
+                        node,
+                        is_root,
+                        right,
+                        left,
+                        ranges: (),
+                    });
+                }
+                BaoChunk::Leaf {
+                    size,
+                    is_root,
+                    start_chunk,
+                    ranges,
+                } => {
+                    if self.tree().block_size == BlockSize(0) || ranges.is_all() {
+                        break Some(BaoChunk::Leaf {
+                            size,
+                            is_root,
+                            start_chunk,
+                            ranges: (),
+                        });
+                    } else {
+                        // create a little tree just for this leaf
+                        let tree = BaoTree {
+                            start_chunk,
+                            size: ByteNum(size as u64),
+                            block_size: BlockSize(0),
+                        };
+                        for item in tree.ranges_pre_order_chunks_iter_ref(ranges, u8::MAX) {
+                            match item {
+                                BaoChunk::Parent {
+                                    is_root,
+                                    left,
+                                    right,
+                                    node,
+                                    ..
+                                } => {
+                                    self.buffer.push(BaoChunk::Parent {
+                                        is_root: false,
+                                        left,
+                                        right,
+                                        node,
+                                        ranges: (),
+                                    });
+                                }
+                                BaoChunk::Leaf {
+                                    size,
+                                    is_root,
+                                    start_chunk,
+                                    ..
+                                } => {
+                                    self.buffer.push(BaoChunk::Leaf {
+                                        size,
+                                        is_root,
+                                        start_chunk,
+                                        ranges: (),
+                                    });
+                                }
+                            }
+                        }
+                        self.buffer.reverse();
+                    }
+                }
+            }
+        }
+    }
+}
+
 self_cell! {
     pub(crate) struct PreOrderChunkIterInner {
         owner: range_collections::RangeSet2<ChunkNum>,
@@ -581,12 +689,22 @@ self_cell! {
     }
 }
 
+impl PreOrderChunkIterInner {
+    fn next(&mut self) -> Option<BaoChunk<&RangeSetRef<ChunkNum>>> {
+        self.with_dependent_mut(|_, iter| iter.next())
+    }
+
+    fn tree(&self) -> &BaoTree {
+        self.with_dependent(|_, iter| iter.tree())
+    }
+}
+
 /// An iterator that produces chunks in pre order
 pub struct PreOrderChunkIter(PreOrderChunkIterInner);
 
 impl fmt::Debug for PreOrderChunkIter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PreOrderChunkIter").finish()
+        f.debug_struct("PreOrderChunkIter").finish_non_exhaustive()
     }
 }
 
@@ -600,7 +718,7 @@ impl PreOrderChunkIter {
 
     /// The tree this iterator is iterating over.
     pub fn tree(&self) -> &BaoTree {
-        self.0.with_dependent(|_, iter| iter.tree())
+        self.0.tree()
     }
 }
 
@@ -608,7 +726,6 @@ impl Iterator for PreOrderChunkIter {
     type Item = BaoChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0
-            .with_dependent_mut(|_, iter| iter.next().map(|x| x.map_ranges(|_| ())))
+        self.0.next().map(|x| x.map_ranges(|_| ()))
     }
 }

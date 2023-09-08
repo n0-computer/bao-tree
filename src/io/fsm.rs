@@ -7,7 +7,7 @@
 //! without having to box the futures.
 use std::{io, result};
 
-use crate::{blake3, hash_subtree};
+use crate::{blake3, hash_subtree, iter::PreOrderChunkIter};
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};
@@ -21,12 +21,12 @@ use crate::{
         outboard::{PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
-    iter::{BaoChunk, PreOrderChunkIter},
+    iter::BaoChunk,
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::{DecodeError, StartDecodeError};
+use super::{sync::bao_encode_selected_recursive, DecodeError, StartDecodeError};
 
 /// An item of bao content
 ///
@@ -539,6 +539,7 @@ where
     O: Outboard,
     W: AsyncWrite + Unpin,
 {
+    let mut out_buf = Vec::new();
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
     let mut encoded = encoded;
@@ -589,12 +590,30 @@ where
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
                 let bytes = data.read_at(start.0, size).await?;
-                let actual = hash_subtree(start_chunk.0, &bytes, is_root);
+                let (actual, to_write) = if !ranges.is_all() {
+                    // we need to encode just a part of the data
+                    //
+                    // write into an out buffer to ensure we detect mismatches
+                    // before writing to the output.
+                    out_buf.clear();
+                    let actual = bao_encode_selected_recursive(
+                        start_chunk,
+                        &bytes,
+                        is_root,
+                        ranges,
+                        tree.block_size.0 as u32,
+                        &mut out_buf,
+                    );
+                    (actual, &out_buf[..])
+                } else {
+                    let actual = hash_subtree(start_chunk.0, &bytes, is_root);
+                    (actual, &bytes[..])
+                };
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
                 encoded
-                    .write_all(&bytes)
+                    .write_all(to_write)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
