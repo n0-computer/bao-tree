@@ -13,7 +13,7 @@ use crate::{
         Header, Leaf, Parent,
     },
     iter::{BaoChunk, ResponseChunk},
-    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
+    BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 use crate::{hash_subtree, iter::ResponseIterRef};
 use blake3::guts::parent_cv;
@@ -390,12 +390,8 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
             Position::Header { block_size, ranges } => {
                 let size =
                     read_len(&mut self.encoded).map_err(StartDecodeError::maybe_not_found)?;
-                // make sure the range is valid and canonical
-                if !range_ok(ranges, size.chunks()) {
-                    return Err(AnyDecodeError::InvalidQueryRange);
-                }
                 let tree = BaoTree::new(size, *block_size);
-                for elem in ResponseIterRef::new(tree, ranges, 0) {
+                for elem in ResponseIterRef::new(tree, ranges) {
                     println!("{:?}", elem);
                     match elem {
                         ResponseChunk::Leaf {
@@ -412,7 +408,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                     }
                 }
                 self.inner = Position::Content {
-                    iter: ResponseIterRef::new(tree, ranges, 0),
+                    iter: ResponseIterRef::new(tree, ranges),
                 };
                 return Ok(Some(Header { size }.into()));
             }
@@ -493,9 +489,6 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     let data = data;
     let mut encoded = encoded;
     let tree = outboard.tree();
-    if !range_ok(ranges, tree.chunks()) {
-        return Err(EncodeError::InvalidQueryRange);
-    }
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
     // write header
     encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
@@ -673,9 +666,6 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     let data = data;
     let mut encoded = encoded;
     let tree = outboard.tree();
-    if !range_ok(ranges, tree.chunks()) {
-        return Err(EncodeError::InvalidQueryRange);
-    }
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
     let mut out_buf = Vec::new();
     // write header
@@ -704,7 +694,6 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 let mut pair = [0u8; 64];
                 pair[..32].copy_from_slice(l_hash.as_bytes());
                 pair[32..].copy_from_slice(r_hash.as_bytes());
-                println!("writing parent {} {:?}", hex::encode(&pair), node);
                 encoded.write_all(&pair)?;
             }
             BaoChunk::Leaf {

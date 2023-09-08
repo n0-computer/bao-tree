@@ -17,12 +17,11 @@
 //! synchronous and asynchronous.
 #![deny(missing_docs)]
 use io::outboard::PostOrderMemOutboard;
-use range_collections::{range_set::RangeSetEntry, RangeSetRef};
+use range_collections::RangeSetRef;
 use std::{
     fmt::{self, Debug},
     io::Cursor,
-    ops::{Range, RangeFrom},
-    result,
+    ops::Range,
 };
 #[macro_use]
 mod macros;
@@ -322,28 +321,6 @@ impl ChunkNum {
     /// number of bytes that this number of chunks covers
     pub const fn to_bytes(&self) -> ByteNum {
         ByteNum(self.0 << 10)
-    }
-}
-
-/// truncate a range so that it overlaps with the range 0..end if possible, and has no extra boundaries behind end
-fn canonicalize_range(
-    range: &RangeSetRef<ChunkNum>,
-    end: ChunkNum,
-) -> result::Result<&RangeSetRef<ChunkNum>, RangeFrom<ChunkNum>> {
-    let (range, _) = range.split(end);
-    if !range.is_empty() {
-        Ok(range)
-    } else if !end.is_min_value() {
-        Err(end - 1..)
-    } else {
-        Err(end..)
-    }
-}
-
-fn range_ok(range: &RangeSetRef<ChunkNum>, end: ChunkNum) -> bool {
-    match canonicalize_range(range, end) {
-        Ok(_) => true,
-        Err(x) => x.start.is_min_value(),
     }
 }
 

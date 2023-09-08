@@ -25,7 +25,7 @@ use crate::{
         Leaf, Parent,
     },
     iter::BaoChunk,
-    range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
+    BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
@@ -308,10 +308,6 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
                 .map_err(StartDecodeError::maybe_not_found)?,
         );
         let tree = BaoTree::new(size, block_size);
-        // make sure the range is valid and canonical
-        if !range_ok(&ranges, size.chunks()) {
-            return Err(StartDecodeError::InvalidQueryRange);
-        }
         let state = ResponseDecoderReading(Box::new(ResponseDecoderReadingInner::new(
             tree, hash, ranges, encoded,
         )));
@@ -492,9 +488,6 @@ where
 {
     let mut encoded = encoded;
     let tree = outboard.tree();
-    if !range_ok(ranges, tree.chunks()) {
-        return Err(EncodeError::InvalidQueryRange);
-    }
     // write header
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())
@@ -552,9 +545,6 @@ where
     stack.push(outboard.root());
     let mut encoded = encoded;
     let tree = outboard.tree();
-    if !range_ok(ranges, tree.chunks()) {
-        return Err(EncodeError::InvalidQueryRange);
-    }
     // write header
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())

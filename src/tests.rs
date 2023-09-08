@@ -12,14 +12,14 @@ use smallvec::SmallVec;
 use crate::{
     blake3,
     io::{
-        sync::{DecodeResponseItem, Outboard},
+        sync::{select_nodes_recursive, DecodeResponseItem, Outboard},
         Leaf,
     },
+    iter::{ResponseChunk, ResponseIterRef},
     recursive_hash_subtree,
 };
 
 use super::{
-    canonicalize_range,
     io::outboard::{PostOrderMemOutboard, PreOrderMemOutboardMut},
     io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
     iter::{BaoChunk, NodeInfo},
@@ -39,16 +39,6 @@ macro_rules! prop_assert_tuple_eq {
         let (a, b) = $tuple;
         prop_assert_eq!(a, b);
     };
-}
-
-fn canonicalize_range_owned(range: &RangeSetRef<ChunkNum>, end: ByteNum) -> RangeSet2<ChunkNum> {
-    match canonicalize_range(range, end.chunks()) {
-        Ok(range) => {
-            let t = SmallVec::from(range.boundaries());
-            RangeSet2::new(t).unwrap()
-        }
-        Err(range) => RangeSet2::from(range),
-    }
 }
 
 fn make_test_data(n: usize) -> Vec<u8> {
@@ -72,24 +62,7 @@ fn bao_tree_blake3_impl(data: Vec<u8>) -> (blake3::Hash, blake3::Hash) {
     (expected, actual)
 }
 
-/// Given a *post order* outboard, encode a slice of data
-fn encode_ranges_2(
-    data: &[u8],
-    outboard: &[u8],
-    ranges: &RangeSetRef<ChunkNum>,
-    block_size: BlockSize,
-) -> Vec<u8> {
-    let size = ByteNum(data.len() as u64);
-    match canonicalize_range(ranges, size.chunks()) {
-        Ok(ranges) => encode_ranges_impl_2(data, ranges, block_size),
-        Err(range) => {
-            let ranges = RangeSet2::from(range);
-            encode_ranges_impl_2(data, &ranges, block_size)
-        }
-    }
-}
-
-fn encode_ranges_impl_2(
+fn encode_ranges_reference(
     data: &[u8],
     ranges: &RangeSetRef<ChunkNum>,
     block_size: BlockSize,
@@ -105,33 +78,6 @@ fn encode_ranges_impl_2(
         block_size.0 as u32,
         &mut res,
     );
-    res
-}
-
-fn encode_ranges_impl(
-    data: &[u8],
-    outboard: &[u8],
-    ranges: &RangeSetRef<ChunkNum>,
-    block_size: BlockSize,
-) -> Vec<u8> {
-    let mut res = Vec::new();
-    let tree = BaoTree::new(ByteNum(data.len() as u64), block_size);
-    res.extend_from_slice(&tree.size.0.to_le_bytes());
-    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
-        match item {
-            BaoChunk::Parent { node, .. } => {
-                let offset = tree.post_order_offset(node).unwrap();
-                let hash_offset = usize::try_from(offset.value() * 64).unwrap();
-                res.extend_from_slice(&outboard[hash_offset..hash_offset + 64]);
-            }
-            BaoChunk::Leaf {
-                size, start_chunk, ..
-            } => {
-                let start = start_chunk.to_bytes().to_usize();
-                res.extend_from_slice(&data[start..start + size]);
-            }
-        }
-    }
     res
 }
 
@@ -182,21 +128,28 @@ fn encode_slice_reference(data: &[u8], chunk_range: Range<ChunkNum>) -> (Vec<u8>
 }
 
 fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNum>) {
-    let expected = encode_slice_reference(&data, range.clone()).0;
-    let ob = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
-    let hash = ob.root();
-    let outboard = ob.into_inner_with_suffix();
     // extend empty range to contain at least 1 byte
     if range.start == range.end {
         range.end.0 += 1;
     };
+    let expected = encode_slice_reference(&data, range.clone()).0;
+    let ob = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
+    let hash = ob.root();
+    let outboard = ob.into_inner_with_suffix();
     let ranges = RangeSet2::from(range);
-    let actual = encode_ranges_2(&data, &outboard, &ranges, BlockSize::DEFAULT);
+    let actual = encode_ranges_reference(&data, &ranges, BlockSize::DEFAULT);
     assert_eq!(expected.len(), actual.len());
     assert_eq!(expected, actual);
 
-    // for this we have to canonicalize the range before
-    let ranges = canonicalize_range_owned(&ranges, ByteNum(data.len() as u64));
+    let content_range = RangeSet2::from(..ByteNum(data.len() as u64).chunks());
+    if !content_range.is_superset(&ranges) {
+        // the behaviour of bao/abao and us is different in this case.
+        // if the query ranges are non empty outside the content range, we will return
+        // the last chunk of the content range, while bao/abao will not.
+        //
+        // this is intentional. it provides a way to get the size of a file
+        return;
+    }
     let mut actual2 = Vec::new();
     let ob = PostOrderMemOutboard::load(hash, &outboard, BlockSize::DEFAULT).unwrap();
     encode_ranges(&data, &ob, &ranges, Cursor::new(&mut actual2)).unwrap();
@@ -213,9 +166,8 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
 fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     let range = ChunkNum(range.start)..ChunkNum(range.end);
     let (encoded, root) = encode_slice_reference(&data, range.clone());
-    let size = ByteNum(data.len() as u64);
     let expected = data;
-    let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
+    let ranges = RangeSet2::from(range);
     let mut ec = Cursor::new(encoded);
     for item in decode_ranges_into_chunks(root, BlockSize::DEFAULT, &mut ec, &ranges) {
         let (pos, slice) = item.unwrap();
@@ -224,20 +176,22 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     }
 }
 
-#[cfg(feature = "fsm")]
+#[cfg(feature = "tokio_fsm")]
 mod fsm_tests {
+    use super::*;
+    use crate::io::fsm::*;
+
     /// range is a range of chunks. Just using u64 for convenience in tests
     async fn bao_tree_decode_slice_fsm_impl(data: Vec<u8>, range: Range<u64>) {
         let range = ChunkNum(range.start)..ChunkNum(range.end);
         let (encoded, root) = encode_slice_reference(&data, range.clone());
-        let size = ByteNum(data.len() as u64);
         let expected = data;
-        let ranges = canonicalize_range_owned(&RangeSet2::from(range), size);
+        let ranges = RangeSet2::from(range);
         let mut ec = Cursor::new(encoded);
         let at_start = ResponseDecoderStart::new(root, ranges, BlockSize::DEFAULT, &mut ec);
         let (mut reading, _size) = at_start.next().await.unwrap();
         while let ResponseDecoderReadingNext::More((next_state, item)) = reading.next().await {
-            if let DecodeResponseItem::Leaf(Leaf { offset, data }) = item.unwrap() {
+            if let BaoContentItem::Leaf(Leaf { offset, data }) = item.unwrap() {
                 let pos = offset.to_usize();
                 assert_eq!(expected[pos..pos + data.len()], *data);
             }
@@ -333,19 +287,12 @@ fn bao_tree_outboard_levels() {
 /// encodes the data as outboard with the given chunk_group_log, then uses that outboard to
 /// encode a slice of the data, and compares the result to the original data
 fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, block_size: BlockSize) {
-    let ob = BaoTree::outboard_post_order_mem(&data, block_size);
-    let root = ob.root();
-    let outboard = ob.into_inner_with_suffix();
+    let root = blake3::hash(&data);
     // extend empty range to contain at least 1 byte
     if range.start == range.end {
         range.end.0 += 1;
     };
-    let encoded = encode_ranges_2(
-        &data,
-        &outboard,
-        &RangeSet2::from(range.clone()),
-        block_size,
-    );
+    let encoded = encode_ranges_reference(&data, &RangeSet2::from(range.clone()), block_size);
     let expected = data.clone();
     let mut all_ranges: range_collections::RangeSet<[ByteNum; 2]> = RangeSet2::empty();
     println!("{} {:?} {}", data.len(), range, block_size.0);
@@ -722,6 +669,7 @@ fn iterate_part_preorder_reference<'a>(
         if ranges.is_empty() {
             return;
         }
+        let is_half_leaf = !tree.is_persisted(node);
         // the middle chunk of the node
         let mid = node.mid().to_chunks(tree.block_size);
         // the start chunk of the node
@@ -729,10 +677,13 @@ fn iterate_part_preorder_reference<'a>(
         // check if the node is fully included
         let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
         // split the ranges into left and right
-        let (l_ranges, r_ranges) = ranges.split(mid);
+        let (l_ranges, r_ranges) = if !is_half_leaf {
+            ranges.split(mid)
+        } else {
+            (ranges, ranges)
+        };
 
         let query_leaf = node.is_leaf() || (full && node.level() <= max_skip_level);
-        let is_half_leaf = !tree.is_persisted(node);
         // push no matter if leaf or not
         res.push(NodeInfo {
             node,
@@ -934,7 +885,74 @@ fn abcd() {
     }
 }
 
+fn last_chunk(size: u64) -> Range<u64> {
+    const CHUNK_LEN: u64 = 1024;
+    const MASK: u64 = CHUNK_LEN - 1;
+    if (size & MASK) == 0 {
+        size - CHUNK_LEN..size
+    } else {
+        (size & !MASK)..size
+    }
+}
+
+fn select_last_block_impl(size: u64, block_size: u8) -> (Vec<Range<u64>>, Vec<Range<u64>>) {
+    let range = RangeSet2::from(ChunkNum(u64::MAX)..);
+    let selection =
+        ResponseIterRef::new(BaoTree::new(ByteNum(size), BlockSize(block_size)), &range)
+            .filter_map(|item| match item {
+                ResponseChunk::Leaf {
+                    start_chunk, size, ..
+                } => {
+                    let start = start_chunk.to_bytes().0;
+                    let end = start + (size as u64);
+                    Some(start..end)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+    (selection, vec![last_chunk(size)])
+}
+
+fn encode_last_chunk_impl(size: u64, block_size: u8) -> (Vec<u8>, Vec<u8>) {
+    let range = RangeSet2::from(ChunkNum(u64::MAX)..);
+    let data = make_test_data(size as usize);
+    let outboard = BaoTree::outboard_post_order_mem(&data, BlockSize(block_size));
+    let mut encoded1 = Vec::new();
+    encode_ranges_validated(
+        &data,
+        &outboard,
+        &range,
+        &mut encoded1,
+    ).unwrap();
+    let lc = last_chunk(size);
+    let sc = ByteNum(lc.start).chunks();
+    let ec = ByteNum(lc.end).chunks();
+    let mut encoded2 = Vec::new();
+    encode_ranges_validated(
+        &data,
+        &outboard,
+        &RangeSet2::from(sc..ec),
+        &mut encoded2,
+    ).unwrap();
+    (encoded1, encoded2)
+}
+
+#[test]
+fn select_last_block_0() {
+    assert_tuple_eq!(select_last_block_impl(1, 0));
+}
+
 proptest! {
+
+    #[test]
+    fn select_last_block(size in 1..100000u64, block_size in 0..4u8) {
+        assert_tuple_eq!(select_last_block_impl(size, block_size));
+    }
+
+    #[test]
+    fn encode_last_block(size in 1..100000u64, block_size in 0..4u8) {
+        assert_tuple_eq!(encode_last_chunk_impl(size, block_size));
+    }
 
     #[test]
     fn subtract_block_size(node in any::<u32>(), diff in 0..4u8) {

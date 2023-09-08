@@ -84,14 +84,19 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
             if ranges.is_empty() {
                 continue;
             }
-            // the middle chunk of the node
-            let mid = node.mid().to_chunks(tree.block_size);
+            let is_half_leaf = !tree.is_persisted(node);
+            let (l_ranges, r_ranges) = if !is_half_leaf {
+                // the middle chunk of the node
+                let mid = node.mid().to_chunks(tree.block_size);
+                // split the ranges into left and right
+                ranges.split(mid)
+            } else {
+                (ranges, ranges)
+            };
             // the start chunk of the node
             let start = node.block_range().start.to_chunks(tree.block_size);
             // check if the node is fully included
             let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
-            // split the ranges into left and right
-            let (l_ranges, r_ranges) = ranges.split(mid);
             // we can't recurse if the node is a leaf
             // we don't want to recurse if the node is full and below the minimum level
             let query_leaf = node.is_leaf() || (full && node.level() <= self.max_skip_level as u32);
@@ -105,7 +110,6 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
             }
             let is_root = self.is_root;
             self.is_root = false;
-            let is_half_leaf = !tree.is_persisted(node);
             // emit the node in any case
             break Some(NodeInfo {
                 node,
@@ -585,9 +589,9 @@ pub struct ResponseIterRef<'a> {
 
 impl<'a> ResponseIterRef<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
         Self {
-            inner: PreOrderChunkIterRef::new(tree, ranges, max_skip_level),
+            inner: PreOrderChunkIterRef::new(tree, ranges, 0),
             buffer: SmallVec::new(),
         }
     }
@@ -684,7 +688,7 @@ impl ResponseIter {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: RangeSet2<ChunkNum>) -> Self {
         Self(ResponseIterInner::new(ranges, |ranges| {
-            ResponseIterRef::new(tree, ranges, 0)
+            ResponseIterRef::new(tree, ranges)
         }))
     }
 
