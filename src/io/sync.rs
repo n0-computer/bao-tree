@@ -594,26 +594,23 @@ pub(crate) fn bao_encode_selected_recursive(
     }
 }
 
-/// Encode ranges relevant to a query from a slice and outboard to a buffer
+/// Select nodes relevant to a query
 ///
-/// This will compute the root hash, so it will have to traverse the entire tree.
-/// The `ranges` parameter just controls which parts of the data are written.
-///
-/// Except for writing to a buffer, this is the same as [hash_subtree].
+/// This is the receive side equivalent of [bao_encode_selected_recursive].
 pub(crate) fn select_nodes_recursive(
     start_chunk: ChunkNum,
     size: usize,
     is_root: bool,
     ranges: &RangeSetRef<ChunkNum>,
     max_skip_level: u32,
-    res: &mut Vec<ResponseChunk>,
+    push: &mut impl FnMut(ResponseChunk),
 ) {
     if ranges.is_empty() {
         return;
     }
     use blake3::guts::CHUNK_LEN;
     if size <= CHUNK_LEN {
-        res.push(ResponseChunk::Leaf {
+        push(ResponseChunk::Leaf {
             start_chunk,
             size,
             is_root,
@@ -623,7 +620,7 @@ pub(crate) fn select_nodes_recursive(
         let chunks = chunks.next_power_of_two();
         let level = chunks.trailing_zeros();
         if ranges.is_all() && level <= max_skip_level {
-            res.push(ResponseChunk::Leaf {
+            push(ResponseChunk::Leaf {
                 start_chunk,
                 size,
                 is_root,
@@ -633,7 +630,7 @@ pub(crate) fn select_nodes_recursive(
             let mid_bytes = mid * CHUNK_LEN;
             let mid_chunk = start_chunk + (mid as u64);
             let (l_ranges, r_ranges) = ranges.split(mid_chunk);
-            res.push(ResponseChunk::Parent {
+            push(ResponseChunk::Parent {
                 node: TreeNode(0), // todo
                 is_root: is_root,
                 left: !l_ranges.is_empty(),
@@ -641,14 +638,21 @@ pub(crate) fn select_nodes_recursive(
                 is_subchunk: true,
             });
             // recurse to the left and right to compute the hashes and emit data
-            select_nodes_recursive(start_chunk, mid_bytes, false, l_ranges, max_skip_level, res);
+            select_nodes_recursive(
+                start_chunk,
+                mid_bytes,
+                false,
+                l_ranges,
+                max_skip_level,
+                push,
+            );
             select_nodes_recursive(
                 mid_chunk,
                 size - mid_bytes,
                 false,
                 r_ranges,
                 max_skip_level,
-                res,
+                push,
             );
         }
     }
