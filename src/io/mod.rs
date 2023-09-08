@@ -23,7 +23,7 @@ pub struct Header {
 #[derive(Debug)]
 pub struct Parent {
     /// The node in the tree for which the hashes are.
-    pub node: TreeNode,
+    pub node: Option<TreeNode>,
     /// The pair of hashes for the node.
     pub pair: (blake3::Hash, blake3::Hash),
 }

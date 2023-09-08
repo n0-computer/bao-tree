@@ -64,7 +64,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
             tree_filled_size: tree.filled_size(),
             max_skip_level,
             stack,
-            is_root: tree.start_chunk == 0,
+            is_root: tree.is_root,
         }
     }
 
@@ -277,6 +277,35 @@ enum Prev {
     Left,
     Right,
     Done,
+}
+
+/// A chunk describes what to expect from a response stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseChunk {
+    /// expect a 64 byte parent node.
+    ///
+    /// To validate, use parent_cv using the is_root value
+    Parent {
+        /// The tree node, useful for error reporting
+        node: Option<TreeNode>,
+        /// This is the root, to be passed to parent_cv
+        is_root: bool,
+        /// Push the left hash to the stack, since it will be needed later
+        left: bool,
+        /// Push the right hash to the stack, since it will be needed later
+        right: bool,
+    },
+    /// expect data of size `size`
+    ///
+    /// To validate, use hash_block using the is_root and start_chunk values
+    Leaf {
+        /// Start chunk, to be passed to hash_block
+        start_chunk: ChunkNum,
+        /// Size of the data to expect. Will be chunk_group_bytes for all but the last block.
+        size: usize,
+        /// This is the root, to be passed to hash_block
+        is_root: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,7 +609,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
 #[derive(Debug)]
 pub struct ResponseIterRef<'a> {
     inner: PreOrderChunkIterRef<'a>,
-    buffer: SmallVec<[BaoChunk; 10]>,
+    buffer: SmallVec<[ResponseChunk; 10]>,
 }
 
 impl<'a> ResponseIterRef<'a> {
@@ -598,7 +627,7 @@ impl<'a> ResponseIterRef<'a> {
     }
 }
 impl<'a> Iterator for ResponseIterRef<'a> {
-    type Item = BaoChunk;
+    type Item = ResponseChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -613,12 +642,11 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                     left,
                     ..
                 } => {
-                    break Some(BaoChunk::Parent {
-                        node,
+                    break Some(ResponseChunk::Parent {
+                        node: Some(node),
                         is_root,
                         right,
                         left,
-                        ranges: (),
                     });
                 }
                 BaoChunk::Leaf {
@@ -628,11 +656,10 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                     ranges,
                 } => {
                     if self.tree().block_size == BlockSize(0) || ranges.is_all() {
-                        break Some(BaoChunk::Leaf {
+                        break Some(ResponseChunk::Leaf {
                             size,
                             is_root,
                             start_chunk,
-                            ranges: (),
                         });
                     } else {
                         // create a little tree just for this leaf
@@ -640,6 +667,7 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                             start_chunk,
                             size: ByteNum(size as u64),
                             block_size: BlockSize(0),
+                            is_root,
                         };
                         for item in tree.ranges_pre_order_chunks_iter_ref(ranges, u8::MAX) {
                             match item {
@@ -650,12 +678,11 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                                     node,
                                     ..
                                 } => {
-                                    self.buffer.push(BaoChunk::Parent {
-                                        is_root: false,
+                                    self.buffer.push(ResponseChunk::Parent {
+                                        node: None,
+                                        is_root,
                                         left,
                                         right,
-                                        node,
-                                        ranges: (),
                                     });
                                 }
                                 BaoChunk::Leaf {
@@ -664,11 +691,10 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                                     start_chunk,
                                     ..
                                 } => {
-                                    self.buffer.push(BaoChunk::Leaf {
+                                    self.buffer.push(ResponseChunk::Leaf {
                                         size,
                                         is_root,
                                         start_chunk,
-                                        ranges: (),
                                     });
                                 }
                             }

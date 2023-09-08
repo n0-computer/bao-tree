@@ -12,7 +12,7 @@ use crate::{
         outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
         Header, Leaf, Parent,
     },
-    iter::BaoChunk,
+    iter::{BaoChunk, ResponseChunk},
     range_ok, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 use crate::{hash_subtree, iter::ResponseIterRef};
@@ -398,19 +398,20 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 for elem in ResponseIterRef::new(tree, ranges, 0) {
                     println!("{:?}", elem);
                     match elem {
-                        BaoChunk::Leaf {
+                        ResponseChunk::Leaf {
                             start_chunk,
                             size,
                             is_root,
-                            ranges,
                         } => {
                             println!(
                                 "{:?}",
                                 start_chunk.to_bytes().0..start_chunk.to_bytes().0 + (size as u64)
                             )
                         }
-                        BaoChunk::Parent { node, .. } => {
-                            println!("{:?}", tree.byte_range(node))
+                        ResponseChunk::Parent { node, .. } => {
+                            if let Some(node) = node {
+                                println!("{:?}", tree.byte_range(node))
+                            }
                         }
                     }
                 }
@@ -421,12 +422,11 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
             }
         };
         match inner.next() {
-            Some(BaoChunk::Parent {
+            Some(ResponseChunk::Parent {
                 is_root,
                 left,
                 right,
                 node,
-                ..
             }) => {
                 let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)
                     .map_err(|e| DecodeError::maybe_parent_not_found(e, node))?;
@@ -443,7 +443,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 }
                 Ok(Some(Parent { node, pair }.into()))
             }
-            Some(BaoChunk::Leaf {
+            Some(ResponseChunk::Leaf {
                 size,
                 is_root,
                 start_chunk,
@@ -560,7 +560,7 @@ pub(crate) fn bao_encode_selected_recursive(
         let emit_parent = !ranges.is_empty() && !(ranges.is_all() && level <= max_skip_level);
         let hash_offset = if emit_parent {
             // make some room for the hashes
-            println!("emit parent {} {}", res.len() - 8, data.len());
+            println!("emit parent {} {}", res.len(), data.len());
             res.extend_from_slice(&[0xFFu8; 64]);
             Some(res.len() - 64)
         } else {
@@ -710,14 +710,16 @@ where
                 tree = Some(BaoTree::new(size, block_size));
             }
             DecodeResponseItem::Parent(Parent { node, pair }) => {
-                let outboard = if let Some(outboard) = outboard.as_mut() {
-                    outboard
-                } else {
-                    let create = create.take().unwrap();
-                    outboard = Some(create(tree.take().unwrap(), root)?);
-                    outboard.as_mut().unwrap()
-                };
-                outboard.save(node, &pair)?;
+                if let Some(node) = node {
+                    let outboard = if let Some(outboard) = outboard.as_mut() {
+                        outboard
+                    } else {
+                        let create = create.take().unwrap();
+                        outboard = Some(create(tree.take().unwrap(), root)?);
+                        outboard.as_mut().unwrap()
+                    };
+                    outboard.save(node, &pair)?;
+                }
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
                 target.write_all_at(offset.0, &data)?;
@@ -757,7 +759,7 @@ pub fn outboard_post_order(
     block_size: BlockSize,
     mut outboard: impl Write,
 ) -> io::Result<blake3::Hash> {
-    let tree = BaoTree::new_with_start_chunk(ByteNum(size), block_size, ChunkNum(0));
+    let tree = BaoTree::new(ByteNum(size), block_size);
     let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
     let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
     outboard.write_all(&size.to_le_bytes())?;

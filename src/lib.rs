@@ -66,6 +66,13 @@ fn recursive_hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake
 /// Defines a Bao tree.
 ///
 /// This is just the specification of the tree, it does not contain any actual data.
+/// 
+/// Usually trees are self-contained. This means that the tree starts at chunk 0,
+/// and the hash of the root node is computed with the is_root flag set to true.
+/// 
+/// For some internal use, it is also possible to create trees that are just subtrees
+/// of a larger tree. In this case, the start_chunk is the chunk number of the first
+/// chunk in the tree, and the is_root flag can be false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaoTree {
     /// Total number of bytes in the file
@@ -74,6 +81,8 @@ pub struct BaoTree {
     block_size: BlockSize,
     /// start chunk of the tree, 0 for self-contained trees
     start_chunk: ChunkNum,
+    /// true if this is a self-contained tree
+    is_root: bool,
 }
 
 /// An offset of a node in a post-order outboard
@@ -96,14 +105,10 @@ impl PostOrderOffset {
 }
 
 impl BaoTree {
-    /// Create a new empty BaoTree with the given block size
-    pub fn empty(block_size: BlockSize) -> Self {
-        Self::new(ByteNum(0), block_size)
-    }
 
-    /// Create a new BaoTree
+    /// Create a new self contained BaoTree
     pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
-        Self::new_with_start_chunk(size, block_size, ChunkNum(0))
+        Self::new_with_start_chunk(size, block_size, ChunkNum(0), true)
     }
 
     /// Compute the post order outboard for the given data, returning a in mem data structure
@@ -112,7 +117,7 @@ impl BaoTree {
         block_size: BlockSize,
     ) -> PostOrderMemOutboard {
         let data = data.as_ref();
-        let tree = Self::new_with_start_chunk(ByteNum(data.len() as u64), block_size, ChunkNum(0));
+        let tree = Self::new(ByteNum(data.len() as u64), block_size);
         let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
         let mut res = Vec::with_capacity(outboard_len);
         let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
@@ -205,11 +210,13 @@ impl BaoTree {
         size: ByteNum,
         block_size: BlockSize,
         start_chunk: ChunkNum,
+        is_root: bool,
     ) -> Self {
         Self {
             size,
             block_size,
             start_chunk,
+            is_root,
         }
     }
 
