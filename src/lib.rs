@@ -66,10 +66,10 @@ fn recursive_hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake
 /// Defines a Bao tree.
 ///
 /// This is just the specification of the tree, it does not contain any actual data.
-/// 
+///
 /// Usually trees are self-contained. This means that the tree starts at chunk 0,
 /// and the hash of the root node is computed with the is_root flag set to true.
-/// 
+///
 /// For some internal use, it is also possible to create trees that are just subtrees
 /// of a larger tree. In this case, the start_chunk is the chunk number of the first
 /// chunk in the tree, and the is_root flag can be false.
@@ -105,7 +105,6 @@ impl PostOrderOffset {
 }
 
 impl BaoTree {
-
     /// Create a new self contained BaoTree
     pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
         Self::new_with_start_chunk(size, block_size, ChunkNum(0), true)

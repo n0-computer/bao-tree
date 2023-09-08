@@ -115,9 +115,7 @@ impl From<AnyDecodeError> for io::Error {
             AnyDecodeError::Io(e) => e,
             AnyDecodeError::ParentHashMismatch(node) => io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "parent hash mismatch {:?}", node,
-                ),
+                format!("parent hash mismatch {:?}", node,),
             ),
             AnyDecodeError::LeafHashMismatch(chunk) => io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -169,9 +167,7 @@ impl From<DecodeError> for io::Error {
             DecodeError::Io(e) => e,
             DecodeError::ParentHashMismatch(node) => io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "parent hash mismatch {:?}", node,
-                ),
+                format!("parent hash mismatch {:?}", node,),
             ),
             DecodeError::LeafHashMismatch(chunk) => io::Error::new(
                 io::ErrorKind::InvalidData,

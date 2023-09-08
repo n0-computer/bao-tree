@@ -436,7 +436,11 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 if parent_hash != actual {
                     return Err(DecodeError::ParentHashMismatch(Some(node)));
                 }
-                Parent { pair, node: Some(node) }.into()
+                Parent {
+                    pair,
+                    node: Some(node),
+                }
+                .into()
             }
             BaoChunk::Leaf {
                 size,
