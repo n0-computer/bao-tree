@@ -151,7 +151,7 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
         return;
     }
     let mut actual2 = Vec::new();
-    let ob = PostOrderMemOutboard::load(hash, &outboard, BlockSize::DEFAULT).unwrap();
+    let ob = PostOrderMemOutboard::load(hash, outboard, BlockSize::DEFAULT).unwrap();
     encode_ranges(&data, &ob, &ranges, Cursor::new(&mut actual2)).unwrap();
     assert_eq!(expected.len(), actual2.len());
     assert_eq!(expected, actual2);
@@ -822,8 +822,8 @@ fn bao_encode_selected_recursive_0() {
         actual_encoded.len() - data.len()
     };
     assert_eq!(overhead(&data, 0), 64 * 2);
-    assert_eq!(overhead(&data, 1), 64 * 1);
-    assert_eq!(overhead(&data, 2), 64 * 0);
+    assert_eq!(overhead(&data, 1), 64);
+    assert_eq!(overhead(&data, 2), 0);
 }
 
 /// Reference implementation of encode_ranges_validated that uses the simple recursive impl
@@ -837,7 +837,7 @@ fn encode_selected_reference(
     let max_skip_level = block_size.0 as u32;
     let hash = crate::io::sync::bao_encode_selected_recursive(
         ChunkNum(0),
-        &data,
+        data,
         true,
         ranges,
         max_skip_level,
@@ -865,15 +865,15 @@ fn encode_single_chunk_large() {
     // check the expected size for various ranges
     let ranges = RangeSet2::from(..ChunkNum(1));
     let encoded = get_encoded(&ranges);
-    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+    assert_eq!(encoded.len(), 8 + 15 * 64 + 1024);
 
     let ranges = RangeSet2::from(ChunkNum(1000)..ChunkNum(1001));
     let encoded = get_encoded(&ranges);
-    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+    assert_eq!(encoded.len(), 8 + 15 * 64 + 1024);
 
     let ranges = RangeSet2::from(ChunkNum(3000)..ChunkNum(3001));
     let encoded = get_encoded(&ranges);
-    assert_eq!(encoded.len() - 8, 1024 + 15 * 64);
+    assert_eq!(encoded.len(), 8 + 15 * 64 + 1024);
 }
 
 fn last_chunk(size: u64) -> Range<u64> {

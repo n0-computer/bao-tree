@@ -547,6 +547,7 @@ pub(crate) fn bao_encode_selected_recursive(
         // just the data.
         //
         // todo: maybe call into blake3::guts::hash_subtree directly for this case? it would be faster.
+        #[allow(clippy::nonminimal_bool)]
         let emit_parent = !query.is_empty() && !(query.is_all() && level <= max_skip_level);
         let hash_offset = if emit_parent {
             // make some room for the hashes
@@ -622,7 +623,7 @@ pub(crate) fn select_nodes_recursive(
             let (l_ranges, r_ranges) = ranges.split(mid_chunk);
             emit(ResponseChunk::Parent {
                 node: TreeNode(0), // todo
-                is_root: is_root,
+                is_root,
                 left: !l_ranges.is_empty(),
                 right: !r_ranges.is_empty(),
                 is_subchunk: true,
@@ -724,6 +725,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                     (actual, &out_buf[..])
                 } else {
                     let actual = hash_subtree(start_chunk.0, buf, is_root);
+                    #[allow(clippy::redundant_slicing)]
                     (actual, &buf[..])
                 };
                 if actual != expected {
