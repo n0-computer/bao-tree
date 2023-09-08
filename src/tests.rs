@@ -737,12 +737,13 @@ fn iterate_part_preorder_reference<'a>(
         }
     }
     let mut res = Vec::new();
+    let can_be_root = tree.start_chunk == 0;
     iterate_part_rec(
         tree,
         tree.root(),
         ranges,
         max_skip_level as u32,
-        tree.is_root,
+        can_be_root,
         &mut res,
     );
     res
