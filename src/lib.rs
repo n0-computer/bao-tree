@@ -79,10 +79,10 @@ pub struct BaoTree {
     size: ByteNum,
     /// Log base 2 of the chunk group size
     block_size: BlockSize,
-    /// start chunk of the tree, 0 for self-contained trees
-    start_chunk: ChunkNum,
-    /// true if this is a self-contained tree
+    /// true if this is a self-contained tree, false if it is part of a larger tree
     is_root: bool,
+    /// start chunk of the tree, can only be non-zero if this is not a self-contained tree
+    start_chunk: ChunkNum,
 }
 
 /// An offset of a node in a post-order outboard
@@ -107,7 +107,7 @@ impl PostOrderOffset {
 impl BaoTree {
     /// Create a new self contained BaoTree
     pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
-        Self::new_with_start_chunk(size, block_size, ChunkNum(0), true)
+        Self::new_with_start_chunk(size, block_size, true, ChunkNum(0))
     }
 
     /// Compute the post order outboard for the given data, returning a in mem data structure
@@ -208,9 +208,10 @@ impl BaoTree {
     pub fn new_with_start_chunk(
         size: ByteNum,
         block_size: BlockSize,
-        start_chunk: ChunkNum,
         is_root: bool,
+        start_chunk: ChunkNum,
     ) -> Self {
+        debug_assert!((start_chunk == 0) || !is_root);
         Self {
             size,
             block_size,

@@ -401,7 +401,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                         ResponseChunk::Leaf {
                             start_chunk,
                             size,
-                            is_root,
+                            ..
                         } => {
                             println!(
                                 "{:?}",
