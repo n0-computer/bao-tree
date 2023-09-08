@@ -529,13 +529,13 @@ pub(crate) fn bao_encode_selected_recursive(
     start_chunk: ChunkNum,
     data: &[u8],
     is_root: bool,
-    ranges: &RangeSetRef<ChunkNum>,
+    query: &RangeSetRef<ChunkNum>,
     max_skip_level: u32,
     res: &mut Vec<u8>,
 ) -> blake3::Hash {
     use blake3::guts::{ChunkState, CHUNK_LEN};
     if data.len() <= CHUNK_LEN {
-        if !ranges.is_empty() {
+        if !query.is_empty() {
             res.extend_from_slice(data);
         }
         let mut hasher = ChunkState::new(start_chunk.0);
@@ -548,20 +548,15 @@ pub(crate) fn bao_encode_selected_recursive(
         let mid = chunks / 2;
         let mid_bytes = mid * CHUNK_LEN;
         let mid_chunk = start_chunk + (mid as u64);
-        let (l_ranges, r_ranges) = ranges.split(mid_chunk);
+        let (l_ranges, r_ranges) = query.split(mid_chunk);
         // for empty ranges, we don't want to emit anything.
         // for full ranges where the level is at or below max_skip_level, we want to emit
         // just the data.
         //
         // todo: maybe call into blake3::guts::hash_subtree directly for this case? it would be faster.
-        let emit_parent = !ranges.is_empty() && !(ranges.is_all() && level <= max_skip_level);
+        let emit_parent = !query.is_empty() && !(query.is_all() && level <= max_skip_level);
         let hash_offset = if emit_parent {
             // make some room for the hashes
-            println!(
-                "emit parent left: {} right: {}",
-                !l_ranges.is_empty(),
-                !r_ranges.is_empty()
-            );
             res.extend_from_slice(&[0xFFu8; 64]);
             Some(res.len() - 64)
         } else {
@@ -588,7 +583,6 @@ pub(crate) fn bao_encode_selected_recursive(
         if let Some(o) = hash_offset {
             res[o..o + 32].copy_from_slice(left.as_bytes());
             res[o + 32..o + 64].copy_from_slice(right.as_bytes());
-            println!("writing virtua {}", hex::encode(&res[o..o + 64]));
         }
         blake3::guts::parent_cv(&left, &right, is_root)
     }
@@ -597,20 +591,21 @@ pub(crate) fn bao_encode_selected_recursive(
 /// Select nodes relevant to a query
 ///
 /// This is the receive side equivalent of [bao_encode_selected_recursive].
+/// It does not do any hashing, but just emits the nodes that are relevant to a query.
 pub(crate) fn select_nodes_recursive(
     start_chunk: ChunkNum,
     size: usize,
     is_root: bool,
     ranges: &RangeSetRef<ChunkNum>,
     max_skip_level: u32,
-    push: &mut impl FnMut(ResponseChunk),
+    emit: &mut impl FnMut(ResponseChunk),
 ) {
     if ranges.is_empty() {
         return;
     }
     use blake3::guts::CHUNK_LEN;
     if size <= CHUNK_LEN {
-        push(ResponseChunk::Leaf {
+        emit(ResponseChunk::Leaf {
             start_chunk,
             size,
             is_root,
@@ -620,17 +615,19 @@ pub(crate) fn select_nodes_recursive(
         let chunks = chunks.next_power_of_two();
         let level = chunks.trailing_zeros();
         if ranges.is_all() && level <= max_skip_level {
-            push(ResponseChunk::Leaf {
+            // we are allowed to just emit the entire data as a leaf
+            emit(ResponseChunk::Leaf {
                 start_chunk,
                 size,
                 is_root,
             });
         } else {
+            // split in half and recurse
             let mid = chunks / 2;
             let mid_bytes = mid * CHUNK_LEN;
             let mid_chunk = start_chunk + (mid as u64);
             let (l_ranges, r_ranges) = ranges.split(mid_chunk);
-            push(ResponseChunk::Parent {
+            emit(ResponseChunk::Parent {
                 node: TreeNode(0), // todo
                 is_root: is_root,
                 left: !l_ranges.is_empty(),
@@ -644,7 +641,7 @@ pub(crate) fn select_nodes_recursive(
                 false,
                 l_ranges,
                 max_skip_level,
-                push,
+                emit,
             );
             select_nodes_recursive(
                 mid_chunk,
@@ -652,7 +649,7 @@ pub(crate) fn select_nodes_recursive(
                 false,
                 r_ranges,
                 max_skip_level,
-                push,
+                emit,
             );
         }
     }

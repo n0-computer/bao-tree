@@ -7,7 +7,10 @@
 //! without having to box the futures.
 use std::{io, result};
 
-use crate::{blake3, hash_subtree, iter::PreOrderChunkIter};
+use crate::{
+    blake3, hash_subtree,
+    iter::{ResponseChunk, ResponseIter},
+};
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};
@@ -328,7 +331,7 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
 
 #[derive(Debug)]
 struct ResponseDecoderReadingInner<R> {
-    iter: PreOrderChunkIter,
+    iter: ResponseIter,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
     buf: BytesMut,
@@ -337,7 +340,7 @@ struct ResponseDecoderReadingInner<R> {
 impl<R> ResponseDecoderReadingInner<R> {
     fn new(tree: BaoTree, hash: blake3::Hash, ranges: RangeSet2<ChunkNum>, encoded: R) -> Self {
         let mut res = Self {
-            iter: PreOrderChunkIter::new(tree, ranges),
+            iter: ResponseIter::new(tree, ranges),
             stack: SmallVec::new(),
             encoded,
             buf: BytesMut::with_capacity(tree.chunk_group_bytes().to_usize()),
@@ -373,7 +376,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         let mut stack = SmallVec::new();
         stack.push(hash);
         Self(Box::new(ResponseDecoderReadingInner {
-            iter: PreOrderChunkIter::new(tree, ranges),
+            iter: ResponseIter::new(tree, ranges),
             stack,
             encoded,
             buf: BytesMut::new(),
@@ -405,9 +408,12 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         &self.0.stack[0]
     }
 
-    async fn next0(&mut self, chunk: BaoChunk) -> std::result::Result<BaoContentItem, DecodeError> {
+    async fn next0(
+        &mut self,
+        chunk: ResponseChunk,
+    ) -> std::result::Result<BaoContentItem, DecodeError> {
         Ok(match chunk {
-            BaoChunk::Parent {
+            ResponseChunk::Parent {
                 is_root,
                 right,
                 left,
@@ -438,7 +444,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 }
                 Parent { pair, node }.into()
             }
-            BaoChunk::Leaf {
+            ResponseChunk::Leaf {
                 size,
                 is_root,
                 start_chunk,
@@ -539,6 +545,8 @@ where
     O: Outboard,
     W: AsyncWrite + Unpin,
 {
+    // buffer for writing incomplete subtrees.
+    // for queries that don't have incomplete subtrees, this will never be used.
     let mut out_buf = Vec::new();
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
@@ -585,6 +593,7 @@ where
                 start_chunk,
                 size,
                 is_root,
+                ranges,
                 ..
             } => {
                 let expected = stack.pop().unwrap();

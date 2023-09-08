@@ -356,37 +356,6 @@ impl<T> BaoChunk<T> {
             ranges,
         }
     }
-
-    /// Map the ranges of the chunk. Convenient way to get rid of a lifetime
-    /// by just mapping to a type without a lifetime.
-    fn map_ranges<U>(self, f: impl Fn(T) -> U) -> BaoChunk<U> {
-        match self {
-            Self::Parent {
-                is_root,
-                left,
-                right,
-                node,
-                ranges,
-            } => BaoChunk::Parent {
-                is_root,
-                left,
-                right,
-                node,
-                ranges: f(ranges),
-            },
-            Self::Leaf {
-                size,
-                is_root,
-                start_chunk,
-                ranges,
-            } => BaoChunk::Leaf {
-                size,
-                is_root,
-                start_chunk,
-                ranges: f(ranges),
-            },
-        }
-    }
 }
 
 /// Iterator over all chunks in a BaoTree in post-order.
@@ -685,15 +654,15 @@ impl<'a> Iterator for ResponseIterRef<'a> {
 }
 
 self_cell! {
-    pub(crate) struct PreOrderChunkIterInner {
+    pub(crate) struct ResponseIterInner {
         owner: range_collections::RangeSet2<ChunkNum>,
         #[not_covariant]
-        dependent: PreOrderChunkIterRef,
+        dependent: ResponseIterRef,
     }
 }
 
-impl PreOrderChunkIterInner {
-    fn next(&mut self) -> Option<BaoChunk<&RangeSetRef<ChunkNum>>> {
+impl ResponseIterInner {
+    fn next(&mut self) -> Option<ResponseChunk> {
         self.with_dependent_mut(|_, iter| iter.next())
     }
 
@@ -702,20 +671,20 @@ impl PreOrderChunkIterInner {
     }
 }
 
-/// An iterator that produces chunks in pre order
-pub struct PreOrderChunkIter(PreOrderChunkIterInner);
+/// The owned version of `ResponseIterRef`.
+pub struct ResponseIter(ResponseIterInner);
 
-impl fmt::Debug for PreOrderChunkIter {
+impl fmt::Debug for ResponseIter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PreOrderChunkIter").finish_non_exhaustive()
+        f.debug_struct("ResponseIter").finish_non_exhaustive()
     }
 }
 
-impl PreOrderChunkIter {
+impl ResponseIter {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: RangeSet2<ChunkNum>) -> Self {
-        Self(PreOrderChunkIterInner::new(ranges, |ranges| {
-            PreOrderChunkIterRef::new(tree, ranges, 0)
+        Self(ResponseIterInner::new(ranges, |ranges| {
+            ResponseIterRef::new(tree, ranges, 0)
         }))
     }
 
@@ -725,10 +694,10 @@ impl PreOrderChunkIter {
     }
 }
 
-impl Iterator for PreOrderChunkIter {
-    type Item = BaoChunk;
+impl Iterator for ResponseIter {
+    type Item = ResponseChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.next().map(|x| x.map_ranges(|_| ()))
+        self.0.next()
     }
 }
