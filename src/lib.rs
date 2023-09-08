@@ -213,12 +213,7 @@ impl BaoTree {
     /// The start chunk is the chunk number of the first chunk in the tree.
     ///
     /// This is mostly used internally.
-    pub fn new_with_root(
-        size: ByteNum,
-        block_size: BlockSize,
-        root: TreeNode,
-        is_root: bool,
-    ) -> Self {
+    fn new_with_root(size: ByteNum, block_size: BlockSize, root: TreeNode, is_root: bool) -> Self {
         Self {
             size,
             block_size,
@@ -418,7 +413,7 @@ impl fmt::Debug for TreeNode {
 }
 
 impl TreeNode {
-    /// Given a number of chunks, gives root node
+    /// Given a number of blocks, gives root node
     fn root(blocks: BlockNum) -> TreeNode {
         Self(((blocks.0 + 1) / 2).next_power_of_two() - 1)
     }
@@ -443,6 +438,16 @@ impl TreeNode {
     #[inline]
     pub const fn is_leaf(&self) -> bool {
         (self.0 & 1) == 0
+    }
+
+    /// Convert a node to a node in a tree with a smaller block size
+    ///
+    /// E.g. a leaf node in a tree with block size 4 will become a node
+    /// with level 4 in a tree with block size 0.
+    #[inline]
+    pub const fn subtract_block_size(&self, n: u8) -> Self {
+        let shifted = !(!self.0 << n);
+        Self(shifted)
     }
 
     /// Range of blocks that this node covers, given a block size

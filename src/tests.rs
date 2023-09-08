@@ -936,6 +936,15 @@ fn abcd() {
 
 proptest! {
 
+    #[test]
+    fn subtract_block_size(node in any::<u32>(), diff in 0..4u8) {
+        let bs0 = BlockSize(diff);
+        let bs1 = BlockSize(0);
+        let node0 = TreeNode(node as u64);
+        let node1 = node0.subtract_block_size(diff);
+        prop_assert_eq!(node0.byte_range(bs0), node1.byte_range(bs1));
+    }
+
     /// Checks that the simple recursive impl bao_encode_selected_recursive that
     /// does not need an outboard is the same as the more complex encode_ranges_validated
     /// that requires an outboard.

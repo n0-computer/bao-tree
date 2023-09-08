@@ -8,7 +8,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use self_cell::self_cell;
 use smallvec::SmallVec;
 
-use crate::{BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode};
+use crate::{BaoTree, BlockSize, ChunkNum, TreeNode};
 
 /// Extended node info.
 ///
@@ -64,7 +64,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
             tree_filled_size: tree.filled_size(),
             max_skip_level,
             stack,
-            is_root: tree.is_root,
+            is_root: true,
         }
     }
 
@@ -343,6 +343,8 @@ pub enum BaoChunk<R = ()> {
         is_root: bool,
         /// Additional information about what part of the chunk matches the query
         ranges: R,
+        ///
+        node: Option<TreeNode>,
     },
 }
 
@@ -354,6 +356,7 @@ impl<T> BaoChunk<T> {
             is_root: false,
             start_chunk: ChunkNum(0),
             ranges,
+            node: None,
         }
     }
 
@@ -379,10 +382,12 @@ impl<T> BaoChunk<T> {
                 is_root,
                 start_chunk,
                 ranges,
+                node,
             } => BaoChunk::Leaf {
                 size,
                 is_root,
                 start_chunk,
+                node,
                 ranges: f(ranges),
             },
         }
@@ -452,11 +457,13 @@ impl Iterator for PostOrderChunkIter {
                 let l_start_chunk = tree.chunk_num(leaf);
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
                 let is_half_leaf = m == e;
+                let abs = node.subtract_block_size(self.tree.block_size.0);
                 if !is_half_leaf {
                     self.push(BaoChunk::Leaf {
                         is_root: false,
                         start_chunk: r_start_chunk,
                         size: (e - m).to_usize(),
+                        node: abs.right_child(),
                         ranges: (),
                     });
                 };
@@ -464,6 +471,7 @@ impl Iterator for PostOrderChunkIter {
                     is_root: is_root && is_half_leaf,
                     start_chunk: l_start_chunk,
                     size: (m - s).to_usize(),
+                    node: abs.left_child(),
                     ranges: (),
                 });
             }
@@ -487,6 +495,7 @@ impl<T: Default> Default for BaoChunk<T> {
             is_root: true,
             size: 0,
             start_chunk: ChunkNum(0),
+            node: None,
             ranges: T::default(),
         }
     }
@@ -556,11 +565,13 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                 let (s, m, e) = tree.leaf_byte_ranges3(leaf);
                 let l_start_chunk = tree.chunk_num(leaf);
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
+                let abs = node.subtract_block_size(tree.block_size.0);
                 if !r_ranges.is_empty() && !is_half_leaf {
                     self.push(BaoChunk::Leaf {
                         is_root: false,
                         start_chunk: r_start_chunk,
                         size: (e - m).to_usize(),
+                        node: abs.right_child(),
                         ranges: r_ranges,
                     });
                 };
@@ -569,6 +580,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                         is_root: is_root && is_half_leaf,
                         start_chunk: l_start_chunk,
                         size: (m - s).to_usize(),
+                        node: abs.left_child(),
                         ranges: l_ranges,
                     });
                 };
@@ -586,6 +598,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                         start_chunk,
                         is_root,
                         size,
+                        node: Some(node),
                         ranges,
                     }
                 } else {
@@ -657,6 +670,8 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                     is_root,
                     start_chunk,
                     ranges,
+                    node,
+                    ..
                 } => {
                     if self.tree().block_size == BlockSize(0) || ranges.is_all() {
                         break Some(ResponseChunk::Leaf {
@@ -666,13 +681,11 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                         });
                     } else {
                         // create a little tree just for this leaf
-                        let tree = BaoTree {
-                            start_chunk,
-                            size: ByteNum(size as u64),
-                            block_size: BlockSize(0),
-                            is_root,
-                        };
+                        let node = node.unwrap();
+                        let tree =
+                            BaoTree::new_with_root(self.tree().size(), BlockSize(0), node, is_root);
                         for item in tree.ranges_pre_order_chunks_iter_ref(ranges, u8::MAX) {
+                            println!("item: {:?}", item);
                             match item {
                                 BaoChunk::Parent {
                                     is_root,
