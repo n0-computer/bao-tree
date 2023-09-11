@@ -816,7 +816,9 @@ pub(crate) fn select_nodes_rec(
             let mid_chunk = start_chunk + (mid as u64);
             let (l_ranges, r_ranges) = ranges.split(mid_chunk);
             emit(ResponseChunk::Parent {
-                node: TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(0)),
+                // TODO: do not use the marker here!
+                node: TreeNode(u64::MAX),
+                // node: TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(0)),
                 is_root,
                 left: !l_ranges.is_empty(),
                 right: !r_ranges.is_empty(),

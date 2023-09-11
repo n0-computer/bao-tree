@@ -391,22 +391,6 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 let size =
                     read_len(&mut self.encoded).map_err(StartDecodeError::maybe_not_found)?;
                 let tree = BaoTree::new(size, *block_size);
-                for elem in ResponseIterRef::new(tree, ranges) {
-                    println!("{:?}", elem);
-                    match elem {
-                        ResponseChunk::Leaf {
-                            start_chunk, size, ..
-                        } => {
-                            println!(
-                                "{:?}",
-                                start_chunk.to_bytes().0..start_chunk.to_bytes().0 + (size as u64)
-                            )
-                        }
-                        ResponseChunk::Parent { node, .. } => {
-                            println!("{:?}", tree.byte_range(node))
-                        }
-                    }
-                }
                 self.inner = Position::Content {
                     iter: ResponseIterRef::new(tree, ranges),
                 };

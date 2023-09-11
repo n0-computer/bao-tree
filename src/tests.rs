@@ -12,8 +12,9 @@ use smallvec::SmallVec;
 use crate::{
     blake3,
     io::{
+        fsm::{BaoContentItem, ResponseDecoderReadingNext},
         sync::{DecodeResponseItem, Outboard},
-        Leaf,
+        Header, Leaf, Parent,
     },
     iter::{encode_selected_rec, ResponseChunk, ResponseIterRef},
     recursive_hash_subtree,
@@ -916,7 +917,10 @@ fn select_last_chunk_0() {
     assert_tuple_eq!(select_last_chunk_impl(1, 0));
 }
 
-fn encode_decode_roundtrip_sync_impl(
+/// Encode data fully, decode it again, and check that both data and outboard are the same
+///
+/// using the sync io api
+fn encode_decode_full_sync_impl(
     data: &[u8],
     outboard: PostOrderMemOutboard,
 ) -> (
@@ -927,13 +931,13 @@ fn encode_decode_roundtrip_sync_impl(
     let mut encoded = Vec::new();
     crate::io::sync::encode_ranges_validated(&data, &outboard, &RangeSet2::all(), &mut encoded)
         .unwrap();
-    let mut read_encoded = std::io::Cursor::new(encoded);
+    let mut encoded_read = std::io::Cursor::new(encoded);
     let mut decoded = Vec::new();
     let ob_res_opt = crate::io::sync::decode_response_into(
         outboard.root(),
         outboard.tree().block_size,
         &ranges,
-        &mut read_encoded,
+        &mut encoded_read,
         |tree, root: blake3::Hash| {
             let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
             let outboard_data = vec![0; outboard_size];
@@ -947,16 +951,73 @@ fn encode_decode_roundtrip_sync_impl(
     ((decoded, ob_res), (data.to_vec(), outboard))
 }
 
-async fn encode_decode_roundtrip_fsm_impl(
+fn encode_decode_partial_sync_impl(
+    data: &[u8],
+    outboard: PostOrderMemOutboard,
+    ranges: &RangeSetRef<ChunkNum>,
+) -> bool {
+    let mut encoded = Vec::new();
+    crate::io::sync::encode_ranges_validated(&data, &outboard, &ranges, &mut encoded).unwrap();
+    let expected_data = data;
+    let encoded_read = std::io::Cursor::new(encoded);
+    let buf = BytesMut::new();
+    let iter = crate::io::sync::DecodeResponseIter::new(
+        outboard.root,
+        outboard.tree.block_size,
+        encoded_read,
+        ranges,
+        buf,
+    );
+    for item in iter {
+        let item = match item {
+            Ok(item) => item,
+            Err(e) => {
+                return false;
+            }
+        };
+        match item {
+            DecodeResponseItem::Header(Header { size }) => {
+                // check that the size matches
+                if size != outboard.tree.size {
+                    return false;
+                }
+            }
+            DecodeResponseItem::Parent(Parent { node, pair }) => {
+                if node.0 == u64::MAX {
+                    continue;
+                }
+                // check that the hash pair matches
+                let expected_pair = outboard.load(node).unwrap().unwrap();
+                if pair != expected_pair {
+                    return false;
+                }
+            }
+            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+                // check that the data matches
+                if expected_data[offset.to_usize()..offset.to_usize() + data.len()] != data {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Encode data fully, decode it again, and check that both data and outboard are the same
+///
+/// using the fsm io api
+async fn encode_decode_full_fsm_impl(
     data: Vec<u8>,
     outboard: PostOrderMemOutboard,
-) -> ((Bytes, PostOrderMemOutboard), (Bytes, PostOrderMemOutboard)) {
+) -> (
+    (Vec<u8>, PostOrderMemOutboard),
+    (Vec<u8>, PostOrderMemOutboard),
+) {
     let mut outboard = outboard;
-    let data = Bytes::from(data);
     let ranges = RangeSet2::all();
     let mut encoded = Vec::new();
     crate::io::fsm::encode_ranges_validated(
-        data.clone(),
+        Bytes::from(data.clone()),
         &mut outboard,
         &RangeSet2::all(),
         &mut encoded,
@@ -981,12 +1042,71 @@ async fn encode_decode_roundtrip_fsm_impl(
     .unwrap();
     let ob_res = ob_res_opt
         .unwrap_or_else(|| PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]));
-    let ob_res = PostOrderMemOutboard {
-        root: ob_res.root,
-        tree: ob_res.tree,
-        data: ob_res.data.into(),
-    };
-    ((decoded.freeze(), ob_res), (data, outboard))
+    ((decoded.to_vec(), ob_res), (data, outboard))
+}
+
+async fn encode_decode_partial_fsm_impl(
+    data: &[u8],
+    outboard: PostOrderMemOutboard,
+    ranges: RangeSet2<ChunkNum>,
+) -> bool {
+    let mut encoded = Vec::new();
+    let mut outboard = outboard;
+    crate::io::fsm::encode_ranges_validated(
+        Bytes::from(data.to_vec()),
+        &mut outboard,
+        &ranges,
+        &mut encoded,
+    )
+    .await
+    .unwrap();
+    let expected_data = data;
+    let encoded_read = std::io::Cursor::new(encoded);
+    let initial = crate::io::fsm::ResponseDecoderStart::new(
+        outboard.root,
+        ranges,
+        outboard.tree.block_size,
+        encoded_read,
+    );
+    let (mut reading, size) = initial.next().await.unwrap();
+    if size != outboard.tree.size {
+        return false;
+    }
+    loop {
+        match reading.next().await {
+            ResponseDecoderReadingNext::More((reading1, result)) => {
+                let item = match result {
+                    Ok(item) => item,
+                    Err(e) => {
+                        return false;
+                    }
+                };
+                match item {
+                    BaoContentItem::Leaf(Leaf { offset, data }) => {
+                        // check that the data matches
+                        if expected_data[offset.to_usize()..offset.to_usize() + data.len()] != data
+                        {
+                            return false;
+                        }
+                    }
+                    BaoContentItem::Parent(Parent { node, pair }) => {
+                        // check that the hash pair matches
+                        if node.0 != u64::MAX {
+                            let expected_pair = outboard.load(node).unwrap().unwrap();
+                            if pair != expected_pair {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                reading = reading1;
+            }
+            ResponseDecoderReadingNext::Done(_reader) => {
+                break;
+            }
+        }
+    }
+    true
 }
 
 fn block_size() -> impl Strategy<Value = BlockSize> {
@@ -1175,21 +1295,39 @@ proptest! {
     }
 
     #[test]
-    fn encode_decode_roundtrip_sync(size in 0usize..1<<17, block_size in block_size()) {
+    fn encode_decode_full_sync(size in 0usize..1<<17, block_size in block_size()) {
         let data = make_test_data(size);
         let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
-        let (expected, actual) = encode_decode_roundtrip_sync_impl(&data, outboard);
+        let (expected, actual) = encode_decode_full_sync_impl(&data, outboard);
         prop_assert_eq!(expected, actual);
     }
 
     #[test]
-    fn encode_decode_roundtrip_fsm(size in 0usize..1<<17, block_size in block_size()) {
+    fn encode_decode_partial_sync((size, selection) in size_and_selection(0..100000, 2), block_size in block_size()) {
         let data = make_test_data(size);
         let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
-        let (expected, actual) = {
-            futures::executor::block_on(encode_decode_roundtrip_fsm_impl(data.into(), outboard))
-        };
+        let ok = encode_decode_partial_sync_impl(&data, outboard, &selection);
+        prop_assert!(ok);
+    }
+
+    #[test]
+    fn encode_decode_full_fsm(size in 0usize..1<<17, block_size in block_size()) {
+        let data = make_test_data(size);
+        let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
+        let (expected, actual) =
+            futures::executor::block_on(encode_decode_full_fsm_impl(data.into(), outboard))
+        ;
         prop_assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn encode_decode_partial_fsm((size, selection) in size_and_selection(0..100000, 2), block_size in block_size()) {
+        let data = make_test_data(size);
+        let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
+        let ok =
+            futures::executor::block_on(encode_decode_partial_fsm_impl(&data, outboard, selection))
+        ;
+        prop_assert!(ok);
     }
 
     #[test]

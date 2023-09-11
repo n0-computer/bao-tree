@@ -3,7 +3,6 @@
 //! A number of implementations for the sync and async outboard traits are provided.
 //! Implementations for in-memory outboards, for outboards where the data resides on disk,
 //! and a special implementation [EmptyOutboard] that just ignores all writes.
-use bytes::Bytes;
 use range_collections::RangeSet2;
 
 use super::TreeNode;
@@ -290,7 +289,7 @@ fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutbo
 
 /// A pre order outboard that is optimized for memory storage.
 #[derive(Debug, Clone)]
-pub struct PreOrderMemOutboard<T: AsRef<[u8]> = Bytes> {
+pub struct PreOrderMemOutboard<T> {
     /// root hash
     root: blake3::Hash,
     /// tree defining the data
@@ -349,6 +348,25 @@ impl<T: AsRef<[u8]>> crate::io::sync::Outboard for PreOrderMemOutboard<T> {
     }
 }
 
+impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PreOrderMemOutboard<T> {
+    fn save(&mut self, node: TreeNode, pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
+        match self.tree.pre_order_offset(node) {
+            Some(offset) => {
+                let offset_u64 = offset * 64;
+                let offset = usize::try_from(offset_u64).unwrap();
+                let data = self.data.as_mut();
+                data[offset..offset + 32].copy_from_slice(pair.0.as_bytes());
+                data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
+                Ok(())
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid node for this outboard",
+            )),
+        }
+    }
+}
+
 impl<T: AsRef<[u8]> + 'static> crate::io::fsm::Outboard for PreOrderMemOutboard<T> {
     fn root(&self) -> blake3::Hash {
         self.root
@@ -360,6 +378,38 @@ impl<T: AsRef<[u8]> + 'static> crate::io::fsm::Outboard for PreOrderMemOutboard<
     fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
         let res = load_raw_pre_mem(&self.tree, self.data.as_ref(), node).map(parse_hash_pair);
         futures::future::ok(res)
+    }
+}
+
+impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PreOrderMemOutboard<T> {
+    type SaveFuture<'a> = futures::future::Ready<io::Result<()>> where T: 'a;
+
+    fn save(
+        &mut self,
+        node: TreeNode,
+        pair: &(blake3::Hash, blake3::Hash),
+    ) -> Self::SaveFuture<'_> {
+        let res = match self.tree.pre_order_offset(node) {
+            Some(offset) => {
+                let offset_u64 = offset * 64;
+                let offset = usize::try_from(offset_u64).unwrap();
+                let data = self.data.as_mut();
+                data[offset..offset + 32].copy_from_slice(pair.0.as_bytes());
+                data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
+                Ok(())
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid node for this outboard",
+            )),
+        };
+        futures::future::ready(res)
+    }
+
+    type SyncFuture<'a> = futures::future::Ready<io::Result<()>> where T: 'a;
+
+    fn sync(&mut self) -> Self::SyncFuture<'_> {
+        futures::future::ready(Ok(()))
     }
 }
 
