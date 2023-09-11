@@ -52,7 +52,7 @@ impl BlockSize {
     /// The default block size, 1024 bytes
     ///
     /// This means that blocks and blake3 chunks are the same size.
-    pub const DEFAULT: BlockSize = BlockSize(0);
+    pub const ZERO: BlockSize = BlockSize(0);
 
     /// Number of bytes in a block at this level
     pub const fn bytes(self) -> usize {

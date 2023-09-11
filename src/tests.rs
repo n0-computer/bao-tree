@@ -95,7 +95,7 @@ fn post_order_outboard_reference_2(data: &[u8]) -> PostOrderMemOutboard {
     let hash = blake3::Hash::from(*hash.as_bytes());
     PostOrderMemOutboard::new(
         hash,
-        BaoTree::new(ByteNum(data.len() as u64), BlockSize::DEFAULT),
+        BaoTree::new(ByteNum(data.len() as u64), BlockSize::ZERO),
         outboard,
     )
 }
@@ -108,7 +108,7 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     encoder.write_all(data).unwrap();
     let hash = encoder.finalize().unwrap();
     let hash = blake3::Hash::from(*hash.as_bytes());
-    let pre = PreOrderMemOutboardMut::new(hash, BlockSize::DEFAULT, outboard, false);
+    let pre = PreOrderMemOutboardMut::new(hash, BlockSize::ZERO, outboard, false);
     pre.unwrap().flip()
 }
 
@@ -134,11 +134,11 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
         range.end.0 += 1;
     };
     let expected = encode_slice_reference(&data, range.clone()).0;
-    let ob = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
+    let ob = BaoTree::outboard_post_order_mem(&data, BlockSize::ZERO);
     let hash = ob.root();
     let outboard = ob.into_inner_with_suffix();
     let ranges = RangeSet2::from(range);
-    let actual = encode_ranges_reference(&data, &ranges, BlockSize::DEFAULT);
+    let actual = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
     assert_eq!(expected.len(), actual.len());
     assert_eq!(expected, actual);
 
@@ -152,7 +152,7 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
         return;
     }
     let mut actual2 = Vec::new();
-    let ob = PostOrderMemOutboard::load(hash, outboard, BlockSize::DEFAULT).unwrap();
+    let ob = PostOrderMemOutboard::load(hash, outboard, BlockSize::ZERO).unwrap();
     encode_ranges(&data, &ob, &ranges, Cursor::new(&mut actual2)).unwrap();
     assert_eq!(expected.len(), actual2.len());
     assert_eq!(expected, actual2);
@@ -170,7 +170,7 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     let expected = data;
     let ranges = RangeSet2::from(range);
     let mut ec = Cursor::new(encoded);
-    for item in decode_ranges_into_chunks(root, BlockSize::DEFAULT, &mut ec, &ranges) {
+    for item in decode_ranges_into_chunks(root, BlockSize::ZERO, &mut ec, &ranges) {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
@@ -189,7 +189,7 @@ mod fsm_tests {
         let expected = data;
         let ranges = RangeSet2::from(range);
         let mut ec = Cursor::new(encoded);
-        let at_start = ResponseDecoderStart::new(root, ranges, BlockSize::DEFAULT, &mut ec);
+        let at_start = ResponseDecoderStart::new(root, ranges, BlockSize::ZERO, &mut ec);
         let (mut reading, _size) = at_start.next().await.unwrap();
         while let ResponseDecoderReadingNext::More((next_state, item)) = reading.next().await {
             if let BaoContentItem::Leaf(Leaf { offset, data }) = item.unwrap() {
@@ -247,7 +247,7 @@ fn validate_outboard_async_impl(
 fn bao_tree_outboard_comparison_impl(data: Vec<u8>) {
     let post1 = post_order_outboard_reference(&data);
     // let (expected, expected_hash) = post_order_outboard_reference_2(&data);
-    let post2 = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
+    let post2 = BaoTree::outboard_post_order_mem(&data, BlockSize::ZERO);
     assert_eq!(post1, post2);
 }
 
@@ -423,7 +423,7 @@ fn wrong_hash_small() {
 fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
     use make_test_data as td;
     let data = td(size);
-    let po = BaoTree::outboard_post_order_mem(&data, BlockSize::DEFAULT);
+    let po = BaoTree::outboard_post_order_mem(&data, BlockSize::ZERO);
     let post = po.into_inner_with_suffix();
     let (mut pre, _) = bao::encode::outboard(data);
     pre.splice(..8, []);
@@ -432,7 +432,7 @@ fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
         .enumerate()
         .map(|(i, h)| (h, i))
         .collect::<HashMap<_, _>>();
-    let tree = BaoTree::new(ByteNum(size as u64), BlockSize::DEFAULT);
+    let tree = BaoTree::new(ByteNum(size as u64), BlockSize::ZERO);
     let mut res = Vec::new();
     for c in 0..tree.filled_size().0 {
         let node = TreeNode(c);
@@ -480,7 +480,7 @@ fn count_parents(node: u64, len: u64) -> u64 {
 
 fn compare_pre_order_outboard(case: usize) {
     let size = ByteNum(case as u64);
-    let tree = BaoTree::new(size, BlockSize::DEFAULT);
+    let tree = BaoTree::new(size, BlockSize::ZERO);
     let perm = create_permutation_reference(case);
 
     // print!("{:08b}", perm.len());
@@ -517,7 +517,7 @@ fn compare_pre_order_outboard(case: usize) {
 
 fn pre_order_outboard_line(case: usize) {
     let size = ByteNum(case as u64);
-    let tree = BaoTree::new(size, BlockSize::DEFAULT);
+    let tree = BaoTree::new(size, BlockSize::ZERO);
     let perm = create_permutation_reference(case);
     print!("{:08b}", perm.len());
     for (k, _v) in perm {
@@ -987,9 +987,11 @@ fn encode_decode_partial_sync_impl(
                     continue;
                 }
                 // check that the hash pair matches
-                let expected_pair = outboard.load(node).unwrap().unwrap();
-                if pair != expected_pair {
-                    return false;
+                if let Some(node) = node.add_block_size(outboard.tree.block_size.0) {
+                    let expected_pair = outboard.load(node).unwrap().unwrap();
+                    if pair != expected_pair {
+                        return false;
+                    }
                 }
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
@@ -1091,10 +1093,12 @@ async fn encode_decode_partial_fsm_impl(
                     }
                     BaoContentItem::Parent(Parent { node, pair }) => {
                         // check that the hash pair matches
-                        if node.0 != u64::MAX {
-                            let expected_pair = outboard.load(node).unwrap().unwrap();
-                            if pair != expected_pair {
-                                return false;
+                        if node.level() >= outboard.tree.block_size.0 as u32 {
+                            if let Some(node) = node.add_block_size(outboard.tree.block_size.0) {
+                                let expected_pair = outboard.load(node).unwrap().unwrap();
+                                if pair != expected_pair {
+                                    return false;
+                                }
                             }
                         }
                     }
@@ -1244,7 +1248,7 @@ proptest! {
     /// Compares the PostOrderNodeIter with a simple stack-based reference implementation.
     #[test]
     fn iterator_reference_comparison(len in 0u64..100000) {
-        let tree = BaoTree::new(ByteNum(len), BlockSize::DEFAULT);
+        let tree = BaoTree::new(ByteNum(len), BlockSize::ZERO);
         let iter1 = iterate_reference(&tree);
         let iter2 = PostOrderTreeIterStack::new(tree).collect::<Vec<_>>();
         let iter3 = PostOrderNodeIter::new(tree).collect::<Vec<_>>();
@@ -1255,7 +1259,7 @@ proptest! {
     /// Compares the ranges iter with a recursive reference implementation.
     #[test]
     fn partial_iterator_reference_comparison((len, start, size) in size_and_slice_overlapping()) {
-        let tree = BaoTree::new(len, BlockSize::DEFAULT);
+        let tree = BaoTree::new(len, BlockSize::ZERO);
         let chunk_range = start .. start + size;
         let rs = RangeSet2::from(chunk_range);
         let iter1 = iterate_part_preorder_reference(&tree, &rs, 0);
@@ -1271,7 +1275,7 @@ proptest! {
     #[test]
     fn validate_outboard_test(size in 0usize..32768, rand in any::<usize>()) {
         let data = make_test_data(size);
-        let mut outboard = BaoTree::outboard_post_order_mem(data, BlockSize::DEFAULT);
+        let mut outboard = BaoTree::outboard_post_order_mem(data, BlockSize::ZERO);
         let (expected, actual) = validate_outboard_sync_impl(&outboard);
         prop_assert_eq!(expected, actual);
 

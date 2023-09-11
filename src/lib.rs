@@ -257,6 +257,7 @@ impl BaoTree {
 
     /// The offset of the given node in the pre order traversal
     pub fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
+        // let node = node.add_block_size(self.block_size.0)?;
         if self.is_persisted(node) {
             Some(pre_order_offset_loop(node.0, self.filled_size().0))
         } else {
@@ -391,7 +392,7 @@ impl TreeNode {
     /// The level of the node in the tree, 0 for leafs.
     #[inline]
     pub const fn level(&self) -> u32 {
-        (!self.0).trailing_zeros()
+        self.0.trailing_ones()
     }
 
     /// True if this is a leaf node.
@@ -408,6 +409,18 @@ impl TreeNode {
     pub const fn subtract_block_size(&self, n: u8) -> Self {
         let shifted = !(!self.0 << n);
         Self(shifted)
+    }
+
+    /// Convert a node to a node in a tree with a larger block size
+    #[inline]
+    pub const fn add_block_size(&self, n: u8) -> Option<Self> {
+        let mask = (1 << n) - 1;
+        // check if the node has a high enough level
+        if self.0 & mask == mask {
+            Some(Self(self.0 >> n))
+        } else {
+            None
+        }
     }
 
     /// Range of blocks that this node covers, given a block size
