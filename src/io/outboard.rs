@@ -148,11 +148,11 @@ impl<R> PostOrderOutboard<R> {
 
 /// A post order outboard that is optimized for memory storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PostOrderMemOutboard<T: AsRef<[u8]> = Vec<u8>> {
+pub struct PostOrderMemOutboard<T = Vec<u8>> {
     /// root hash
     pub(crate) root: blake3::Hash,
     /// tree defining the data
-    tree: BaoTree,
+    pub(crate) tree: BaoTree,
     /// hashes without length suffix
     pub(crate) data: T,
 }
@@ -209,13 +209,14 @@ impl<T: AsRef<[u8]>> crate::io::fsm::Outboard for PostOrderMemOutboard<T> {
     }
 }
 
-impl crate::io::sync::OutboardMut for PostOrderMemOutboard {
+impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PostOrderMemOutboard<T> {
     fn save(&mut self, node: TreeNode, pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         match self.tree.post_order_offset(node) {
             Some(offset) => {
                 let offset = usize::try_from(offset.value() * 64).unwrap();
-                self.data[offset..offset + 32].copy_from_slice(pair.0.as_bytes());
-                self.data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
+                let data = self.data.as_mut();
+                data[offset..offset + 32].copy_from_slice(pair.0.as_bytes());
+                data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
                 Ok(())
             }
             None => Err(io::Error::new(
@@ -223,6 +224,37 @@ impl crate::io::sync::OutboardMut for PostOrderMemOutboard {
                 "invalid node for this outboard",
             )),
         }
+    }
+}
+
+impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PostOrderMemOutboard<T> {
+    type SaveFuture<'a> = futures::future::Ready<io::Result<()>> where T: 'a;
+
+    fn save(
+        &mut self,
+        node: TreeNode,
+        pair: &(blake3::Hash, blake3::Hash),
+    ) -> Self::SaveFuture<'_> {
+        let res = match self.tree.post_order_offset(node) {
+            Some(offset) => {
+                let offset = usize::try_from(offset.value() * 64).unwrap();
+                let data = self.data.as_mut();
+                data[offset..offset + 32].copy_from_slice(pair.0.as_bytes());
+                data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
+                Ok(())
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid node for this outboard",
+            )),
+        };
+        futures::future::ready(res)
+    }
+
+    type SyncFuture<'a> = futures::future::Ready<io::Result<()>> where T: 'a;
+
+    fn sync(&mut self) -> Self::SyncFuture<'_> {
+        futures::future::ready(Ok(()))
     }
 }
 

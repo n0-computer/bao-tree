@@ -112,7 +112,7 @@ impl BaoTree {
     ) -> PostOrderMemOutboard {
         let data = data.as_ref();
         let tree = Self::new(ByteNum(data.len() as u64), block_size);
-        let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
+        let outboard_len: usize = (tree.outboard_hash_pairs() * 64).try_into().unwrap();
         let mut res = Vec::with_capacity(outboard_len);
         let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
         let hash =
@@ -258,7 +258,7 @@ impl BaoTree {
     /// The offset of the given node in the pre order traversal
     pub fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
         if self.is_persisted(node) {
-            Some(pre_order_offset_slow(node.0, self.filled_size().0))
+            Some(pre_order_offset_loop(node.0, self.filled_size().0))
         } else {
             None
         }
@@ -355,6 +355,24 @@ impl fmt::Debug for TreeNode {
 }
 
 impl TreeNode {
+    /// Create a new tree node from a start chunk and a level
+    ///
+    /// The start chunk must be the start of a subtree with the given level.
+    /// So for level 0, the start chunk must even. For level 1, the start chunk
+    /// must be divisible by 4, etc.
+    fn from_start_chunk_and_level(start_chunk: ChunkNum, level: BlockSize) -> Self {
+        let start_chunk = start_chunk.0;
+        let level = level.0;
+        // check that the start chunk a start of a subtree with level `level`
+        // this ensures that there is a 0 at bit `level`.
+        let check_mask = (1 << (level + 1)) - 1;
+        debug_assert_eq!(start_chunk & check_mask, 0);
+        let level_mask = (1 << level) - 1;
+        // set the trailing `level` bits to 1.
+        // The level is the number of trailing ones.
+        Self(start_chunk | level_mask)
+    }
+
     /// Given a number of blocks, gives root node
     fn root(blocks: BlockNum) -> TreeNode {
         Self(((blocks.0 + 1) / 2).next_power_of_two() - 1)
@@ -565,10 +583,12 @@ impl TreeNode {
     }
 }
 
-/// Slow iterative way to find the offset of a node in a pre-order traversal.
+/// Iterative way to find the offset of a node in a pre-order traversal.
 ///
 /// I am sure there is a way that does not require a loop, but this will do for now.
-fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
+/// It is slower than the direct formula, but it is still in the nanosecond range,
+/// so at a block size of 16 KiB it should not be the limiting factor for anything.
+fn pre_order_offset_loop(node: u64, len: u64) -> u64 {
     // node level, 0 for leaf nodes
     let level = (!node).trailing_zeros();
     // span of the node, 1 for leaf nodes

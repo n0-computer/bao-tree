@@ -8,7 +8,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use self_cell::self_cell;
 use smallvec::SmallVec;
 
-use crate::{io::sync::select_nodes_recursive, BaoTree, BlockSize, ChunkNum, TreeNode};
+use crate::{blake3, BaoTree, BlockSize, ChunkNum, TreeNode};
 
 /// Extended node info.
 ///
@@ -641,7 +641,7 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                     } else {
                         // create a little tree just for this leaf
                         self.buffer.clear();
-                        select_nodes_recursive(
+                        select_nodes_rec(
                             start_chunk,
                             size,
                             is_root,
@@ -703,5 +703,142 @@ impl Iterator for ResponseIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()
+    }
+}
+
+/// Encode ranges relevant to a query from a slice and outboard to a buffer
+///
+/// This will compute the root hash, so it will have to traverse the entire tree.
+/// The `ranges` parameter just controls which parts of the data are written.
+///
+/// Except for writing to a buffer, this is the same as [hash_subtree].
+pub(crate) fn encode_selected_rec(
+    start_chunk: ChunkNum,
+    data: &[u8],
+    is_root: bool,
+    query: &RangeSetRef<ChunkNum>,
+    max_skip_level: u32,
+    res: &mut Vec<u8>,
+) -> blake3::Hash {
+    use blake3::guts::{ChunkState, CHUNK_LEN};
+    if data.len() <= CHUNK_LEN {
+        if !query.is_empty() {
+            res.extend_from_slice(data);
+        }
+        let mut hasher = ChunkState::new(start_chunk.0);
+        hasher.update(data);
+        hasher.finalize(is_root)
+    } else {
+        let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
+        let chunks = chunks.next_power_of_two();
+        let level = chunks.trailing_zeros();
+        let mid = chunks / 2;
+        let mid_bytes = mid * CHUNK_LEN;
+        let mid_chunk = start_chunk + (mid as u64);
+        let (l_ranges, r_ranges) = query.split(mid_chunk);
+        // for empty ranges, we don't want to emit anything.
+        // for full ranges where the level is at or below max_skip_level, we want to emit
+        // just the data.
+        //
+        // todo: maybe call into blake3::guts::hash_subtree directly for this case? it would be faster.
+        #[allow(clippy::nonminimal_bool)]
+        let emit_parent = !query.is_empty() && !(query.is_all() && level <= max_skip_level);
+        let hash_offset = if emit_parent {
+            // make some room for the hashes
+            res.extend_from_slice(&[0xFFu8; 64]);
+            Some(res.len() - 64)
+        } else {
+            None
+        };
+        // recurse to the left and right to compute the hashes and emit data
+        let left = encode_selected_rec(
+            start_chunk,
+            &data[..mid_bytes],
+            false,
+            l_ranges,
+            max_skip_level,
+            res,
+        );
+        let right = encode_selected_rec(
+            mid_chunk,
+            &data[mid_bytes..],
+            false,
+            r_ranges,
+            max_skip_level,
+            res,
+        );
+        // backfill the hashes if needed
+        if let Some(o) = hash_offset {
+            res[o..o + 32].copy_from_slice(left.as_bytes());
+            res[o + 32..o + 64].copy_from_slice(right.as_bytes());
+        }
+        blake3::guts::parent_cv(&left, &right, is_root)
+    }
+}
+
+/// Select nodes relevant to a query
+///
+/// This is the receive side equivalent of [bao_encode_selected_recursive].
+/// It does not do any hashing, but just emits the nodes that are relevant to a query.
+pub(crate) fn select_nodes_rec(
+    start_chunk: ChunkNum,
+    size: usize,
+    is_root: bool,
+    ranges: &RangeSetRef<ChunkNum>,
+    max_skip_level: u32,
+    emit: &mut impl FnMut(ResponseChunk),
+) {
+    if ranges.is_empty() {
+        return;
+    }
+    use blake3::guts::CHUNK_LEN;
+    if size <= CHUNK_LEN {
+        emit(ResponseChunk::Leaf {
+            start_chunk,
+            size,
+            is_root,
+        });
+    } else {
+        let chunks: usize = size / CHUNK_LEN + (size % CHUNK_LEN != 0) as usize;
+        let chunks = chunks.next_power_of_two();
+        let level = chunks.trailing_zeros();
+        if ranges.is_all() && level <= max_skip_level {
+            // we are allowed to just emit the entire data as a leaf
+            emit(ResponseChunk::Leaf {
+                start_chunk,
+                size,
+                is_root,
+            });
+        } else {
+            // split in half and recurse
+            let mid = chunks / 2;
+            let mid_bytes = mid * CHUNK_LEN;
+            let mid_chunk = start_chunk + (mid as u64);
+            let (l_ranges, r_ranges) = ranges.split(mid_chunk);
+            emit(ResponseChunk::Parent {
+                node: TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(0)),
+                is_root,
+                left: !l_ranges.is_empty(),
+                right: !r_ranges.is_empty(),
+                is_subchunk: true,
+            });
+            // recurse to the left and right to compute the hashes and emit data
+            select_nodes_rec(
+                start_chunk,
+                mid_bytes,
+                false,
+                l_ranges,
+                max_skip_level,
+                emit,
+            );
+            select_nodes_rec(
+                mid_chunk,
+                size - mid_bytes,
+                false,
+                r_ranges,
+                max_skip_level,
+                emit,
+            );
+        }
     }
 }

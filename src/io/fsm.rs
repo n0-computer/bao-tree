@@ -9,7 +9,7 @@ use std::{io, result};
 
 use crate::{
     blake3, hash_subtree,
-    iter::{ResponseChunk, ResponseIter},
+    iter::{encode_selected_rec, ResponseChunk, ResponseIter},
 };
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
@@ -29,7 +29,7 @@ use crate::{
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::{sync::bao_encode_selected_recursive, DecodeError, StartDecodeError};
+use super::{DecodeError, StartDecodeError};
 
 /// An item of bao content
 ///
@@ -595,7 +595,7 @@ where
                     // write into an out buffer to ensure we detect mismatches
                     // before writing to the output.
                     out_buf.clear();
-                    let actual = bao_encode_selected_recursive(
+                    let actual = encode_selected_rec(
                         start_chunk,
                         &bytes,
                         is_root,

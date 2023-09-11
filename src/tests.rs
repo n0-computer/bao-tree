@@ -4,7 +4,7 @@ use std::{
     ops::Range,
 };
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
@@ -15,7 +15,7 @@ use crate::{
         sync::{DecodeResponseItem, Outboard},
         Leaf,
     },
-    iter::{ResponseChunk, ResponseIterRef},
+    iter::{encode_selected_rec, ResponseChunk, ResponseIterRef},
     recursive_hash_subtree,
 };
 
@@ -23,7 +23,7 @@ use super::{
     io::outboard::{PostOrderMemOutboard, PreOrderMemOutboardMut},
     io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
     iter::{BaoChunk, NodeInfo},
-    pre_order_offset_slow,
+    pre_order_offset_loop,
     tree::{ByteNum, ChunkNum},
     BaoTree, BlockSize, PostOrderNodeIter, TreeNode,
 };
@@ -70,7 +70,7 @@ fn encode_ranges_reference(
     let mut res = Vec::new();
     let size = ByteNum(data.len() as u64);
     res.extend_from_slice(&size.0.to_le_bytes());
-    let _hash = crate::io::sync::bao_encode_selected_recursive(
+    let _hash = encode_selected_rec(
         ChunkNum(0),
         data,
         true,
@@ -509,7 +509,7 @@ fn compare_pre_order_outboard(case: usize) {
         );
         // let depth = tree.root().level() as u64;
         // println!("{} {}", depth, k.0);
-        assert_eq!(v as u64, pre_order_offset_slow(k.0, tree.filled_size().0));
+        assert_eq!(v as u64, pre_order_offset_loop(k.0, tree.filled_size().0));
     }
     println!();
 }
@@ -811,7 +811,7 @@ fn bao_encode_selected_recursive_0() {
     let data = make_test_data(1024 * 3);
     let overhead = |data, max_skip_level| {
         let mut actual_encoded = Vec::new();
-        crate::io::sync::bao_encode_selected_recursive(
+        encode_selected_rec(
             ChunkNum(0),
             data,
             true,
@@ -835,14 +835,7 @@ fn encode_selected_reference(
     let mut res = Vec::new();
     res.extend_from_slice(&(data.len() as u64).to_le_bytes());
     let max_skip_level = block_size.0 as u32;
-    let hash = crate::io::sync::bao_encode_selected_recursive(
-        ChunkNum(0),
-        data,
-        true,
-        ranges,
-        max_skip_level,
-        &mut res,
-    );
+    let hash = encode_selected_rec(ChunkNum(0), data, true, ranges, max_skip_level, &mut res);
     (hash, res)
 }
 
@@ -923,7 +916,93 @@ fn select_last_chunk_0() {
     assert_tuple_eq!(select_last_chunk_impl(1, 0));
 }
 
+fn encode_decode_roundtrip_sync_impl(
+    data: &[u8],
+    outboard: PostOrderMemOutboard,
+) -> (
+    (Vec<u8>, PostOrderMemOutboard),
+    (Vec<u8>, PostOrderMemOutboard),
+) {
+    let ranges = RangeSet2::all();
+    let mut encoded = Vec::new();
+    crate::io::sync::encode_ranges_validated(&data, &outboard, &RangeSet2::all(), &mut encoded)
+        .unwrap();
+    let mut read_encoded = std::io::Cursor::new(encoded);
+    let mut decoded = Vec::new();
+    let ob_res_opt = crate::io::sync::decode_response_into(
+        outboard.root(),
+        outboard.tree().block_size,
+        &ranges,
+        &mut read_encoded,
+        |tree, root: blake3::Hash| {
+            let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
+            let outboard_data = vec![0; outboard_size];
+            Ok(PostOrderMemOutboard::new(root, tree, outboard_data))
+        },
+        &mut decoded,
+    )
+    .unwrap();
+    let ob_res = ob_res_opt
+        .unwrap_or_else(|| PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]));
+    ((decoded, ob_res), (data.to_vec(), outboard))
+}
+
+async fn encode_decode_roundtrip_fsm_impl(
+    data: Vec<u8>,
+    outboard: PostOrderMemOutboard,
+) -> ((Bytes, PostOrderMemOutboard), (Bytes, PostOrderMemOutboard)) {
+    let mut outboard = outboard;
+    let data = Bytes::from(data);
+    let ranges = RangeSet2::all();
+    let mut encoded = Vec::new();
+    crate::io::fsm::encode_ranges_validated(
+        data.clone(),
+        &mut outboard,
+        &RangeSet2::all(),
+        &mut encoded,
+    )
+    .await
+    .unwrap();
+    let mut read_encoded = std::io::Cursor::new(encoded);
+    let mut decoded = BytesMut::new();
+    let ob_res_opt = crate::io::fsm::decode_response_into(
+        outboard.root(),
+        outboard.tree().block_size,
+        ranges,
+        &mut read_encoded,
+        |root, tree| async move {
+            let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
+            let outboard_data = vec![0u8; outboard_size];
+            Ok(PostOrderMemOutboard::new(root, tree, outboard_data))
+        },
+        &mut decoded,
+    )
+    .await
+    .unwrap();
+    let ob_res = ob_res_opt
+        .unwrap_or_else(|| PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]));
+    let ob_res = PostOrderMemOutboard {
+        root: ob_res.root,
+        tree: ob_res.tree,
+        data: ob_res.data.into(),
+    };
+    ((decoded.freeze(), ob_res), (data, outboard))
+}
+
+fn block_size() -> impl Strategy<Value = BlockSize> {
+    (0..=6u8).prop_map(BlockSize)
+}
+
 proptest! {
+
+    #[test]
+    fn node_from_chunk_and_level(block in 0..100000u64, level in 0u8..8u8) {
+        let chunk = block << (level + 1);
+        let node = TreeNode::from_start_chunk_and_level(ChunkNum(chunk), BlockSize(level));
+        println!("{:b}", node.0);
+        prop_assert_eq!(node.level(), level as u32);
+        prop_assert_eq!(node.block_range().start.to_chunks(BlockSize(0)), ChunkNum(chunk));
+    }
 
     /// Check that a query outside the valid range always selects the last chunk
     #[test]
@@ -1093,6 +1172,24 @@ proptest! {
             let (expected, actual) = validate_outboard_async_impl(&mut outboard);
             prop_assert_ne!(expected, actual);
         }
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_sync(size in 0usize..1<<17, block_size in block_size()) {
+        let data = make_test_data(size);
+        let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
+        let (expected, actual) = encode_decode_roundtrip_sync_impl(&data, outboard);
+        prop_assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_fsm(size in 0usize..1<<17, block_size in block_size()) {
+        let data = make_test_data(size);
+        let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
+        let (expected, actual) = {
+            futures::executor::block_on(encode_decode_roundtrip_fsm_impl(data.into(), outboard))
+        };
+        prop_assert_eq!(expected, actual);
     }
 
     #[test]
