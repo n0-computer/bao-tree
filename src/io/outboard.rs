@@ -11,7 +11,7 @@ use crate::{
     io::sync::{Outboard, OutboardMut},
     BaoTree, BlockSize, ByteNum,
 };
-use std::io;
+use std::{fmt, io};
 
 macro_rules! io_error {
     ($($arg:tt)*) => {
@@ -43,7 +43,7 @@ impl crate::io::sync::Outboard for EmptyOutboard {
         self.tree
     }
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
-        Ok(if self.tree.is_persisted(node) {
+        Ok(if self.tree.is_relevant_for_outboard(node) {
             // behave as if it was an outboard file filled with 0s
             Some((blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32])))
         } else {
@@ -61,7 +61,7 @@ impl crate::io::fsm::Outboard for EmptyOutboard {
     }
     type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
     fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        futures::future::ok(if self.tree.is_persisted(node) {
+        futures::future::ok(if self.tree.is_relevant_for_outboard(node) {
             // behave as if it was an outboard file filled with 0s
             Some((blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32])))
         } else {
@@ -72,7 +72,7 @@ impl crate::io::fsm::Outboard for EmptyOutboard {
 
 impl crate::io::sync::OutboardMut for EmptyOutboard {
     fn save(&mut self, node: TreeNode, _pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
-        if self.tree.is_persisted(node) {
+        if self.tree.is_relevant_for_outboard(node) {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -89,7 +89,7 @@ impl crate::io::fsm::OutboardMut for EmptyOutboard {
         node: TreeNode,
         _pair: &(blake3::Hash, blake3::Hash),
     ) -> Self::SaveFuture<'_> {
-        let res = if self.tree.is_persisted(node) {
+        let res = if self.tree.is_relevant_for_outboard(node) {
             Ok(())
         } else {
             Err(io::Error::new(
@@ -146,7 +146,7 @@ impl<R> PostOrderOutboard<R> {
 }
 
 /// A post order outboard that is optimized for memory storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PostOrderMemOutboard<T = Vec<u8>> {
     /// root hash
     pub(crate) root: blake3::Hash,
@@ -154,6 +154,32 @@ pub struct PostOrderMemOutboard<T = Vec<u8>> {
     pub(crate) tree: BaoTree,
     /// hashes without length suffix
     pub(crate) data: T,
+}
+
+fn to_hex(data: &[u8], target: &mut String) {
+    let table = b"0123456789abcdef";
+    for &b in data.iter() {
+        target.push(table[(b >> 4) as usize] as char);
+        target.push(table[(b & 0xf) as usize] as char);
+    }
+}
+
+impl<T: AsRef<[u8]>> fmt::Debug for PostOrderMemOutboard<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut text = String::new();
+        for chunk in self.data.as_ref().chunks(64) {
+            for hash in chunk.chunks(32) {
+                to_hex(hash, &mut text);
+                text.push(' ');
+            }
+            text.push(' ');
+        }
+        f.debug_struct("PostOrderMemOutboard")
+            .field("root", &self.root)
+            .field("tree", &self.tree)
+            .field("data", &text.trim_end())
+            .finish()
+    }
 }
 
 impl PostOrderMemOutboard {
@@ -212,6 +238,7 @@ impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PostOrderMemOutboard<T> {
     fn save(&mut self, node: TreeNode, pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         match self.tree.post_order_offset(node) {
             Some(offset) => {
+                println!("{:?}", offset);
                 let offset = usize::try_from(offset.value() * 64).unwrap();
                 let data = self.data.as_mut();
                 data[offset..offset + 32].copy_from_slice(pair.0.as_bytes());

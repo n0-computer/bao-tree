@@ -246,11 +246,6 @@ impl BaoTree {
         TreeNode(n + n.saturating_sub(1))
     }
 
-    /// true if the given node is complete/sealed
-    fn is_sealed(&self, node: TreeNode) -> bool {
-        node.byte_range().end <= self.size
-    }
-
     /// true if the node is a leaf for this tree
     ///
     /// If a tree has a non-zero block size, this is different than the node
@@ -268,10 +263,22 @@ impl BaoTree {
         !self.is_leaf(node) || node.mid().to_bytes().0 < self.size.0
     }
 
+    /// true if this is a node that is relevant for the outboard
+    #[inline]
+    const fn is_relevant_for_outboard(&self, node: TreeNode) -> bool {
+        let level = node.level();
+        if level < self.block_size.0 as u32 {
+            false
+        } else if level > self.block_size.0 as u32 {
+            true
+        } else {
+            node.mid().to_bytes().0 < self.size.0
+        }
+    }
+
     /// The offset of the given node in the pre order traversal
     pub fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
-        // let node = node.add_block_size(self.block_size.0)?;
-        if self.is_persisted(node) {
+        if self.is_relevant_for_outboard(node) {
             Some(pre_order_offset_loop(node.0, self.filled_size().0))
         } else {
             None
@@ -294,7 +301,7 @@ impl BaoTree {
             } else {
                 // compute the offset based on the total size and the height of the node
                 self.outboard_hash_pairs()
-                    .checked_sub(u64::from(shifted.right_count()) + 1)
+                    .checked_sub(u64::from(node.right_count()) + 1)
                     .map(PostOrderOffset::Unstable)
             }
         }

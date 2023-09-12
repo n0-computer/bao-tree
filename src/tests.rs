@@ -621,7 +621,7 @@ fn iterate_part_preorder_reference<'a>(
         if ranges.is_empty() {
             return;
         }
-        let is_half_leaf = !tree.is_persisted(node);
+        let is_half_leaf = !tree.is_relevant_for_outboard(node);
         // the middle chunk of the node
         let mid = node.mid();
         // the start chunk of the node
@@ -895,6 +895,7 @@ fn encode_decode_full_sync_impl(
     let mut encoded = Vec::new();
     crate::io::sync::encode_ranges_validated(&data, &outboard, &RangeSet2::all(), &mut encoded)
         .unwrap();
+    println!("encoding done!\n\n");
     let mut encoded_read = std::io::Cursor::new(encoded);
     let mut decoded = Vec::new();
     let ob_res_opt = crate::io::sync::decode_response_into(
@@ -913,6 +914,18 @@ fn encode_decode_full_sync_impl(
     let ob_res = ob_res_opt
         .unwrap_or_else(|| PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]));
     ((decoded, ob_res), (data.to_vec(), outboard))
+}
+
+#[test]
+fn encode_decode_full_sync_cases() {
+    let cases = [(4096 + 1, 1)];
+    for (size, block_level) in cases {
+        let data = &make_test_data(size);
+        let block_size = BlockSize(block_level);
+        let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
+        let pair = encode_decode_full_sync_impl(data, outboard);
+        assert_tuple_eq!(pair);
+    }
 }
 
 fn encode_decode_partial_sync_impl(
@@ -947,12 +960,8 @@ fn encode_decode_partial_sync_impl(
                 }
             }
             DecodeResponseItem::Parent(Parent { node, pair }) => {
-                if node.0 == u64::MAX {
-                    continue;
-                }
                 // check that the hash pair matches
-                if let Some(node) = node.add_block_size(outboard.tree.block_size.0) {
-                    let expected_pair = outboard.load(node).unwrap().unwrap();
+                if let Some(expected_pair) = outboard.load(node).unwrap() {
                     if pair != expected_pair {
                         return false;
                     }
@@ -1057,12 +1066,9 @@ async fn encode_decode_partial_fsm_impl(
                     }
                     BaoContentItem::Parent(Parent { node, pair }) => {
                         // check that the hash pair matches
-                        if node.level() >= outboard.tree.block_size.0 as u32 {
-                            if let Some(node) = node.add_block_size(outboard.tree.block_size.0) {
-                                let expected_pair = outboard.load(node).unwrap().unwrap();
-                                if pair != expected_pair {
-                                    return false;
-                                }
+                        if let Some(expected_pair) = outboard.load(node).unwrap() {
+                            if pair != expected_pair {
+                                return false;
                             }
                         }
                     }

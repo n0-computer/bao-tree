@@ -397,7 +397,9 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 return Ok(Some(Header { size }.into()));
             }
         };
-        match inner.next() {
+        let item = inner.next();
+        println!("ResponseChunk item: {:?}", item);
+        match item {
             Some(ResponseChunk::Parent {
                 is_root,
                 left,
@@ -619,6 +621,7 @@ where
                     outboard = Some(create(tree.take().unwrap(), root)?);
                     outboard.as_mut().unwrap()
                 };
+                println!("outboard.save: {:?} {:?} {}", node, pair, node.level());
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {

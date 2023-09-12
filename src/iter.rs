@@ -634,7 +634,7 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                     ..
                 } => {
                     break Some(ResponseChunk::Parent {
-                        node: node.subtract_block_size(self.tree().block_size.0),
+                        node,
                         is_root,
                         right,
                         left,
@@ -833,7 +833,6 @@ pub(crate) fn select_nodes_rec(
             let (l_ranges, r_ranges) = ranges.split(mid_chunk);
             emit(ResponseChunk::Parent {
                 // TODO: do not use the marker here!
-                // node: TreeNode(u64::MAX),
                 node: TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(0)),
                 is_root,
                 left: !l_ranges.is_empty(),
