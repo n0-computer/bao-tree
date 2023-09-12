@@ -295,8 +295,8 @@ where
             } else {
                 (*parent_hash, blake3::Hash::from([0; 32]))
             };
-            if let Some(leaf) = node.as_leaf() {
-                let start = self.tree.chunk_num(leaf);
+            if node.is_leaf() {
+                let start = node.chunk_range().start;
                 let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
                 self.res |= RangeSet2::from(start..end);
             } else {
@@ -517,7 +517,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     let mut out_buf = Vec::new();
     // write header
     encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
-    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
+    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, tree.block_size.0) {
         match item {
             BaoChunk::Parent {
                 is_root,
@@ -679,6 +679,7 @@ pub(crate) fn outboard_post_order_impl(
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
     for item in tree.post_order_chunks_iter() {
+        println!("{:?}", item);
         match item {
             BaoChunk::Parent { is_root, .. } => {
                 let right_hash = stack.pop().unwrap();
@@ -757,8 +758,8 @@ where
                     // we got a validation error. Simply continue without adding the range
                     return Ok(());
                 }
-                if let Some(leaf) = node.as_leaf() {
-                    let (s, m, e) = self.tree.leaf_byte_ranges3(leaf);
+                if node.is_leaf() {
+                    let (s, m, e) = self.tree.leaf_byte_ranges3(node);
                     let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
                     let actual = hash_subtree(s.chunks().0, l_data, false);
                     if actual == l_hash {
@@ -777,8 +778,8 @@ where
                     let right = node.right_descendant(self.valid_nodes).unwrap();
                     self.validate_rec(&r_hash, right, false)?;
                 }
-            } else if let Some(leaf) = node.as_leaf() {
-                let (s, m, _) = self.tree.leaf_byte_ranges3(leaf);
+            } else if node.is_leaf() {
+                let (s, m, _) = self.tree.leaf_byte_ranges3(node);
                 let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
                 let actual = hash_subtree(s.chunks().0, l_data, is_root);
                 if actual == *parent_hash {

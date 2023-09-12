@@ -20,6 +20,8 @@ use crate::{blake3, BaoTree, BlockSize, ChunkNum, TreeNode};
 pub struct NodeInfo<'a> {
     /// the node
     pub node: TreeNode,
+    /// the node is the root node (needs special handling when computing hash)
+    pub is_root: bool,
     /// ranges of the node and it's two children
     pub ranges: &'a RangeSetRef<ChunkNum>,
     /// left child intersection with the query range
@@ -30,8 +32,6 @@ pub struct NodeInfo<'a> {
     pub full: bool,
     /// the node is a leaf for the purpose of this query
     pub query_leaf: bool,
-    /// the node is the root node (needs special handling when computing hash)
-    pub is_root: bool,
     /// true if this node is the last leaf, and it is <= half full
     pub is_half_leaf: bool,
 }
@@ -58,7 +58,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
         let mut stack = SmallVec::new();
-        stack.push((tree.root(), ranges));
+        stack.push((tree.root_for_level(), ranges));
         Self {
             tree,
             tree_filled_size: tree.filled_size(),
@@ -87,23 +87,26 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
             let is_half_leaf = !tree.is_persisted(node);
             let (l_ranges, r_ranges) = if !is_half_leaf {
                 // the middle chunk of the node
-                let mid = node.mid().to_chunks(tree.block_size);
+                let mid = node.mid();
                 // split the ranges into left and right
                 ranges.split(mid)
             } else {
                 (ranges, ranges)
             };
             // the start chunk of the node
-            let start = node.block_range().start.to_chunks(tree.block_size);
+            let start = node.chunk_range().start;
             // check if the node is fully included
             let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
             // we can't recurse if the node is a leaf
             // we don't want to recurse if the node is full and below the minimum level
-            let query_leaf = node.is_leaf() || (full && node.level() <= self.max_skip_level as u32);
+            let query_leaf =
+                self.tree.is_leaf(node) || (full && node.level() <= self.max_skip_level as u32);
             // recursion is just pushing the children onto the stack
             if !query_leaf {
                 let l = node.left_child().unwrap();
-                let r = node.right_descendant(self.tree_filled_size).unwrap();
+                let r = node
+                    .right_descendant_to(self.tree_filled_size, self.tree.block_size)
+                    .unwrap();
                 // push right first so we pop left first
                 self.stack.push((r, r_ranges));
                 self.stack.push((l, l_ranges));
@@ -134,6 +137,8 @@ pub struct PostOrderNodeIter {
     curr: TreeNode,
     /// where we came from, used to determine the next node
     prev: Prev,
+    /// block size
+    block_size: BlockSize,
 }
 
 impl PostOrderNodeIter {
@@ -141,8 +146,9 @@ impl PostOrderNodeIter {
     pub fn new(tree: BaoTree) -> Self {
         Self {
             len: tree.filled_size(),
-            curr: tree.root(),
+            curr: tree.root_for_level(),
             prev: Prev::Parent,
+            block_size: tree.block_size,
         }
     }
 
@@ -161,19 +167,15 @@ impl PostOrderNodeIter {
             (curr, Prev::Done)
         };
     }
-}
 
-impl Iterator for PostOrderNodeIter {
-    type Item = TreeNode;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next0(&mut self) -> Option<TreeNode> {
         loop {
             let curr = self.curr;
             match self.prev {
                 Prev::Parent => {
-                    if let Some(child) = curr.left_child() {
+                    if curr.level() > self.block_size.0 as u32 {
                         // go left first when coming from above, don't emit curr
-                        self.curr = child;
+                        self.curr = curr.left_child().unwrap();
                         self.prev = Prev::Parent;
                     } else {
                         // we are a left or right leaf, go up and emit curr
@@ -184,7 +186,7 @@ impl Iterator for PostOrderNodeIter {
                 Prev::Left => {
                     // no need to check is_leaf, since we come from a left child
                     // go right when coming from left, don't emit curr
-                    self.curr = curr.right_descendant(self.len).unwrap();
+                    self.curr = curr.right_descendant_to(self.len, self.block_size).unwrap();
                     self.prev = Prev::Parent;
                 }
                 Prev::Right => {
@@ -200,6 +202,14 @@ impl Iterator for PostOrderNodeIter {
     }
 }
 
+impl Iterator for PostOrderNodeIter {
+    type Item = TreeNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next0()
+    }
+}
+
 /// Iterator over all nodes in a BaoTree in pre-order.
 #[derive(Debug)]
 pub struct PreOrderNodeIter {
@@ -209,6 +219,8 @@ pub struct PreOrderNodeIter {
     curr: TreeNode,
     /// where we came from, used to determine the next node
     prev: Prev,
+    /// block size
+    block_size: BlockSize,
 }
 
 impl PreOrderNodeIter {
@@ -216,8 +228,9 @@ impl PreOrderNodeIter {
     pub fn new(tree: BaoTree) -> Self {
         Self {
             len: tree.filled_size(),
-            curr: tree.root(),
+            curr: tree.root_for_level(),
             prev: Prev::Parent,
+            block_size: tree.block_size,
         }
     }
 
@@ -246,9 +259,9 @@ impl Iterator for PreOrderNodeIter {
             let curr = self.curr;
             match self.prev {
                 Prev::Parent => {
-                    if let Some(child) = curr.left_child() {
+                    if curr.level() > self.block_size.0 as u32 {
                         // go left first when coming from above
-                        self.curr = child;
+                        self.curr = curr.left_child().unwrap();
                         self.prev = Prev::Parent;
                     } else {
                         // we are a left or right leaf, go up
@@ -260,7 +273,7 @@ impl Iterator for PreOrderNodeIter {
                 Prev::Left => {
                     // no need to check is_leaf, since we come from a left child
                     // go right when coming from left, don't emit curr
-                    self.curr = curr.right_descendant(self.len).unwrap();
+                    self.curr = curr.right_descendant_to(self.len, self.block_size).unwrap();
                     self.prev = Prev::Parent;
                 }
                 Prev::Right => {
@@ -376,12 +389,14 @@ pub struct PostOrderChunkIter {
 impl PostOrderChunkIter {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree) -> Self {
+        let inner = PostOrderNodeIter::new(tree);
+        let root = inner.curr;
         Self {
             tree,
-            inner: PostOrderNodeIter::new(tree),
+            inner,
             stack: Default::default(),
             index: 0,
-            root: tree.root(),
+            root,
         }
     }
 
@@ -419,10 +434,10 @@ impl Iterator for PostOrderChunkIter {
                     ranges: (),
                 });
             }
-            if let Some(leaf) = node.as_leaf() {
+            if node.level() == self.tree.block_size.0 as u32 {
                 let tree = &self.tree;
-                let (s, m, e) = tree.leaf_byte_ranges3(leaf);
-                let l_start_chunk = tree.chunk_num(leaf);
+                let (s, m, e) = tree.leaf_byte_ranges3(node);
+                let l_start_chunk = node.chunk_range().start;
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
                 let is_half_leaf = m == e;
                 if !is_half_leaf {
@@ -524,10 +539,11 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
                 query_leaf,
                 ..
             } = self.inner.next()?;
-            if let Some(leaf) = node.as_leaf() {
-                let tree = &self.inner.tree;
-                let (s, m, e) = tree.leaf_byte_ranges3(leaf);
-                let l_start_chunk = tree.chunk_num(leaf);
+            let tree = &self.inner.tree;
+            let is_leaf = tree.is_leaf(node);
+            if is_leaf {
+                let (s, m, e) = tree.leaf_byte_ranges3(node);
+                let l_start_chunk = node.chunk_range().start;
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
                 if !r_ranges.is_empty() && !is_half_leaf {
                     self.push(BaoChunk::Leaf {
@@ -548,7 +564,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
             }
             // the last leaf is a special case, since it does not have a parent if it is <= half full
             if !is_half_leaf {
-                let chunk = if query_leaf && !node.is_leaf() {
+                let chunk = if query_leaf && !is_leaf {
                     // the node is a leaf for the purpose of this query despite not being a leaf,
                     // so we need to return a BaoChunk::Leaf spanning the whole node
                     let tree = self.tree();

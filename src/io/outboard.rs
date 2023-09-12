@@ -167,7 +167,7 @@ impl PostOrderMemOutboard {
 
 impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
     pub(crate) fn new(root: blake3::Hash, tree: BaoTree, data: T) -> Self {
-        assert!(data.as_ref().len() as u64 == tree.outboard_hash_pairs() * 64);
+        assert_eq!(data.as_ref().len() as u64, tree.outboard_hash_pairs() * 64);
         Self { root, tree, data }
     }
 

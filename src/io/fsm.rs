@@ -710,8 +710,8 @@ where
                     } else {
                         (*parent_hash, blake3::Hash::from([0; 32]))
                     };
-                if let Some(leaf) = node.as_leaf() {
-                    let start = self.tree.chunk_num(leaf);
+                if node.is_leaf() {
+                    let start = node.chunk_range().start;
                     let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
                     self.res |= RangeSet2::from(start..end);
                 } else {

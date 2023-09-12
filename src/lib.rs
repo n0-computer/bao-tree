@@ -127,8 +127,8 @@ impl BaoTree {
     }
 
     fn byte_range(&self, node: TreeNode) -> Range<ByteNum> {
-        let start = node.block_range().start.to_bytes(self.block_size);
-        let end = node.block_range().end.to_bytes(self.block_size);
+        let start = node.chunk_range().start.to_bytes();
+        let end = node.chunk_range().end.to_bytes();
         start..end.min(self.size)
     }
 
@@ -136,12 +136,12 @@ impl BaoTree {
     ///
     /// Returns two ranges, the first is the left range, the second is the right range
     /// If the leaf is partially contained in the tree, the right range will be empty
-    fn leaf_byte_ranges3(&self, leaf: LeafNode) -> (ByteNum, ByteNum, ByteNum) {
-        let chunk_group_bytes = self.chunk_group_bytes();
-        let start = chunk_group_bytes * leaf.0;
-        let mid = start + chunk_group_bytes;
-        let end = start + chunk_group_bytes * 2;
-        debug_assert!(start < self.size || (start == 0 && self.size == 0));
+    fn leaf_byte_ranges3(&self, leaf: TreeNode) -> (ByteNum, ByteNum, ByteNum) {
+        let Range { start, end } = leaf.byte_range();
+        let mid = leaf.mid().to_bytes();
+        if !(start < self.size || (start == 0 && self.size == 0)) {
+            debug_assert!(start < self.size || (start == 0 && self.size == 0));
+        }
         (start, mid.min(self.size), end.min(self.size))
     }
 
@@ -195,8 +195,25 @@ impl BaoTree {
     }
 
     /// Root of the tree
+    ///
+    /// Does not consider block size
     pub fn root(&self) -> TreeNode {
-        TreeNode::root(self.blocks())
+        let shift = 10;
+        let mask = (1 << shift) - 1;
+        let full_blocks = self.size.0 >> shift;
+        let open_block = ((self.size.0 & mask) != 0) as u64;
+        let blocks = (full_blocks + open_block).max(1);
+        let chunks = ChunkNum(blocks);
+        TreeNode::root(chunks)
+    }
+
+    ///
+    pub fn root_for_level(&self) -> TreeNode {
+        let mut root = self.root();
+        while root.level() < self.block_size.0 as u32 {
+            root = root.parent().unwrap();
+        }
+        root
     }
 
     /// Number of blocks in the tree
@@ -224,21 +241,22 @@ impl BaoTree {
     }
 
     fn filled_size(&self) -> TreeNode {
-        let blocks = self.blocks();
+        let blocks = self.chunks();
         let n = (blocks.0 + 1) / 2;
         TreeNode(n + n.saturating_sub(1))
     }
 
-    /// Given a leaf node of this tree, return its start chunk number
-    pub const fn chunk_num(&self, node: LeafNode) -> ChunkNum {
-        // block number of a leaf node is just the node number
-        // multiply by chunk_group_size to get the chunk number
-        ChunkNum(node.0 << self.block_size.0)
-    }
-
     /// true if the given node is complete/sealed
     fn is_sealed(&self, node: TreeNode) -> bool {
-        node.byte_range(self.block_size).end <= self.size
+        node.byte_range().end <= self.size
+    }
+
+    /// true if the node is a leaf for this tree
+    ///
+    /// If a tree has a non-zero block size, this is different than the node
+    /// being a leaf (level=0).
+    const fn is_leaf(&self, node: TreeNode) -> bool {
+        node.level() == self.block_size.0 as u32
     }
 
     /// true if the given node is persisted
@@ -247,12 +265,7 @@ impl BaoTree {
     /// less than half full
     #[inline]
     const fn is_persisted(&self, node: TreeNode) -> bool {
-        !node.is_leaf() || self.bytes(node.mid()).0 < self.size.0
-    }
-
-    #[inline]
-    const fn bytes(&self, blocks: BlockNum) -> ByteNum {
-        ByteNum(blocks.0 << (10 + self.block_size.0))
+        !self.is_leaf(node) || node.mid().to_bytes().0 < self.size.0
     }
 
     /// The offset of the given node in the pre order traversal
@@ -267,16 +280,21 @@ impl BaoTree {
 
     /// The offset of the given node in the post order traversal
     pub fn post_order_offset(&self, node: TreeNode) -> Option<PostOrderOffset> {
-        if self.is_sealed(node) {
-            Some(PostOrderOffset::Stable(node.post_order_offset()))
+        let shifted = node.add_block_size(self.block_size.0)?;
+        let end = ByteNum(shifted.byte_range().end.0 << self.block_size.0);
+        let mid = ByteNum(shifted.mid().to_bytes().0 << self.block_size.0);
+        if end <= self.size {
+            // stable node, use post_order_offset
+            Some(PostOrderOffset::Stable(shifted.post_order_offset()))
         } else {
-            // a leaf node that only has data on the left is not persisted
-            if !self.is_persisted(node) {
+            // unstable node
+            if shifted.is_leaf() && mid >= self.size {
+                // half full leaf node, not considered
                 None
             } else {
                 // compute the offset based on the total size and the height of the node
                 self.outboard_hash_pairs()
-                    .checked_sub(u64::from(node.right_count()) + 1)
+                    .checked_sub(u64::from(shifted.right_count()) + 1)
                     .map(PostOrderOffset::Unstable)
             }
         }
@@ -333,16 +351,6 @@ impl ChunkNum {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TreeNode(u64);
 
-/// A tree node for which we know that it is a leaf node.
-#[derive(Debug, Clone, Copy)]
-pub struct LeafNode(u64);
-
-impl From<LeafNode> for TreeNode {
-    fn from(leaf: LeafNode) -> TreeNode {
-        Self(leaf.0)
-    }
-}
-
 impl fmt::Debug for TreeNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if !f.alternate() {
@@ -375,13 +383,13 @@ impl TreeNode {
     }
 
     /// Given a number of blocks, gives root node
-    fn root(blocks: BlockNum) -> TreeNode {
-        Self(((blocks.0 + 1) / 2).next_power_of_two() - 1)
+    fn root(chunks: ChunkNum) -> TreeNode {
+        Self(((chunks.0 + 1) / 2).next_power_of_two() - 1)
     }
 
     /// the middle of the tree node, in blocks
-    pub const fn mid(&self) -> BlockNum {
-        BlockNum(self.0 + 1)
+    pub const fn mid(&self) -> ChunkNum {
+        ChunkNum(self.0 + 1)
     }
 
     #[inline]
@@ -428,19 +436,9 @@ impl TreeNode {
     /// Note that this will give the untruncated range, which may be larger than
     /// the actual tree. To get the exact byte range for a tree, use
     /// [BaoTree::byte_range];
-    fn byte_range(&self, block_size: BlockSize) -> Range<ByteNum> {
-        let range = self.block_range();
-        let shift = 10 + block_size.0;
-        ByteNum(range.start.0 << shift)..ByteNum(range.end.0 << shift)
-    }
-
-    /// Convert to a leaf node, if this is a leaf node.
-    pub const fn as_leaf(&self) -> Option<LeafNode> {
-        if self.is_leaf() {
-            Some(LeafNode(self.0))
-        } else {
-            None
-        }
+    fn byte_range(&self) -> Range<ByteNum> {
+        let range = self.chunk_range();
+        range.start.to_bytes()..range.end.to_bytes()
     }
 
     /// Number of nodes below this node, excluding this node.
@@ -496,6 +494,15 @@ impl TreeNode {
         Some(node)
     }
 
+    /// Get a valid right descendant for an offset
+    pub(crate) fn right_descendant_to(&self, len: Self, level: BlockSize) -> Option<Self> {
+        let mut node = self.right_child()?;
+        while node.0 >= len.0 && node.level() > level.0 as u32 {
+            node = node.left_child().unwrap();
+        }
+        Some(node)
+    }
+
     fn left_child0(&self) -> Option<u64> {
         let offset = 1 << self.level().checked_sub(1)?;
         Some(self.0 - offset)
@@ -530,13 +537,13 @@ impl TreeNode {
     }
 
     /// Get the range of blocks this node covers
-    pub fn block_range(&self) -> Range<BlockNum> {
-        let Range { start, end } = self.block_range0();
-        BlockNum(start)..BlockNum(end)
+    pub fn chunk_range(&self) -> Range<ChunkNum> {
+        let Range { start, end } = self.chunk_range0();
+        ChunkNum(start)..ChunkNum(end)
     }
 
     /// Range of blocks this node covers
-    const fn block_range0(&self) -> Range<u64> {
+    const fn chunk_range0(&self) -> Range<u64> {
         let level = self.level();
         let span = 1 << level;
         let mid = self.0 + 1;
