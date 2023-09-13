@@ -13,3 +13,5 @@ cc cbe7ccc5004f11743e7dcb44c326e0adef37331f0ece24d9631c4d796a4fde14 # shrinks to
 cc 2dd3a6e486771a28dd33503b455164e7fe2d57e2c3650dadaa369e5597ce3f38 # shrinks to (len, start, size) = (2119, 2, 1)
 cc 38cb282a3a063edca467c9966bda6edc4e9247294f920b8e6b6e718d558eb416 # shrinks to size = 4097, block_size = 1, max_skip_level = 1
 cc 5a31ac5d77dd77abcca740ba5a69a27f556176085f07fabcf1f517426efcde1a # shrinks to len = 0, level = 1
+cc d2bcee892c5aef35792e4850d18e3f02b19caa0369c5561b1d8651adf7b53502 # shrinks to (len, start, size) = (1025, 0, 1)
+cc 19ffd5008f66fc17ed286088f3fd6a2584f40b5bdb58b1fb62be848cce8dd124 # shrinks to (len, start, size) = (9221, 1, 8)

@@ -8,7 +8,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use self_cell::self_cell;
 use smallvec::SmallVec;
 
-use crate::{blake3, BaoTree, BlockSize, ChunkNum, TreeNode, ByteNum};
+use crate::{blake3, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode};
 
 /// Extended node info.
 ///
@@ -43,8 +43,6 @@ pub struct NodeInfo<'a> {
 pub struct PreOrderPartialIterRef<'a> {
     /// the tree we want to traverse
     tree: BaoTree,
-    /// number of valid nodes, needed in node.right_descendant
-    tree_filled_size: TreeNode,
     /// the maximum level that is skipped from the traversal if it is fully
     /// included in the query range.
     max_skip_level: u8,
@@ -52,18 +50,21 @@ pub struct PreOrderPartialIterRef<'a> {
     is_root: bool,
     /// stack of nodes to visit
     stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
+    /// number of valid nodes, needed in node.right_descendant
+    tree_filled_size: TreeNode,
 }
 
 impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
         let mut stack = SmallVec::new();
+        let (shifted_root, tree_filled_size) = shift_tree(tree.size, tree.block_size);
         stack.push((tree.root_for_level(), ranges));
         Self {
             tree,
-            tree_filled_size: tree.filled_size(),
             max_skip_level,
             stack,
+            tree_filled_size: tree.filled_size(),
             is_root: true,
         }
     }
@@ -150,7 +151,7 @@ pub(crate) fn shift_tree(size: ByteNum, level: BlockSize) -> (TreeNode, TreeNode
 }
 
 /// Iterator over all nodes in a tree in post-order.
-/// 
+///
 /// If you want to iterate only down to some level, you need to shift the tree
 /// before.
 #[derive(Debug)]
@@ -164,7 +165,6 @@ pub struct PostOrderNodeIter2 {
 }
 
 impl PostOrderNodeIter2 {
-
     /// Create a new iterator over the tree.
     pub fn new(root: TreeNode, len: TreeNode) -> Self {
         Self {

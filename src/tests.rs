@@ -5,6 +5,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+use iroh_io::file;
 use proptest::{prelude::*, strategy};
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 
@@ -16,8 +17,8 @@ use crate::{
         Header, Leaf, Parent,
     },
     iter::{
-        encode_selected_rec, select_nodes_rec, PostOrderChunkIter, PostOrderNodeIter2,
-        PreOrderPartialChunkIterRef, PreOrderPartialIterRef, ResponseChunk, ResponseIterRef, shift_tree,
+        encode_selected_rec, shift_tree, PostOrderChunkIter, PostOrderNodeIter2,
+        PreOrderPartialChunkIterRef, PreOrderPartialIterRef, ResponseChunk, ResponseIterRef,
     },
     recursive_hash_subtree,
 };
@@ -407,7 +408,7 @@ fn nodes_preorder_comparison_impl(size: ByteNum, block_size: BlockSize) -> Pair<
     let expected = PostOrderNodeIter2::new(root, filled_size)
         .map(|node| node.subtract_block_size(shift))
         .collect::<Vec<_>>();
-    let actual = BaoTree::new(size, block_size)
+    let actual = tree
         .post_order_nodes_iter()
         .collect::<Vec<_>>();
     (expected, actual)
