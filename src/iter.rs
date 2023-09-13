@@ -46,26 +46,30 @@ pub struct PreOrderPartialIterRef<'a> {
     /// the maximum level that is skipped from the traversal if it is fully
     /// included in the query range.
     max_skip_level: u8,
-    /// is root
-    is_root: bool,
-    /// stack of nodes to visit
+    /// stack of nodes to visit, together with the ranges that are relevant for the node
+    ///
+    /// The node is shifted by the block size, so these are not normal nodes!
     stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
-    /// number of valid nodes, needed in node.right_descendant
-    tree_filled_size: TreeNode,
+    /// number of valid nodes, needed in shifted.right_descendant
+    ///
+    /// This is also shifted by the block size!
+    shifted_filled_size: TreeNode,
+    /// The root node, shifted by the block size, needed for the is_root check
+    shifted_root: TreeNode,
 }
 
 impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
         let mut stack = SmallVec::new();
-        let (shifted_root, tree_filled_size) = shift_tree(tree.size, tree.block_size);
-        stack.push((tree.root_for_level(), ranges));
+        let (shifted_root, shifted_filled_size) = shift_tree(tree.size, tree.block_size);
+        stack.push((shifted_root, ranges));
         Self {
             tree,
             max_skip_level,
             stack,
-            tree_filled_size: tree.filled_size(),
-            is_root: true,
+            shifted_filled_size,
+            shifted_root,
         }
     }
 
@@ -81,10 +85,11 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let tree = &self.tree;
         loop {
-            let (node, ranges) = self.stack.pop()?;
+            let (shifted, ranges) = self.stack.pop()?;
             if ranges.is_empty() {
                 continue;
             }
+            let node = shifted.subtract_block_size(tree.block_size.0);
             let is_half_leaf = !tree.is_persisted(node);
             let (l_ranges, r_ranges) = if !is_half_leaf {
                 // the middle chunk of the node
@@ -104,16 +109,14 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
                 self.tree.is_leaf(node) || (full && node.level() <= self.max_skip_level as u32);
             // recursion is just pushing the children onto the stack
             if !query_leaf {
-                let l = node.left_child().unwrap();
-                let r = node
-                    .right_descendant_to(self.tree_filled_size, self.tree.block_size)
-                    .unwrap();
+                let l = shifted.left_child().unwrap();
+                let r = shifted.right_descendant(self.shifted_filled_size).unwrap();
                 // push right first so we pop left first
                 self.stack.push((r, r_ranges));
                 self.stack.push((l, l_ranges));
             }
-            let is_root = self.is_root;
-            self.is_root = false;
+            // the first node is the root, so just set the flag to false afterwards
+            let is_root = shifted == self.shifted_root;
             // emit the node in any case
             break Some(NodeInfo {
                 node,
@@ -155,7 +158,7 @@ pub(crate) fn shift_tree(size: ByteNum, level: BlockSize) -> (TreeNode, TreeNode
 /// If you want to iterate only down to some level, you need to shift the tree
 /// before.
 #[derive(Debug)]
-pub struct PostOrderNodeIter2 {
+pub struct PostOrderNodeIter {
     /// the overall number of nodes in the tree
     len: TreeNode,
     /// the current node, None if we are done
@@ -164,8 +167,8 @@ pub struct PostOrderNodeIter2 {
     prev: Prev,
 }
 
-impl PostOrderNodeIter2 {
-    /// Create a new iterator over the tree.
+impl PostOrderNodeIter {
+    /// Create a new iterator given a root node and a len
     pub fn new(root: TreeNode, len: TreeNode) -> Self {
         Self {
             curr: root,
@@ -191,7 +194,7 @@ impl PostOrderNodeIter2 {
     }
 }
 
-impl Iterator for PostOrderNodeIter2 {
+impl Iterator for PostOrderNodeIter {
     type Item = TreeNode;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -228,88 +231,6 @@ impl Iterator for PostOrderNodeIter2 {
     }
 }
 
-/// Iterator over all nodes in a BaoTree in post-order.
-#[derive(Debug)]
-pub struct PostOrderNodeIter {
-    /// the overall number of nodes in the tree
-    len: TreeNode,
-    /// the current node, None if we are done
-    curr: TreeNode,
-    /// where we came from, used to determine the next node
-    prev: Prev,
-    /// block size
-    block_size: BlockSize,
-}
-
-impl PostOrderNodeIter {
-    /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree) -> Self {
-        Self {
-            len: tree.filled_size(),
-            curr: tree.root_for_level(),
-            prev: Prev::Parent,
-            block_size: tree.block_size,
-        }
-    }
-
-    fn go_up(&mut self, curr: TreeNode) {
-        let prev = curr;
-        (self.curr, self.prev) = if let Some(parent) = curr.restricted_parent(self.len) {
-            (
-                parent,
-                if prev < parent {
-                    Prev::Left
-                } else {
-                    Prev::Right
-                },
-            )
-        } else {
-            (curr, Prev::Done)
-        };
-    }
-
-    fn next0(&mut self) -> Option<TreeNode> {
-        loop {
-            let curr = self.curr;
-            match self.prev {
-                Prev::Parent => {
-                    if curr.level() > self.block_size.0 as u32 {
-                        // go left first when coming from above, don't emit curr
-                        self.curr = curr.left_child().unwrap();
-                        self.prev = Prev::Parent;
-                    } else {
-                        // we are a left or right leaf, go up and emit curr
-                        self.go_up(curr);
-                        break Some(curr);
-                    }
-                }
-                Prev::Left => {
-                    // no need to check is_leaf, since we come from a left child
-                    // go right when coming from left, don't emit curr
-                    self.curr = curr.right_descendant_to(self.len, self.block_size).unwrap();
-                    self.prev = Prev::Parent;
-                }
-                Prev::Right => {
-                    // go up in any case, do emit curr
-                    self.go_up(curr);
-                    break Some(curr);
-                }
-                Prev::Done => {
-                    break None;
-                }
-            }
-        }
-    }
-}
-
-impl Iterator for PostOrderNodeIter {
-    type Item = TreeNode;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next0()
-    }
-}
-
 /// Iterator over all nodes in a BaoTree in pre-order.
 #[derive(Debug)]
 pub struct PreOrderNodeIter {
@@ -319,18 +240,15 @@ pub struct PreOrderNodeIter {
     curr: TreeNode,
     /// where we came from, used to determine the next node
     prev: Prev,
-    /// block size
-    block_size: BlockSize,
 }
 
 impl PreOrderNodeIter {
-    /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree) -> Self {
+    /// Create a new iterator given a root node and a len
+    pub fn new(root: TreeNode, len: TreeNode) -> Self {
         Self {
-            len: tree.filled_size(),
-            curr: tree.root_for_level(),
+            curr: root,
+            len,
             prev: Prev::Parent,
-            block_size: tree.block_size,
         }
     }
 
@@ -359,9 +277,9 @@ impl Iterator for PreOrderNodeIter {
             let curr = self.curr;
             match self.prev {
                 Prev::Parent => {
-                    if curr.level() > self.block_size.0 as u32 {
+                    if let Some(child) = curr.left_child() {
                         // go left first when coming from above
-                        self.curr = curr.left_child().unwrap();
+                        self.curr = child;
                         self.prev = Prev::Parent;
                     } else {
                         // we are a left or right leaf, go up
@@ -373,7 +291,7 @@ impl Iterator for PreOrderNodeIter {
                 Prev::Left => {
                     // no need to check is_leaf, since we come from a left child
                     // go right when coming from left, don't emit curr
-                    self.curr = curr.right_descendant_to(self.len, self.block_size).unwrap();
+                    self.curr = curr.right_descendant(self.len).unwrap();
                     self.prev = Prev::Parent;
                 }
                 Prev::Right => {
@@ -477,24 +395,24 @@ impl<T> BaoChunk<T> {
 #[derive(Debug)]
 pub struct PostOrderChunkIter {
     tree: BaoTree,
-    inner: PostOrderNodeIter2,
+    inner: PostOrderNodeIter,
     // stack with 2 elements, since we can only have 2 items in flight
     stack: [BaoChunk; 2],
     index: usize,
-    root: TreeNode,
+    shifted_root: TreeNode,
 }
 
 impl PostOrderChunkIter {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree) -> Self {
-        let (root, len) = shift_tree(tree.size, tree.block_size);
-        let inner = PostOrderNodeIter2::new(root, len);
+        let (shifted_root, shifted_len) = shift_tree(tree.size, tree.block_size);
+        let inner = PostOrderNodeIter::new(shifted_root, shifted_len);
         Self {
             tree,
             inner,
             stack: Default::default(),
             index: 0,
-            root,
+            shifted_root,
         }
     }
 
@@ -521,26 +439,26 @@ impl Iterator for PostOrderChunkIter {
             if let Some(item) = self.pop() {
                 return Some(item);
             }
-            let node = self.inner.next()?;
+            let shifted = self.inner.next()?;
             // the is_root check needs to be done before shifting the node
-            let is_root = node == self.root;
-            let node = node.subtract_block_size(self.tree.block_size.0);
-            if self.tree.is_persisted(node) {
-                self.push(BaoChunk::Parent {
-                    node,
-                    is_root,
-                    left: true,
-                    right: true,
-                    ranges: (),
-                });
-            }
-            if node.level() == self.tree.block_size.0 as u32 {
+            let is_root = shifted == self.shifted_root;
+            let node = shifted.subtract_block_size(self.tree.block_size.0);
+            if shifted.is_leaf() {
                 let tree = &self.tree;
                 let (s, m, e) = tree.leaf_byte_ranges3(node);
                 let l_start_chunk = node.chunk_range().start;
                 let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
                 let is_half_leaf = m == e;
+                // for the half leaf we emit just the leaf
+                // for all other leaves we emit the parent and two leaves
                 if !is_half_leaf {
+                    self.push(BaoChunk::Parent {
+                        node,
+                        is_root,
+                        left: true,
+                        right: true,
+                        ranges: (),
+                    });
                     self.push(BaoChunk::Leaf {
                         is_root: false,
                         start_chunk: r_start_chunk,
@@ -552,6 +470,14 @@ impl Iterator for PostOrderChunkIter {
                     is_root: is_root && is_half_leaf,
                     start_chunk: l_start_chunk,
                     size: (m - s).to_usize(),
+                    ranges: (),
+                });
+            } else {
+                self.push(BaoChunk::Parent {
+                    node,
+                    is_root,
+                    left: true,
+                    right: true,
                     ranges: (),
                 });
             }

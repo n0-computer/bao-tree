@@ -16,11 +16,9 @@
 //! All this is then used in the [io] module to implement the actual io, both
 //! synchronous and asynchronous.
 #![deny(missing_docs)]
-use io::outboard::PostOrderMemOutboard;
 use range_collections::RangeSetRef;
 use std::{
     fmt::{self, Debug},
-    io::Cursor,
     ops::Range,
 };
 #[macro_use]
@@ -35,6 +33,8 @@ pub use iroh_blake3 as blake3;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests2;
 
 fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     if data.len().is_power_of_two() {
@@ -105,22 +105,6 @@ impl BaoTree {
         Self { size, block_size }
     }
 
-    /// Compute the post order outboard for the given data, returning a in mem data structure
-    pub(crate) fn outboard_post_order_mem(
-        data: impl AsRef<[u8]>,
-        block_size: BlockSize,
-    ) -> PostOrderMemOutboard {
-        let data = data.as_ref();
-        let tree = Self::new(ByteNum(data.len() as u64), block_size);
-        let outboard_len: usize = (tree.outboard_hash_pairs() * 64).try_into().unwrap();
-        let mut res = Vec::with_capacity(outboard_len);
-        let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-        let hash =
-            io::sync::outboard_post_order_impl(tree, &mut Cursor::new(data), &mut res, &mut buffer)
-                .unwrap();
-        PostOrderMemOutboard::new(hash, tree, res)
-    }
-
     /// The size of the blob from which this tree was constructed, in bytes
     pub fn size(&self) -> ByteNum {
         self.size
@@ -166,16 +150,20 @@ impl BaoTree {
         PreOrderPartialChunkIterRef::new(*self, ranges, max_skip_level)
     }
 
-    /// Traverse the entire tree in post order as [TreeNode]s
-    ///
-    /// This is mostly used internally by the [PostOrderChunkIter]
-    pub fn post_order_nodes_iter(&self) -> PostOrderNodeIter {
-        PostOrderNodeIter::new(*self)
+    /// Traverse the entire tree in post order as [TreeNode]s,
+    /// down to the level given by the block size.
+    pub fn post_order_nodes_iter(&self) -> impl Iterator<Item = TreeNode> {
+        let (root, len) = shift_tree(self.size, self.block_size);
+        let shift = self.block_size.0;
+        PostOrderNodeIter::new(root, len).map(move |x| x.subtract_block_size(shift))
     }
 
-    /// Traverse the entire tree in pre order as [TreeNode]s
-    pub fn pre_order_nodes_iter(&self) -> PreOrderNodeIter {
-        PreOrderNodeIter::new(*self)
+    /// Traverse the entire tree in pre order as [TreeNode]s,
+    /// down to the level given by the block size.
+    pub fn pre_order_nodes_iter(&self) -> impl Iterator<Item = TreeNode> {
+        let (root, len) = shift_tree(self.size, self.block_size);
+        let shift = self.block_size.0;
+        PreOrderNodeIter::new(root, len).map(move |x| x.subtract_block_size(shift))
     }
 
     /// Traverse the part of the tree that is relevant for a ranges querys
@@ -268,8 +256,10 @@ impl BaoTree {
     const fn is_relevant_for_outboard(&self, node: TreeNode) -> bool {
         let level = node.level();
         if level < self.block_size.0 as u32 {
+            // too small, this outboard does not track it
             false
         } else if level > self.block_size.0 as u32 {
+            // a parent node, always relevant
             true
         } else {
             node.mid().to_bytes().0 < self.size.0
@@ -278,8 +268,12 @@ impl BaoTree {
 
     /// The offset of the given node in the pre order traversal
     pub fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
-        if self.is_relevant_for_outboard(node) {
-            Some(pre_order_offset_loop(node.0, self.filled_size().0))
+        // if the node has a level less than block_size, this will return None
+        let shifted = node.add_block_size(self.block_size.0)?;
+        let is_half_leaf = shifted.is_leaf() && node.mid().to_bytes() >= self.size;
+        if !is_half_leaf {
+            let (_, tree_filled_size) = shift_tree(self.size, self.block_size);
+            Some(pre_order_offset_loop(shifted.0, tree_filled_size.0))
         } else {
             None
         }
@@ -287,15 +281,14 @@ impl BaoTree {
 
     /// The offset of the given node in the post order traversal
     pub fn post_order_offset(&self, node: TreeNode) -> Option<PostOrderOffset> {
+        // if the node has a level less than block_size, this will return None
         let shifted = node.add_block_size(self.block_size.0)?;
-        let end = ByteNum(shifted.byte_range().end.0 << self.block_size.0);
-        let mid = ByteNum(shifted.mid().to_bytes().0 << self.block_size.0);
-        if end <= self.size {
+        if node.byte_range().end <= self.size {
             // stable node, use post_order_offset
             Some(PostOrderOffset::Stable(shifted.post_order_offset()))
         } else {
             // unstable node
-            if shifted.is_leaf() && mid >= self.size {
+            if shifted.is_leaf() && node.mid().to_bytes() >= self.size {
                 // half full leaf node, not considered
                 None
             } else {
@@ -420,6 +413,9 @@ impl TreeNode {
     ///
     /// E.g. a leaf node in a tree with block size 4 will become a node
     /// with level 4 in a tree with block size 0.
+    ///
+    /// This works by just adding n trailing 1 bits to the node by shifting
+    /// to the left.
     #[inline]
     pub const fn subtract_block_size(&self, n: u8) -> Self {
         let shifted = !(!self.0 << n);
@@ -427,6 +423,12 @@ impl TreeNode {
     }
 
     /// Convert a node to a node in a tree with a larger block size
+    ///
+    /// If the nodes has n trailing 1 bits, they are removed by shifting
+    /// the node to the right by n bits.
+    ///
+    /// If the node has less than n trailing 1 bits, the node is too small
+    /// to be represented in the target tree.
     #[inline]
     pub const fn add_block_size(&self, n: u8) -> Option<Self> {
         let mask = (1 << n) - 1;
@@ -497,15 +499,6 @@ impl TreeNode {
         let mut node = self.right_child()?;
         while node.0 >= len.0 {
             node = node.left_child()?;
-        }
-        Some(node)
-    }
-
-    /// Get a valid right descendant for an offset
-    pub(crate) fn right_descendant_to(&self, len: Self, level: BlockSize) -> Option<Self> {
-        let mut node = self.right_child()?;
-        while node.0 >= len.0 && node.level() > level.0 as u32 {
-            node = node.left_child().unwrap();
         }
         Some(node)
     }

@@ -12,7 +12,7 @@ use crate::{
         outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
         Header, Leaf, Parent,
     },
-    iter::{encode_selected_rec, BaoChunk, ResponseChunk},
+    iter::{encode_selected_rec, shift_tree, BaoChunk, ResponseChunk},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 use crate::{hash_subtree, iter::ResponseIterRef};
@@ -262,7 +262,11 @@ impl PostOrderMemOutboard {
         }
         let tree = BaoTree::new(ByteNum(len), block_size);
         outboard.truncate(outboard.len() - 8);
-        Ok(Self::new(root, tree, outboard))
+        Ok(Self {
+            root,
+            tree,
+            data: outboard,
+        })
     }
 }
 
@@ -273,7 +277,7 @@ where
 {
     struct RecursiveValidator<'a, O: Outboard> {
         tree: BaoTree,
-        valid_nodes: TreeNode,
+        shifted_filled_size: TreeNode,
         res: RangeSet2<ChunkNum>,
         outboard: &'a O,
     }
@@ -282,9 +286,10 @@ where
         fn validate_rec(
             &mut self,
             parent_hash: &blake3::Hash,
-            node: TreeNode,
+            shifted: TreeNode,
             is_root: bool,
         ) -> io::Result<()> {
+            let node = shifted.subtract_block_size(self.tree.block_size.0);
             let (l_hash, r_hash) = if let Some((l_hash, r_hash)) = self.outboard.load(node)? {
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
                 if &actual != parent_hash {
@@ -295,15 +300,15 @@ where
             } else {
                 (*parent_hash, blake3::Hash::from([0; 32]))
             };
-            if node.is_leaf() {
+            if shifted.is_leaf() {
                 let start = node.chunk_range().start;
                 let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
                 self.res |= RangeSet2::from(start..end);
             } else {
                 // recurse
-                let left = node.left_child().unwrap();
+                let left = shifted.left_child().unwrap();
                 self.validate_rec(&l_hash, left, false)?;
-                let right = node.right_descendant(self.valid_nodes).unwrap();
+                let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
                 self.validate_rec(&r_hash, right, false)?;
             }
             Ok(())
@@ -311,13 +316,14 @@ where
     }
     let tree = outboard.tree();
     let root_hash = outboard.root();
+    let (shifted_root, shifted_filled_size) = shift_tree(tree.size, tree.block_size);
     let mut validator = RecursiveValidator {
         tree,
-        valid_nodes: tree.filled_size(),
+        shifted_filled_size,
         res: RangeSet2::empty(),
         outboard,
     };
-    validator.validate_rec(&root_hash, tree.root(), true)?;
+    validator.validate_rec(&root_hash, shifted_root, true)?;
     Ok(validator.res)
 }
 
