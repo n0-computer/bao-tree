@@ -238,7 +238,6 @@ impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PostOrderMemOutboard<T> {
     fn save(&mut self, node: TreeNode, pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         match self.tree.post_order_offset(node) {
             Some(offset) => {
-                println!("{:?}", offset);
                 let offset = usize::try_from(offset.value() * 64).unwrap();
                 let data = self.data.as_mut();
                 data[offset..offset + 32].copy_from_slice(pair.0.as_bytes());
@@ -316,13 +315,13 @@ fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutbo
 
 /// A pre order outboard that is optimized for memory storage.
 #[derive(Debug, Clone)]
-pub struct PreOrderMemOutboard<T> {
+pub struct PreOrderMemOutboard<T = Vec<u8>> {
     /// root hash
-    root: blake3::Hash,
+    pub(crate) root: blake3::Hash,
     /// tree defining the data
-    tree: BaoTree,
+    pub(crate) tree: BaoTree,
     /// hashes with length prefix
-    data: T,
+    pub(crate) data: T,
 }
 
 impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {

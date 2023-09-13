@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use proptest::prelude::*;
+use proptest::{prelude::*, strategy};
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 
 use crate::{
@@ -16,8 +16,8 @@ use crate::{
         Header, Leaf, Parent,
     },
     iter::{
-        encode_selected_rec, PostOrderChunkIter, PreOrderChunkIterRef, PreOrderPartialIterRef,
-        ResponseChunk, ResponseIterRef,
+        encode_selected_rec, select_nodes_rec, PostOrderChunkIter, PostOrderNodeIter2,
+        PreOrderPartialChunkIterRef, PreOrderPartialIterRef, ResponseChunk, ResponseIterRef, shift_tree,
     },
     recursive_hash_subtree,
 };
@@ -400,6 +400,39 @@ fn bao_tree_blake3_0() {
     assert_tuple_eq!(bao_tree_blake3_impl(td(10000)));
 }
 
+fn nodes_preorder_comparison_impl(size: ByteNum, block_size: BlockSize) -> Pair<Vec<TreeNode>> {
+    let tree = BaoTree::new(size, block_size);
+    let shift = tree.block_size.0;
+    let (root, filled_size) = shift_tree(tree.size, tree.block_size);
+    let expected = PostOrderNodeIter2::new(root, filled_size)
+        .map(|node| node.subtract_block_size(shift))
+        .collect::<Vec<_>>();
+    let actual = BaoTree::new(size, block_size)
+        .post_order_nodes_iter()
+        .collect::<Vec<_>>();
+    (expected, actual)
+}
+
+#[test]
+fn post_order_node_iter_comparison_cases() {
+    let cases = [(0, 0), (1, 0), (2049, 0), (0, 1), (1, 1), (2049, 1)];
+    for (size, block_level) in cases {
+        let size = ByteNum(size as u64);
+        let block_size = BlockSize(block_level);
+        assert_tuple_eq!(nodes_preorder_comparison_impl(size, block_size));
+    }
+}
+
+#[test_strategy::proptest]
+fn post_order_node_iter_comparison_proptest(
+    #[strategy(0..100000u64)] size: u64,
+    #[strategy(0..5u8)] block_level: u8,
+) {
+    let size = ByteNum(size as u64);
+    let block_size = BlockSize(block_level);
+    assert_tuple_eq!(nodes_preorder_comparison_impl(size, block_size));
+}
+
 #[test]
 fn outboard_from_level() {
     let data = make_test_data(1024 * 16 + 12345);
@@ -490,10 +523,9 @@ fn count_parents(node: u64, len: u64) -> u64 {
     parent_count
 }
 
-fn compare_pre_order_outboard(case: usize) {
-    let size = ByteNum(case as u64);
-    let tree = BaoTree::new(size, BlockSize::ZERO);
-    let perm = create_permutation_reference(case);
+fn compare_pre_order_outboard(size: usize) {
+    let tree = BaoTree::new(ByteNum(size as u64), BlockSize::ZERO);
+    let perm = create_permutation_reference(size);
 
     // print!("{:08b}", perm.len());
     for (k, v) in perm {
@@ -895,7 +927,6 @@ fn encode_decode_full_sync_impl(
     let mut encoded = Vec::new();
     crate::io::sync::encode_ranges_validated(&data, &outboard, &RangeSet2::all(), &mut encoded)
         .unwrap();
-    println!("encoding done!\n\n");
     let mut encoded_read = std::io::Cursor::new(encoded);
     let mut decoded = Vec::new();
     let ob_res_opt = crate::io::sync::decode_response_into(
@@ -918,8 +949,15 @@ fn encode_decode_full_sync_impl(
 
 #[test]
 fn encode_decode_full_sync_cases() {
-    let cases = [(4096 + 1, 1)];
+    let cases = [(1024 + 1, 1)];
     for (size, block_level) in cases {
+        let tree = BaoTree::new(ByteNum(size as u64), BlockSize(block_level));
+        let ranges = RangeSet2::all();
+        for item in ResponseIterRef::new(tree, &ranges) {
+            println!("ResponseChunk {:?}", item);
+        }
+        println!("\n");
+
         let data = &make_test_data(size);
         let block_size = BlockSize(block_level);
         let outboard = BaoTree::outboard_post_order_mem(&data, block_size);
@@ -1122,7 +1160,7 @@ fn test_pre_order_chunks_iter_ref() {
         }
         for i in 0..5 {
             let tree = BaoTree::new(ByteNum(size), BlockSize(i));
-            let items = PreOrderChunkIterRef::new(tree, &ranges, tree.block_size.0);
+            let items = PreOrderPartialChunkIterRef::new(tree, &ranges, tree.block_size.0);
             println!("{}", i);
             for item in items {
                 println!("{:?}", item);

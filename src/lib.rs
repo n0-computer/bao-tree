@@ -162,8 +162,8 @@ impl BaoTree {
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
         max_skip_level: u8,
-    ) -> PreOrderChunkIterRef<'a> {
-        PreOrderChunkIterRef::new(*self, ranges, max_skip_level)
+    ) -> PreOrderPartialChunkIterRef<'a> {
+        PreOrderPartialChunkIterRef::new(*self, ranges, max_skip_level)
     }
 
     /// Traverse the entire tree in post order as [TreeNode]s

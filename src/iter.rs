@@ -8,7 +8,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use self_cell::self_cell;
 use smallvec::SmallVec;
 
-use crate::{blake3, BaoTree, BlockSize, ChunkNum, TreeNode};
+use crate::{blake3, BaoTree, BlockSize, ChunkNum, TreeNode, ByteNum};
 
 /// Extended node info.
 ///
@@ -124,6 +124,106 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
                 is_root,
                 is_half_leaf,
             });
+        }
+    }
+}
+
+/// Given a tree of size `size` and block size `block_size`,
+/// compute the root node and the number of nodes for a shifted tree.
+pub(crate) fn shift_tree(size: ByteNum, level: BlockSize) -> (TreeNode, TreeNode) {
+    let level = level.0;
+    let size = size.0;
+    let shift = 10 + level;
+    let mask = (1 << shift) - 1;
+    // number of full blocks of size 1024 << level
+    let full_blocks = size >> shift;
+    // 1 if the last block is non zero, 0 otherwise
+    let open_block = ((size & mask) != 0) as u64;
+    // total number of blocks, rounding up to 1 if there are no blocks
+    let blocks = (full_blocks + open_block).max(1);
+    let n = (blocks + 1) / 2;
+    // root node
+    let root = n.next_power_of_two() - 1;
+    // number of nodes in the tree
+    let filled_size = n + n.saturating_sub(1);
+    (TreeNode(root), TreeNode(filled_size))
+}
+
+/// Iterator over all nodes in a tree in post-order.
+/// 
+/// If you want to iterate only down to some level, you need to shift the tree
+/// before.
+#[derive(Debug)]
+pub struct PostOrderNodeIter2 {
+    /// the overall number of nodes in the tree
+    len: TreeNode,
+    /// the current node, None if we are done
+    curr: TreeNode,
+    /// where we came from, used to determine the next node
+    prev: Prev,
+}
+
+impl PostOrderNodeIter2 {
+
+    /// Create a new iterator over the tree.
+    pub fn new(root: TreeNode, len: TreeNode) -> Self {
+        Self {
+            curr: root,
+            len,
+            prev: Prev::Parent,
+        }
+    }
+
+    fn go_up(&mut self, curr: TreeNode) {
+        let prev = curr;
+        (self.curr, self.prev) = if let Some(parent) = curr.restricted_parent(self.len) {
+            (
+                parent,
+                if prev < parent {
+                    Prev::Left
+                } else {
+                    Prev::Right
+                },
+            )
+        } else {
+            (curr, Prev::Done)
+        };
+    }
+}
+
+impl Iterator for PostOrderNodeIter2 {
+    type Item = TreeNode;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let curr = self.curr;
+            match self.prev {
+                Prev::Parent => {
+                    if let Some(child) = curr.left_child() {
+                        // go left first when coming from above, don't emit curr
+                        self.curr = child;
+                        self.prev = Prev::Parent;
+                    } else {
+                        // we are a left or right leaf, go up and emit curr
+                        self.go_up(curr);
+                        break Some(curr);
+                    }
+                }
+                Prev::Left => {
+                    // no need to check is_leaf, since we come from a left child
+                    // go right when coming from left, don't emit curr
+                    self.curr = curr.right_descendant(self.len).unwrap();
+                    self.prev = Prev::Parent;
+                }
+                Prev::Right => {
+                    // go up in any case, do emit curr
+                    self.go_up(curr);
+                    break Some(curr);
+                }
+                Prev::Done => {
+                    break None;
+                }
+            }
         }
     }
 }
@@ -311,8 +411,6 @@ pub enum ResponseChunk {
         left: bool,
         /// Push the right hash to the stack, since it will be needed later
         right: bool,
-        ///
-        is_subchunk: bool,
     },
     /// expect data of size `size`
     ///
@@ -379,7 +477,7 @@ impl<T> BaoChunk<T> {
 #[derive(Debug)]
 pub struct PostOrderChunkIter {
     tree: BaoTree,
-    inner: PostOrderNodeIter,
+    inner: PostOrderNodeIter2,
     // stack with 2 elements, since we can only have 2 items in flight
     stack: [BaoChunk; 2],
     index: usize,
@@ -389,8 +487,8 @@ pub struct PostOrderChunkIter {
 impl PostOrderChunkIter {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree) -> Self {
-        let inner = PostOrderNodeIter::new(tree);
-        let root = inner.curr;
+        let (root, len) = shift_tree(tree.size, tree.block_size);
+        let inner = PostOrderNodeIter2::new(root, len);
         Self {
             tree,
             inner,
@@ -424,7 +522,9 @@ impl Iterator for PostOrderChunkIter {
                 return Some(item);
             }
             let node = self.inner.next()?;
+            // the is_root check needs to be done before shifting the node
             let is_root = node == self.root;
+            let node = node.subtract_block_size(self.tree.block_size.0);
             if self.tree.is_persisted(node) {
                 self.push(BaoChunk::Parent {
                     node,
@@ -483,14 +583,14 @@ impl<T: Default> Default for BaoChunk<T> {
 /// An iterator that produces chunks in pre order, but only for the parts of the
 /// tree that are relevant for a query.
 #[derive(Debug)]
-pub struct PreOrderChunkIterRef<'a> {
+pub struct PreOrderPartialChunkIterRef<'a> {
     inner: PreOrderPartialIterRef<'a>,
     // stack with 2 elements, since we can only have 2 items in flight
     stack: [BaoChunk<&'a RangeSetRef<ChunkNum>>; 2],
     index: usize,
 }
 
-impl<'a> PreOrderChunkIterRef<'a> {
+impl<'a> PreOrderPartialChunkIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
         Self {
@@ -521,7 +621,7 @@ impl<'a> PreOrderChunkIterRef<'a> {
     }
 }
 
-impl<'a> Iterator for PreOrderChunkIterRef<'a> {
+impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
     type Item = BaoChunk<&'a RangeSetRef<ChunkNum>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -599,7 +699,7 @@ impl<'a> Iterator for PreOrderChunkIterRef<'a> {
 /// all the way down to individual chunks if needed.
 #[derive(Debug)]
 pub struct ResponseIterRef<'a> {
-    inner: PreOrderChunkIterRef<'a>,
+    inner: PreOrderPartialChunkIterRef<'a>,
     buffer: SmallVec<[ResponseChunk; 10]>,
 }
 
@@ -607,7 +707,7 @@ impl<'a> ResponseIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
         Self {
-            inner: PreOrderChunkIterRef::new(tree, ranges, 0),
+            inner: PreOrderPartialChunkIterRef::new(tree, ranges, tree.block_size.0),
             buffer: SmallVec::new(),
         }
     }
@@ -625,7 +725,8 @@ impl<'a> Iterator for ResponseIterRef<'a> {
             if let Some(item) = self.buffer.pop() {
                 break Some(item);
             }
-            match self.inner.next()? {
+            let inner_next = self.inner.next()?;
+            match inner_next {
                 BaoChunk::Parent {
                     node,
                     is_root,
@@ -638,7 +739,6 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                         is_root,
                         right,
                         left,
-                        is_subchunk: false,
                     });
                 }
                 BaoChunk::Leaf {
@@ -832,12 +932,10 @@ pub(crate) fn select_nodes_rec(
             let mid_chunk = start_chunk + (mid as u64);
             let (l_ranges, r_ranges) = ranges.split(mid_chunk);
             emit(ResponseChunk::Parent {
-                // TODO: do not use the marker here!
                 node: TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(0)),
                 is_root,
                 left: !l_ranges.is_empty(),
                 right: !r_ranges.is_empty(),
-                is_subchunk: true,
             });
             // recurse to the left and right to compute the hashes and emit data
             select_nodes_rec(

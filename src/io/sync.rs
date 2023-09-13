@@ -397,9 +397,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 return Ok(Some(Header { size }.into()));
             }
         };
-        let item = inner.next();
-        println!("ResponseChunk item: {:?}", item);
-        match item {
+        match inner.next() {
             Some(ResponseChunk::Parent {
                 is_root,
                 left,
@@ -621,7 +619,6 @@ where
                     outboard = Some(create(tree.take().unwrap(), root)?);
                     outboard.as_mut().unwrap()
                 };
-                println!("outboard.save: {:?} {:?} {}", node, pair, node.level());
                 outboard.save(node, &pair)?;
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
@@ -682,7 +679,6 @@ pub(crate) fn outboard_post_order_impl(
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
     for item in tree.post_order_chunks_iter() {
-        println!("{:?}", item);
         match item {
             BaoChunk::Parent { is_root, .. } => {
                 let right_hash = stack.pop().unwrap();
