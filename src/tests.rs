@@ -5,15 +5,14 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use iroh_io::file;
-use proptest::{prelude::*, strategy};
+use proptest::prelude::*;
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 
 use crate::{
     blake3,
     io::{
         fsm::{BaoContentItem, ResponseDecoderReadingNext},
-        outboard::{self, PreOrderMemOutboard},
+        outboard::PreOrderMemOutboard,
         sync::{DecodeResponseItem, Outboard},
         Header, Leaf, Parent,
     },
@@ -576,17 +575,6 @@ pub fn decode_ranges_into_chunks<'a>(
     })
 }
 
-/// Total number of nodes in the tree
-///
-/// Each leaf node contains up to 2 blocks, and for n leaf nodes there will
-/// be n-1 branch nodes
-///
-/// Note that this is not the same as the number of hashes in the outboard.
-fn node_count(tree: &BaoTree) -> u64 {
-    let blocks = tree.blocks().0 - 1;
-    blocks.saturating_sub(1).max(1)
-}
-
 /// iterate over all nodes in the tree in depth first, left to right, pre order
 /// that are required to validate the given ranges
 ///
@@ -941,7 +929,7 @@ fn encode_decode_partial_sync_impl(
     for item in iter {
         let item = match item {
             Ok(item) => item,
-            Err(e) => {
+            Err(_) => {
                 return false;
             }
         };
@@ -1046,7 +1034,7 @@ async fn encode_decode_partial_fsm_impl(
             ResponseDecoderReadingNext::More((reading1, result)) => {
                 let item = match result {
                     Ok(item) => item,
-                    Err(e) => {
+                    Err(_) => {
                         return false;
                     }
                 };
@@ -1210,21 +1198,43 @@ proptest! {
     /// does not need an outboard is the same as the more complex encode_ranges_validated
     /// that requires an outboard.
     #[test]
-    fn encode_selected_rec_proptest((size, ranges) in size_and_selection(1..100000, 2), block_size in 0..4u8) {
+    fn encode_selected_reference_sync_proptest((size, ranges) in size_and_selection(1..100000, 2), block_size in 0..4u8) {
         let data = make_test_data(size);
         let expected_hash = blake3::hash(&data);
         let block_size = BlockSize(block_size);
         let (actual_hash, actual_encoded) = encode_selected_reference(&data, block_size, &ranges);
-        // let mut expected_encoded = Vec::new();
+        let mut expected_encoded = Vec::new();
         let outboard = PostOrderMemOutboard::create(&data, block_size);
-        // encode_ranges_validated(
-        //     &data,
-        //     &outboard,
-        //     &ranges,
-        //     &mut expected_encoded,
-        // ).unwrap();
-        // prop_assert_eq!(expected_hash, actual_hash);
-        // prop_assert_eq!(expected_encoded, actual_encoded);
+        crate::io::sync::encode_ranges_validated(
+            &data,
+            &outboard,
+            &ranges,
+            &mut expected_encoded,
+        ).unwrap();
+        prop_assert_eq!(expected_hash, actual_hash);
+        prop_assert_eq!(expected_encoded, actual_encoded);
+    }
+
+    /// Checks that the simple recursive impl bao_encode_selected_recursive that
+    /// does not need an outboard is the same as the more complex encode_ranges_validated
+    /// that requires an outboard.
+    #[test]
+    fn encode_selected_reference_fsm_proptest((size, ranges) in size_and_selection(1..100000, 2), block_size in 0..4u8) {
+        let data = make_test_data(size);
+        let expected_hash = blake3::hash(&data);
+        let block_size = BlockSize(block_size);
+        let (actual_hash, actual_encoded) = encode_selected_reference(&data, block_size, &ranges);
+        let mut expected_encoded = Vec::new();
+        let outboard = PostOrderMemOutboard::create(&data, block_size);
+        let data: Bytes = data.into();
+        futures::executor::block_on(crate::io::fsm::encode_ranges_validated(
+            data,
+            outboard,
+            &ranges,
+            &mut expected_encoded,
+        )).unwrap();
+        prop_assert_eq!(expected_hash, actual_hash);
+        prop_assert_eq!(expected_encoded, actual_encoded);
     }
 
     /// Checks that the leafs produced by ranges_pre_order_chunks_iter_ref

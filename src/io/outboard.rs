@@ -3,24 +3,13 @@
 //! A number of implementations for the sync and async outboard traits are provided.
 //! Implementations for in-memory outboards, for outboards where the data resides on disk,
 //! and a special implementation [EmptyOutboard] that just ignores all writes.
-use range_collections::RangeSet2;
 
 use super::TreeNode;
-use crate::{
-    blake3,
-    io::sync::{Outboard, OutboardMut},
-    BaoTree, BlockSize, ByteNum,
-};
+use crate::{blake3, BaoTree, BlockSize, ByteNum};
 use std::{
     fmt,
     io::{self, Cursor},
 };
-
-macro_rules! io_error {
-    ($($arg:tt)*) => {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
-    };
-}
 
 /// An empty outboard, that just returns 0 hashes for all nodes.
 ///
@@ -238,6 +227,25 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
         }
     }
 
+    /// Map the outboard data to a new type.
+    pub fn map_data<F, U>(self, f: F) -> std::result::Result<PostOrderMemOutboard<U>, &'static str>
+    where
+        F: FnOnce(T) -> U,
+        U: AsRef<[u8]>,
+    {
+        let len = self.data.as_ref().len();
+        let data = f(self.data);
+        if data.as_ref().len() == len {
+            Ok(PostOrderMemOutboard {
+                root: self.root,
+                tree: self.tree,
+                data,
+            })
+        } else {
+            Err("invalid outboard data size")
+        }
+    }
+
     /// The outboard data, without the length suffix.
     pub fn outboard(&self) -> &[u8] {
         self.data.as_ref()
@@ -389,6 +397,25 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
                 root,
                 tree,
                 data: outboard_data,
+            })
+        } else {
+            Err("invalid outboard data size")
+        }
+    }
+
+    /// Map the outboard data to a new type.
+    pub fn map_data<F, U>(self, f: F) -> std::result::Result<PostOrderMemOutboard<U>, &'static str>
+    where
+        F: FnOnce(T) -> U,
+        U: AsRef<[u8]>,
+    {
+        let len = self.data.as_ref().len();
+        let data = f(self.data);
+        if data.as_ref().len() == len {
+            Ok(PostOrderMemOutboard {
+                root: self.root,
+                tree: self.tree,
+                data,
             })
         } else {
             Err("invalid outboard data size")

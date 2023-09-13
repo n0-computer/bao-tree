@@ -8,28 +8,15 @@
 //! handcrafted or from a previous failure of a proptest.
 use std::ops::Range;
 
-use proptest::{prop_assert, strategy::Strategy};
+use proptest::strategy::Strategy;
 use range_collections::{range_set::RangeSetEntry, RangeSet2};
 
 use crate::{
     blake3, hash_subtree,
     io::{outboard::PostOrderMemOutboard, sync::Outboard},
-    iter::{select_nodes_rec, BaoChunk, ResponseChunk},
+    iter::BaoChunk,
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
-
-macro_rules! assert_tuple_eq {
-    ($tuple:expr) => {
-        assert_eq!($tuple.0, $tuple.1);
-    };
-}
-
-macro_rules! prop_assert_tuple_eq {
-    ($tuple:expr) => {
-        let (a, b) = $tuple;
-        ::proptest::prop_assert_eq!(a, b);
-    };
-}
 
 fn tree() -> impl Strategy<Value = BaoTree> {
     (0u64..100000, 0u8..5).prop_map(|(size, block_size)| {
@@ -152,58 +139,40 @@ fn post_traversal_chunks_iter_proptest(#[strategy(tree())] tree: BaoTree) {
 /// Brute force test for an outboard that just computes the expected hash for each pair
 fn outboard_test_sync(data: &[u8], outboard: impl crate::io::sync::Outboard) {
     let tree = outboard.tree();
-    let ranges = RangeSet2::all();
-    let mut nodes = Vec::new();
-    select_nodes_rec(
-        ChunkNum(0),
-        tree.size.to_usize(),
-        true,
-        &ranges,
-        tree.block_size.0 as u32,
-        &mut |chunk| {
-            if let ResponseChunk::Parent { node, is_root, .. } = chunk {
-                nodes.push((node, is_root));
-            }
-        },
-    );
+    let nodes = tree
+        .pre_order_nodes_iter()
+        .enumerate()
+        .map(|(i, node)| (node, i == 0))
+        .filter(|(node, _)| tree.is_relevant_for_outboard(*node))
+        .collect::<Vec<_>>();
     for (node, is_root) in nodes {
-        if let Some((l_hash, r_hash)) = outboard.load(node).unwrap() {
-            let start_chunk = node.chunk_range().start;
-            let byte_range = tree.byte_range(node);
-            let data = &data[byte_range.start.to_usize()..byte_range.end.to_usize()];
-            let expected = hash_subtree(start_chunk.0, data, is_root);
-            let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
-            assert_eq!(actual, expected);
-        }
+        let (l_hash, r_hash) = outboard.load(node).unwrap().unwrap();
+        let start_chunk = node.chunk_range().start;
+        let byte_range = tree.byte_range(node);
+        let data = &data[byte_range.start.to_usize()..byte_range.end.to_usize()];
+        let expected = hash_subtree(start_chunk.0, data, is_root);
+        let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+        assert_eq!(actual, expected);
     }
 }
 
 /// Brute force test for an outboard that just computes the expected hash for each pair
 async fn outboard_test_fsm(data: &[u8], mut outboard: impl crate::io::fsm::Outboard) {
     let tree = outboard.tree();
-    let ranges = RangeSet2::all();
-    let mut nodes = Vec::new();
-    select_nodes_rec(
-        ChunkNum(0),
-        tree.size.to_usize(),
-        true,
-        &ranges,
-        tree.block_size.0 as u32,
-        &mut |chunk| {
-            if let ResponseChunk::Parent { node, is_root, .. } = chunk {
-                nodes.push((node, is_root));
-            }
-        },
-    );
+    let nodes = tree
+        .pre_order_nodes_iter()
+        .enumerate()
+        .map(|(i, node)| (node, i == 0))
+        .filter(|(node, _)| tree.is_relevant_for_outboard(*node))
+        .collect::<Vec<_>>();
     for (node, is_root) in nodes {
-        if let Some((l_hash, r_hash)) = outboard.load(node).await.unwrap() {
-            let start_chunk = node.chunk_range().start;
-            let byte_range = tree.byte_range(node);
-            let data = &data[byte_range.start.to_usize()..byte_range.end.to_usize()];
-            let expected = hash_subtree(start_chunk.0, data, is_root);
-            let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
-            assert_eq!(actual, expected);
-        }
+        let (l_hash, r_hash) = outboard.load(node).await.unwrap().unwrap();
+        let start_chunk = node.chunk_range().start;
+        let byte_range = tree.byte_range(node);
+        let data = &data[byte_range.start.to_usize()..byte_range.end.to_usize()];
+        let expected = hash_subtree(start_chunk.0, data, is_root);
+        let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+        assert_eq!(actual, expected);
     }
 }
 
@@ -215,6 +184,15 @@ fn post_oder_outboard_sync_impl(tree: BaoTree) {
         outboard.tree().outboard_hash_pairs() * 64
     );
     outboard_test_sync(&data, outboard);
+}
+
+#[test]
+fn post_oder_outboard_sync_cases() {
+    let cases = [(0x3001, 0)];
+    for (size, block_level) in cases {
+        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+        post_oder_outboard_sync_impl(tree);
+    }
 }
 
 #[test_strategy::proptest]
@@ -288,6 +266,17 @@ fn validate_outboard_fsm_pos_proptest(#[strategy(tree())] tree: BaoTree) {
     validate_outboard_fsm_pos_impl(tree);
 }
 
+fn flip_bit(data: &mut [u8], rand: usize) {
+    // flip a random bit in the outboard
+    // this is the post order outboard without the length suffix,
+    // so it's all hashes
+    let bit = rand % data.len() * 8;
+    let byte = bit / 8;
+    let bit = bit % 8;
+    data[byte] ^= 1 << bit;
+}
+
+/// Check that flipping a random bit in the outboard makes at least one range invalid
 fn validate_outboard_sync_neg_impl(tree: BaoTree, rand: u32) {
     let rand = rand as usize;
     let size = tree.size.to_usize();
@@ -297,12 +286,7 @@ fn validate_outboard_sync_neg_impl(tree: BaoTree, rand: u32) {
     let expected = RangeSet2::from(..outboard.tree().chunks());
     if !outboard.data.is_empty() {
         // flip a random bit in the outboard
-        // this is the post order outboard without the length suffix,
-        // so it's all hashes
-        let bit = rand % outboard.data.len() * 8;
-        let byte = bit / 8;
-        let bit = bit % 8;
-        outboard.data[byte] ^= 1 << bit;
+        flip_bit(&mut outboard.data, rand);
         // Check that at least one range is invalid
         let actual = valid_ranges_sync(&outboard);
         assert_ne!(expected, actual);
@@ -323,6 +307,7 @@ fn validate_outboard_sync_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: 
     validate_outboard_sync_neg_impl(tree, rand);
 }
 
+/// Check that flipping a random bit in the outboard makes at least one range invalid
 fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
     let rand = rand as usize;
     let size = tree.size.to_usize();
@@ -332,12 +317,7 @@ fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
     let expected = RangeSet2::from(..outboard.tree().chunks());
     if !outboard.data.is_empty() {
         // flip a random bit in the outboard
-        // this is the post order outboard without the length suffix,
-        // so it's all hashes
-        let bit = rand % outboard.data.len() * 8;
-        let byte = bit / 8;
-        let bit = bit % 8;
-        outboard.data[byte] ^= 1 << bit;
+        flip_bit(&mut outboard.data, rand);
         // Check that at least one range is invalid
         let actual = valid_ranges_fsm(&mut outboard);
         assert_ne!(expected, actual);

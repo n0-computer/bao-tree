@@ -843,7 +843,9 @@ pub(crate) fn select_nodes_rec(
     } else {
         let chunks: usize = size / CHUNK_LEN + (size % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
-        let level = chunks.trailing_zeros();
+        // chunks is always a power of two, 2 for level 0
+        // so we must subtract 1 to get the level, and this is also safe
+        let level = chunks.trailing_zeros() - 1;
         if ranges.is_all() && level <= max_skip_level {
             // we are allowed to just emit the entire data as a leaf
             emit(ResponseChunk::Leaf {
@@ -853,12 +855,16 @@ pub(crate) fn select_nodes_rec(
             });
         } else {
             // split in half and recurse
+            assert!(start_chunk.0 % 2 == 0);
             let mid = chunks / 2;
             let mid_bytes = mid * CHUNK_LEN;
             let mid_chunk = start_chunk + (mid as u64);
             let (l_ranges, r_ranges) = ranges.split(mid_chunk);
+            let node = TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(level as u8));
+            debug_assert_eq!(node.chunk_range().start, start_chunk);
+            debug_assert_eq!(node.level(), level);
             emit(ResponseChunk::Parent {
-                node: TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(0)),
+                node,
                 is_root,
                 left: !l_ranges.is_empty(),
                 right: !r_ranges.is_empty(),
