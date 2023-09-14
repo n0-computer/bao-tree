@@ -11,3 +11,5 @@ cc 340acffb7fac4a5f0a91f567c9fbb7dd7c1e9714bee1f763cc0b6ca2c719a828 # shrinks to
 cc 352a71725b15ecf4222c586e5ed81b3af565b4a27eb82d7ee38f9483a53d801f # shrinks to input = _ValidateOutboardSyncNegProptestArgs { tree: BaoTree { size: 24577, block_size: BlockSize(3) }, rand: 64 }
 cc d548623db5ccd4f9e88b4a47eec67c08e2b8990eda3c98a2ca33262ecfee0eff # shrinks to input = _ValidateOutboardSyncNegProptestArgs { tree: BaoTree { size: 45057, block_size: BlockSize(2) }, rand: 3254585472 }
 cc 764f9e82e6d0813de8e2e710bdc5fe0941b376112d0e7b162faeffce3fa8303d # shrinks to input = _PreOrderNodeIterArgs { tree: BaoTree { size: 0, block_size: BlockSize(0) } }
+cc b59509e6b50b0a63780a84b3119fe2aee21e2e530cfffb9c198f96fd3525b8e3 # shrinks to input = _SelectionReferenceComparisonProptestArgs { size_and_selection: (1026, RangeSet{0..}), block_size: BlockSize(1) }
+cc 0880f9808ca097286a58956e1cf0dd877d1a8f20ec699cfd2438453496ab653f # shrinks to input = _EncodeDecodePartialFsmProptestArgs { size_and_selection: (4170, RangeSet{0..}), block_size: BlockSize(2) }
