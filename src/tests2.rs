@@ -8,15 +8,36 @@
 //! handcrafted or from a previous failure of a proptest.
 use std::ops::Range;
 
-use proptest::strategy::Strategy;
-use range_collections::{range_set::RangeSetEntry, RangeSet2};
+use bytes::{Bytes, BytesMut};
+use proptest::prelude::*;
+use proptest::strategy::{Just, Strategy};
+use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 
+use crate::iter::{ResponseIterRef, ResponseIterRef2};
 use crate::{
     blake3, hash_subtree,
-    io::{outboard::PostOrderMemOutboard, sync::Outboard},
-    iter::BaoChunk,
+    io::{
+        fsm::{BaoContentItem, ResponseDecoderReadingNext},
+        outboard::PostOrderMemOutboard,
+        sync::{DecodeResponseItem, Outboard},
+        Header, Leaf, Parent,
+    },
+    iter::{select_nodes_rec, BaoChunk, ResponseChunk},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
+
+macro_rules! assert_tuple_eq {
+    ($tuple:expr) => {
+        assert_eq!($tuple.0, $tuple.1);
+    };
+}
+
+macro_rules! prop_assert_tuple_eq {
+    ($tuple:expr) => {
+        let (a, b) = $tuple;
+        ::proptest::prop_assert_eq!(a, b);
+    };
+}
 
 fn tree() -> impl Strategy<Value = BaoTree> {
     (0u64..100000, 0u8..5).prop_map(|(size, block_size)| {
@@ -24,6 +45,36 @@ fn tree() -> impl Strategy<Value = BaoTree> {
         let size = ByteNum(size);
         BaoTree::new(size, block_size)
     })
+}
+
+fn block_size() -> impl Strategy<Value = BlockSize> {
+    (0..=6u8).prop_map(BlockSize)
+}
+
+/// Create a random selection
+/// `size` is the size of the data
+/// `n` is the number of ranges, roughly the complexity of the selection
+fn selection(size: u64, n: usize) -> impl Strategy<Value = RangeSet2<ChunkNum>> {
+    let chunks = BaoTree::new(ByteNum(size), BlockSize(0)).chunks();
+    proptest::collection::vec((..chunks.0, ..chunks.0), n).prop_map(|e| {
+        let mut res = RangeSet2::empty();
+        for (a, b) in e {
+            let min = a.min(b);
+            let max = a.max(b) + 1;
+            let elem = RangeSet2::from(ChunkNum(min)..ChunkNum(max));
+            if res != elem {
+                res ^= elem;
+            }
+        }
+        res
+    })
+}
+
+fn size_and_selection(
+    size_range: Range<usize>,
+    n: usize,
+) -> impl Strategy<Value = (usize, RangeSet2<ChunkNum>)> {
+    size_range.prop_flat_map(move |size| (Just(size), selection(size as u64, n)))
 }
 
 /// Check that the pre order traversal iterator is consistent with the pre order
@@ -327,4 +378,309 @@ fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
 #[test_strategy::proptest]
 fn validate_outboard_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
     validate_outboard_fsm_neg_impl(tree, rand);
+}
+
+/// Encode data fully, decode it again, and check that both data and outboard are the same
+///
+/// using the sync io api
+fn encode_decode_full_sync_impl(
+    data: &[u8],
+    outboard: PostOrderMemOutboard,
+) -> (
+    (Vec<u8>, PostOrderMemOutboard),
+    (Vec<u8>, PostOrderMemOutboard),
+) {
+    let ranges = RangeSet2::all();
+    let mut encoded = Vec::new();
+    crate::io::sync::encode_ranges_validated(&data, &outboard, &RangeSet2::all(), &mut encoded)
+        .unwrap();
+    let mut encoded_read = std::io::Cursor::new(encoded);
+    let mut decoded = Vec::new();
+    let ob_res_opt = crate::io::sync::decode_response_into(
+        outboard.root(),
+        outboard.tree().block_size,
+        &ranges,
+        &mut encoded_read,
+        |tree, root: blake3::Hash| {
+            let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
+            let outboard_data = vec![0; outboard_size];
+            Ok(PostOrderMemOutboard::new(root, tree, outboard_data).unwrap())
+        },
+        &mut decoded,
+    )
+    .unwrap();
+    let ob_res = ob_res_opt.unwrap_or_else(|| {
+        PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]).unwrap()
+    });
+    ((decoded, ob_res), (data.to_vec(), outboard))
+}
+
+/// Encode data fully, decode it again, and check that both data and outboard are the same
+///
+/// using the fsm io api
+async fn encode_decode_full_fsm_impl(
+    data: Vec<u8>,
+    outboard: PostOrderMemOutboard,
+) -> (
+    (Vec<u8>, PostOrderMemOutboard),
+    (Vec<u8>, PostOrderMemOutboard),
+) {
+    let mut outboard = outboard;
+    let ranges = RangeSet2::all();
+    let mut encoded = Vec::new();
+    crate::io::fsm::encode_ranges_validated(
+        Bytes::from(data.clone()),
+        &mut outboard,
+        &RangeSet2::all(),
+        &mut encoded,
+    )
+    .await
+    .unwrap();
+    let mut read_encoded = std::io::Cursor::new(encoded);
+    let mut decoded = BytesMut::new();
+    let ob_res_opt = crate::io::fsm::decode_response_into(
+        outboard.root(),
+        outboard.tree().block_size,
+        ranges,
+        &mut read_encoded,
+        |root, tree| async move {
+            let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
+            let outboard_data = vec![0u8; outboard_size];
+            Ok(PostOrderMemOutboard::new(root, tree, outboard_data).unwrap())
+        },
+        &mut decoded,
+    )
+    .await
+    .unwrap();
+    let ob_res = ob_res_opt.unwrap_or_else(|| {
+        PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]).unwrap()
+    });
+    ((decoded.to_vec(), ob_res), (data, outboard))
+}
+
+fn encode_decode_partial_sync_impl(
+    data: &[u8],
+    outboard: PostOrderMemOutboard,
+    ranges: &RangeSetRef<ChunkNum>,
+) -> bool {
+    let mut encoded = Vec::new();
+    crate::io::sync::encode_ranges_validated(&data, &outboard, &ranges, &mut encoded).unwrap();
+    let expected_data = data;
+    let encoded_read = std::io::Cursor::new(encoded);
+    let buf = BytesMut::new();
+    let iter = crate::io::sync::DecodeResponseIter::new(
+        outboard.root,
+        outboard.tree.block_size,
+        encoded_read,
+        ranges,
+        buf,
+    );
+    for item in iter {
+        let item = match item {
+            Ok(item) => item,
+            Err(_) => {
+                return false;
+            }
+        };
+        match item {
+            DecodeResponseItem::Header(Header { size }) => {
+                // check that the size matches
+                if size != outboard.tree.size {
+                    return false;
+                }
+            }
+            DecodeResponseItem::Parent(Parent { node, pair }) => {
+                // check that the hash pair matches
+                if let Some(expected_pair) = outboard.load(node).unwrap() {
+                    if pair != expected_pair {
+                        return false;
+                    }
+                }
+            }
+            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+                // check that the data matches
+                if expected_data[offset.to_usize()..offset.to_usize() + data.len()] != data {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+async fn encode_decode_partial_fsm_impl(
+    data: &[u8],
+    outboard: PostOrderMemOutboard,
+    ranges: RangeSet2<ChunkNum>,
+) -> bool {
+    let mut encoded = Vec::new();
+    let mut outboard = outboard;
+    crate::io::fsm::encode_ranges_validated(
+        Bytes::from(data.to_vec()),
+        &mut outboard,
+        &ranges,
+        &mut encoded,
+    )
+    .await
+    .unwrap();
+    let expected_data = data;
+    let encoded_read = std::io::Cursor::new(encoded);
+    let initial = crate::io::fsm::ResponseDecoderStart::new(
+        outboard.root,
+        ranges,
+        outboard.tree.block_size,
+        encoded_read,
+    );
+    let (mut reading, size) = initial.next().await.unwrap();
+    if size != outboard.tree.size {
+        return false;
+    }
+    loop {
+        match reading.next().await {
+            ResponseDecoderReadingNext::More((reading1, result)) => {
+                let item = match result {
+                    Ok(item) => item,
+                    Err(_) => {
+                        return false;
+                    }
+                };
+                match item {
+                    BaoContentItem::Leaf(Leaf { offset, data }) => {
+                        // check that the data matches
+                        if expected_data[offset.to_usize()..offset.to_usize() + data.len()] != data
+                        {
+                            return false;
+                        }
+                    }
+                    BaoContentItem::Parent(Parent { node, pair }) => {
+                        // check that the hash pair matches
+                        if let Some(expected_pair) = outboard.load(node).unwrap() {
+                            if pair != expected_pair {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                reading = reading1;
+            }
+            ResponseDecoderReadingNext::Done(_reader) => {
+                break;
+            }
+        }
+    }
+    true
+}
+
+#[test]
+fn encode_decode_full_sync_cases() {
+    let cases = [(1024 + 1, 1)];
+    for (size, block_level) in cases {
+        let data = &make_test_data(size);
+        let block_size = BlockSize(block_level);
+        let outboard = PostOrderMemOutboard::create(&data, block_size);
+        let pair = encode_decode_full_sync_impl(data, outboard);
+        assert_tuple_eq!(pair);
+    }
+}
+
+#[test_strategy::proptest]
+fn encode_decode_full_sync_proptest(#[strategy(tree())] tree: BaoTree) {
+    let data = make_test_data(tree.size.to_usize());
+    let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
+    prop_assert_tuple_eq!(encode_decode_full_sync_impl(&data, outboard));
+}
+
+#[test_strategy::proptest]
+fn encode_decode_partial_sync_proptest(
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(block_size())] block_size: BlockSize,
+) {
+    let (size, selection) = size_and_selection;
+    let data = make_test_data(size);
+    let outboard = PostOrderMemOutboard::create(&data, block_size);
+    let ok = encode_decode_partial_sync_impl(&data, outboard, &selection);
+    prop_assert!(ok);
+}
+
+#[test_strategy::proptest]
+fn encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
+    let data = make_test_data(tree.size.to_usize());
+    let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
+    let pair = futures::executor::block_on(encode_decode_full_fsm_impl(data.into(), outboard));
+    prop_assert_tuple_eq!(pair);
+}
+
+#[test_strategy::proptest]
+fn encode_decode_partial_fsm_proptest(
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(block_size())] block_size: BlockSize,
+) {
+    let (size, selection) = size_and_selection;
+    let data = make_test_data(size);
+    let outboard = PostOrderMemOutboard::create(&data, block_size);
+    let ok =
+        futures::executor::block_on(encode_decode_partial_fsm_impl(&data, outboard, selection));
+    prop_assert!(ok);
+}
+
+fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>) -> Vec<TreeNode> {
+    let mut res = Vec::new();
+    select_nodes_rec(
+        ChunkNum(0),
+        tree.size.to_usize(),
+        true,
+        ranges,
+        tree.block_size.0 as u32,
+        &mut |x| {
+            let node = match x {
+                ResponseChunk::Parent { node, .. } => node,
+                ResponseChunk::Leaf { start_chunk, .. } => {
+                    TreeNode::from_start_chunk_and_level(start_chunk, tree.block_size)
+                }
+            };
+            res.push(node);
+        },
+    );
+    res
+}
+
+/// Reference implementation of the response iterator, using just the simple recursive
+/// implementation [crate::iter::select_nodes_rec].
+fn response_iter_ref_reference(
+    tree: BaoTree,
+    ranges: &RangeSetRef<ChunkNum>,
+) -> Vec<ResponseChunk> {
+    let mut res = Vec::new();
+    select_nodes_rec(
+        ChunkNum(0),
+        tree.size.to_usize(),
+        true,
+        ranges,
+        tree.block_size.0 as u32,
+        &mut |x| res.push(x),
+    );
+    res
+}
+
+#[test_strategy::proptest]
+fn pre_order_node_iter_proptest(#[strategy(tree())] tree: BaoTree) {
+    let iter = tree.pre_order_nodes_iter().collect::<Vec<_>>();
+    let reference = pre_order_nodes_iter_reference(tree, &RangeSet2::all());
+    prop_assert_eq!(iter, reference);
+}
+
+#[test_strategy::proptest]
+fn selection_reference_comparison_proptest(
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(block_size())] block_size: BlockSize,
+) {
+    let (size, ranges) = size_and_selection;
+    let tree = BaoTree::new(ByteNum(size as u64), block_size);
+    let expected = response_iter_ref_reference(tree, &ranges);
+
+    let actual = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+    prop_assert_eq!(&actual, &expected);
+
+    let actual = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+    prop_assert_eq!(&actual, &expected);
 }

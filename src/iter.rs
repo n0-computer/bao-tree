@@ -643,6 +643,7 @@ impl<'a> ResponseIterRef<'a> {
         self.inner.tree()
     }
 }
+
 impl<'a> Iterator for ResponseIterRef<'a> {
     type Item = ResponseChunk;
 
@@ -658,7 +659,7 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                     is_root,
                     right,
                     left,
-                    ..
+                    ranges: _,
                 } => {
                     break Some(ResponseChunk::Parent {
                         node,
@@ -672,7 +673,6 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                     is_root,
                     start_chunk,
                     ranges,
-                    ..
                 } => {
                     if self.tree().block_size == BlockSize(0) || ranges.is_all() {
                         break Some(ResponseChunk::Leaf {
@@ -696,6 +696,62 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                 }
             }
         }
+    }
+}
+
+/// An iterator that produces chunks in pre order.
+///
+/// This wraps a `PreOrderPartialIterRef` and iterates over the chunk groups
+/// all the way down to individual chunks if needed.
+#[derive(Debug)]
+pub struct ResponseIterRef2<'a> {
+    inner: PreOrderPartialChunkIterRef<'a>,
+}
+
+impl<'a> ResponseIterRef2<'a> {
+    /// Create a new iterator over the tree.
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
+        let tree1 = BaoTree::new(tree.size, BlockSize::ZERO);
+        Self {
+            inner: PreOrderPartialChunkIterRef::new(tree1, ranges, tree.block_size.0),
+        }
+    }
+
+    /// Return a reference to the underlying tree.
+    pub fn tree(&self) -> &BaoTree {
+        self.inner.tree()
+    }
+}
+
+impl<'a> Iterator for ResponseIterRef2<'a> {
+    type Item = ResponseChunk;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let inner_next = self.inner.next()?;
+        Some(match inner_next {
+            BaoChunk::Parent {
+                node,
+                is_root,
+                right,
+                left,
+                ranges: _,
+            } => ResponseChunk::Parent {
+                node,
+                is_root,
+                right,
+                left,
+            },
+            BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ..
+            } => ResponseChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+            },
+        })
     }
 }
 
