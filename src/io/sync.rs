@@ -12,7 +12,7 @@ use crate::{
         outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
         Header, Leaf, Parent,
     },
-    iter::{encode_selected_rec, shift_tree, BaoChunk, ResponseChunk},
+    iter::{encode_selected_rec, shift_tree, BaoChunk},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 use crate::{hash_subtree, iter::ResponseIterRef};
@@ -404,7 +404,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
             }
         };
         match inner.next() {
-            Some(ResponseChunk::Parent {
+            Some(BaoChunk::Parent {
                 is_root,
                 left,
                 right,
@@ -426,7 +426,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 }
                 Ok(Some(Parent { node, pair }.into()))
             }
-            Some(ResponseChunk::Leaf {
+            Some(BaoChunk::Leaf {
                 size,
                 is_root,
                 start_chunk,

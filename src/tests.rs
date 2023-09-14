@@ -17,7 +17,7 @@ use crate::{
     },
     iter::{
         encode_selected_rec, PostOrderChunkIter, PreOrderPartialChunkIterRef,
-        PreOrderPartialIterRef, ResponseChunk, ResponseIterRef,
+        PreOrderPartialIterRef, ResponseIterRef,
     },
     recursive_hash_subtree,
 };
@@ -809,7 +809,7 @@ fn select_last_chunk_impl(size: u64, block_size: u8) -> (Vec<Range<u64>>, Vec<Ra
     let selection =
         ResponseIterRef::new(BaoTree::new(ByteNum(size), BlockSize(block_size)), &range)
             .filter_map(|item| match item {
-                ResponseChunk::Leaf {
+                BaoChunk::Leaf {
                     start_chunk, size, ..
                 } => {
                     let start = start_chunk.to_bytes().0;

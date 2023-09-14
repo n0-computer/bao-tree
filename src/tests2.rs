@@ -22,7 +22,7 @@ use crate::{
         sync::{DecodeResponseItem, Outboard},
         Header, Leaf, Parent,
     },
-    iter::{select_nodes_rec, BaoChunk, ResponseChunk},
+    iter::{select_nodes_rec, BaoChunk},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 
@@ -633,8 +633,8 @@ fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>)
         tree.block_size.0 as u32,
         &mut |x| {
             let node = match x {
-                ResponseChunk::Parent { node, .. } => node,
-                ResponseChunk::Leaf { start_chunk, .. } => {
+                BaoChunk::Parent { node, .. } => node,
+                BaoChunk::Leaf { start_chunk, .. } => {
                     TreeNode::from_start_chunk_and_level(start_chunk, tree.block_size)
                 }
             };
@@ -649,7 +649,7 @@ fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>)
 fn response_iter_ref_reference(
     tree: BaoTree,
     ranges: &RangeSetRef<ChunkNum>,
-) -> Vec<ResponseChunk> {
+) -> Vec<BaoChunk> {
     let mut res = Vec::new();
     select_nodes_rec(
         ChunkNum(0),

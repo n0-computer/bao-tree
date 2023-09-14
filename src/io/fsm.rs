@@ -9,7 +9,7 @@ use std::{io, result};
 
 use crate::{
     blake3, hash_subtree,
-    iter::{encode_selected_rec, shift_tree, ResponseChunk, ResponseIter},
+    iter::{encode_selected_rec, shift_tree, ResponseIter},
 };
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
@@ -406,10 +406,10 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
 
     async fn next0(
         &mut self,
-        chunk: ResponseChunk,
+        chunk: BaoChunk,
     ) -> std::result::Result<BaoContentItem, DecodeError> {
         Ok(match chunk {
-            ResponseChunk::Parent {
+            BaoChunk::Parent {
                 is_root,
                 right,
                 left,
@@ -440,7 +440,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
                 }
                 Parent { pair, node }.into()
             }
-            ResponseChunk::Leaf {
+            BaoChunk::Leaf {
                 size,
                 is_root,
                 start_chunk,
