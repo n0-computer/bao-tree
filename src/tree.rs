@@ -1,7 +1,10 @@
 //! Define a number of newtypes and operations on these newtypes
 //!
 //! Most operations are concerned with node indexes in an in order traversal of a binary tree.
-use std::ops::{Add, Div, Mul, Sub};
+use std::{
+    fmt,
+    ops::{Add, Div, Mul, Sub},
+};
 
 use range_collections::range_set::RangeSetEntry;
 
@@ -47,6 +50,12 @@ index_newtype! {
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockSize(pub u8);
+
+impl fmt::Display for BlockSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl BlockSize {
     /// The default block size, 1024 bytes

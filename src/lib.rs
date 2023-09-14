@@ -142,12 +142,25 @@ impl BaoTree {
     ///
     /// This iterator is used by both the sync and async io code for encoding
     /// from an outboard and ranges as well as decoding an encoded stream.
+    pub fn ranges_pre_order_chunks_iter_ref_3<'a>(
+        &self,
+        ranges: &'a RangeSetRef<ChunkNum>,
+        min_level: u8,
+    ) -> PreOrderPartialChunkIterRef<'a> {
+        PreOrderPartialChunkIterRef::new(*self, ranges, min_level)
+    }
+
+    /// Traverse the part of the tree that is relevant for a ranges querys
+    /// in pre order as [BaoChunk]s
+    ///
+    /// This iterator is used by both the sync and async io code for encoding
+    /// from an outboard and ranges as well as decoding an encoded stream.
     pub fn ranges_pre_order_chunks_iter_ref<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
-        max_skip_level: u8,
-    ) -> PreOrderPartialChunkIterRef<'a> {
-        PreOrderPartialChunkIterRef::new(*self, ranges, max_skip_level)
+        min_level: u8,
+    ) -> PreOrderPartialChunkIterRef2<'a> {
+        PreOrderPartialChunkIterRef2::new(*self, ranges, min_level)
     }
 
     /// Traverse the entire tree in post order as [TreeNode]s,

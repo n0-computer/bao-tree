@@ -16,3 +16,6 @@ cc 5a31ac5d77dd77abcca740ba5a69a27f556176085f07fabcf1f517426efcde1a # shrinks to
 cc d2bcee892c5aef35792e4850d18e3f02b19caa0369c5561b1d8651adf7b53502 # shrinks to (len, start, size) = (1025, 0, 1)
 cc 19ffd5008f66fc17ed286088f3fd6a2584f40b5bdb58b1fb62be848cce8dd124 # shrinks to (len, start, size) = (9221, 1, 8)
 cc 4c3aa611e7dbd88791c95b1131a420bd1d6dff817ec8626f724b160d622e5a14 # shrinks to size = 7169, block_size = 0
+cc e3944265687379638498bfbcdece422528f71a0ad3d49c9fbc8d4e7149430406 # shrinks to (len, start, size) = (8217, 0, 8), level = 2
+cc 7adf0a618622da069d836a91e24e7ddbf040c588893e422ce0d23ef16c623785 # shrinks to (size, ranges) = (9338, RangeSet{0..8}), block_size = 2
+cc 52a6da6a85bc8da92cffbb24194e705f06fea0d327d8da7a469304f417637738 # shrinks to (size, ranges) = (8265, RangeSet{0..8}), block_size = 2

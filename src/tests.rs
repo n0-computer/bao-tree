@@ -16,8 +16,8 @@ use crate::{
         Leaf,
     },
     iter::{
-        encode_selected_rec, PostOrderChunkIter, PreOrderPartialChunkIterRef,
-        PreOrderPartialIterRef, ResponseIterRef,
+        encode_selected_rec, split, PostOrderChunkIter, PreOrderPartialChunkIterRef,
+        PreOrderPartialChunkIterRef2, PreOrderPartialIterRef, ResponseIterRef,
     },
     recursive_hash_subtree,
 };
@@ -597,13 +597,11 @@ fn iterate_part_preorder_reference<'a>(
         let is_half_leaf = !tree.is_relevant_for_outboard(node);
         // the middle chunk of the node
         let mid = node.mid();
-        // the start chunk of the node
-        let start = node.chunk_range().start;
         // check if the node is fully included
-        let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
+        let full = ranges.is_all();
         // split the ranges into left and right
         let (l_ranges, r_ranges) = if !is_half_leaf {
-            ranges.split(mid)
+            split(ranges, mid)
         } else {
             (ranges, ranges)
         };
@@ -889,7 +887,7 @@ fn test_pre_order_chunks_iter_ref() {
         }
         for i in 0..5 {
             let tree = BaoTree::new(ByteNum(size), BlockSize(i));
-            let items = PreOrderPartialChunkIterRef::new(tree, &ranges, tree.block_size.0);
+            let items = PreOrderPartialChunkIterRef2::new(tree, &ranges, tree.block_size.0);
             println!("{}", i);
             for item in items {
                 println!("{:?}", item);
@@ -983,7 +981,7 @@ proptest! {
     /// does not need an outboard is the same as the more complex encode_ranges_validated
     /// that requires an outboard.
     #[test]
-    fn encode_selected_reference_sync_proptest((size, ranges) in size_and_selection(1..100000, 2), block_size in 0..4u8) {
+    fn encode_selected_reference_sync_proptest((size, ranges) in size_and_selection(1..100000, 2), block_size in 0..5u8) {
         let data = make_test_data(size);
         let expected_hash = blake3::hash(&data);
         let block_size = BlockSize(block_size);
@@ -997,7 +995,7 @@ proptest! {
             &mut expected_encoded,
         ).unwrap();
         prop_assert_eq!(expected_hash, actual_hash);
-        prop_assert_eq!(expected_encoded, actual_encoded);
+        prop_assert_eq!(hex::encode(expected_encoded), hex::encode(actual_encoded));
     }
 
     /// Checks that the simple recursive impl bao_encode_selected_recursive that

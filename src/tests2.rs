@@ -13,7 +13,10 @@ use proptest::prelude::*;
 use proptest::strategy::{Just, Strategy};
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 
-use crate::iter::{response_iter_ref_reference, ResponseIterRef, ResponseIterRef2};
+use crate::iter::{
+    encode_selected_rec, partial_chunk_iter_reference, PreOrderPartialChunkIterRef,
+    PreOrderPartialChunkIterRef2,
+};
 use crate::{
     blake3, hash_subtree,
     io::{
@@ -77,6 +80,7 @@ fn size_and_selection(
     let selection = prop_oneof! {
         8 => selection(size_range.end as u64, n),
         1 => Just(RangeSet2::all()),
+        1 => Just(RangeSet2::from(ChunkNum(u64::MAX)..))
     };
     size_range.prop_flat_map(move |size| (Just(size), selection.clone()))
 }
@@ -634,6 +638,7 @@ fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>)
         tree.size.to_usize(),
         true,
         ranges,
+        tree.block_size.0 as u32,
         tree.block_size.0 as u32 + 1,
         &mut |x| {
             let node = match x {
@@ -662,13 +667,14 @@ fn selection_reference_comparison_cases() {
         ((2050, 1), RangeSet2::all()),
         ((1066, 2), RangeSet2::from(..ChunkNum(1))),
         ((1045, 0), RangeSet2::all()),
+        ((10000, 0), RangeSet2::from(ChunkNum(u64::MAX)..)),
     ];
     for ((size, block_level), ranges) in cases {
         println!("{} {} {:?}", size, block_level, ranges);
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
-        let expected = response_iter_ref_reference(tree, &ranges);
+        let expected = partial_chunk_iter_reference(tree, &ranges, u8::MAX);
         // let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
-        let actual2 = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+        let actual2 = PreOrderPartialChunkIterRef2::new(tree, &ranges, u8::MAX).collect::<Vec<_>>();
         if actual2 != expected {
             // println!("actual old {:?}", actual1);
             println!("actual new {:?}", actual2);
@@ -685,14 +691,58 @@ fn selection_reference_comparison_proptest(
 ) {
     let (size, ranges) = size_and_selection;
     let tree = BaoTree::new(ByteNum(size as u64), block_size);
-    let expected = response_iter_ref_reference(tree, &ranges);
+    let expected = partial_chunk_iter_reference(tree, &ranges, 0);
     // let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
-    let actual2 = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+    let actual2 = PreOrderPartialChunkIterRef2::new(tree, &ranges, 0).collect::<Vec<_>>();
     if actual2 != expected {
         println!("");
         println!("{:?} {:?}", tree, ranges);
         println!("actual new {:?}", actual2);
         println!("expected   {:?}", expected);
         panic!();
+    }
+}
+
+/// Reference implementation of encode_ranges_validated that uses the simple recursive impl
+fn encode_selected_reference(
+    data: &[u8],
+    block_size: BlockSize,
+    ranges: &RangeSetRef<ChunkNum>,
+) -> (blake3::Hash, Vec<u8>) {
+    let mut res = Vec::new();
+    res.extend_from_slice(&(data.len() as u64).to_le_bytes());
+    let max_skip_level = block_size.0 as u32;
+    let hash = encode_selected_rec(ChunkNum(0), data, true, ranges, max_skip_level, &mut res);
+    (hash, res)
+}
+
+#[test]
+fn filtered_chunks() {
+    let cases = [
+        // ((1, 0), RangeSet2::all(), 0),
+        // ((1025, 0), RangeSet2::all(), 0),
+        // ((2048, 0), RangeSet2::all(), 0),
+        // ((2049, 0), RangeSet2::all(), 0),
+        // ((2049, 1), RangeSet2::all(), 0),
+        // ((2049, 0), RangeSet2::from(..ChunkNum(1)), 0),
+        // ((1024 * 32, 0), RangeSet2::from(..ChunkNum(1)), 4),
+        // ((1024 * 32, 0), RangeSet2::all(), 4),
+        // ((1024 * 32, 0), RangeSet2::from(ChunkNum(16)..), 4),
+        // ((1024 * 32, 0), RangeSet2::from(..ChunkNum(16)), 4),
+        // ((2048 + 1, 0), RangeSet2::from(..ChunkNum(2)), 0),
+        ((8192 + 1, 0), RangeSet2::from(..ChunkNum(8)), 2),
+    ];
+    for ((size, block_level), ranges, min_full_level) in cases {
+        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+        let res =
+            PreOrderPartialChunkIterRef2::new(tree, &ranges, min_full_level).collect::<Vec<_>>();
+        println!("{:?} {:?}", tree, ranges);
+        for item in res {
+            println!("{}", item.to_debug_string(10));
+        }
+        let data = make_test_data(size as usize);
+        println!("{}", tree.block_size);
+        let (hash, encoded) = encode_selected_reference(&data, BlockSize(min_full_level), &ranges);
+        println!("{}", hex::encode(&encoded));
     }
 }

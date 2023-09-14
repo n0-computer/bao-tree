@@ -2,7 +2,7 @@
 //!
 //! Range iterators take a reference to the ranges, and therefore require a lifetime parameter.
 //! They can be used without lifetime parameters using self referencing structs.
-use std::fmt;
+use std::fmt::{self, Debug};
 
 use range_collections::{RangeSet2, RangeSetRef};
 use self_cell::self_cell;
@@ -94,14 +94,12 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
                 // the middle chunk of the node
                 let mid = node.mid();
                 // split the ranges into left and right
-                ranges.split(mid)
+                split(ranges, mid)
             } else {
                 (ranges, ranges)
             };
-            // the start chunk of the node
-            let start = node.chunk_range().start;
             // check if the node is fully included
-            let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
+            let full = ranges.is_all();
             // we can't recurse if the node is a leaf
             // we don't want to recurse if the node is full and below the minimum level
             let query_leaf = shifted.is_leaf() || (full && node.level() < self.min_level as u32);
@@ -349,6 +347,39 @@ pub enum BaoChunk<R = ()> {
 }
 
 impl<T> BaoChunk<T> {
+    #[cfg(test)]
+    pub fn to_debug_string(&self, max_level: usize) -> String {
+        match self {
+            BaoChunk::Parent { node, is_root, .. } => {
+                let n = max_level.saturating_sub(node.level() as usize + 1);
+                let prefix = " ".repeat(n);
+                let start_chunk = node.chunk_range().start;
+                format!(
+                    "{}{},{},{}",
+                    prefix,
+                    start_chunk.to_bytes().0,
+                    node.level(),
+                    is_root
+                )
+            }
+            BaoChunk::Leaf {
+                start_chunk,
+                size,
+                is_root,
+                ..
+            } => {
+                let prefix = " ".repeat(max_level);
+                format!(
+                    "{}{},{},{}",
+                    prefix,
+                    start_chunk.to_bytes().0,
+                    size,
+                    is_root
+                )
+            }
+        }
+    }
+
     /// Create a dummy empty range
     fn empty(ranges: T) -> Self {
         Self::Leaf {
@@ -564,7 +595,6 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
                 l_ranges,
                 r_ranges,
                 query_leaf,
-                full,
                 ..
             } = inner_node;
             let tree = &self.inner.tree;
@@ -633,37 +663,13 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
     }
 }
 
-/// An iterator that produces chunks in pre order.
-///
-/// This wraps a `PreOrderPartialIterRef` and iterates over the chunk groups
-/// all the way down to individual chunks if needed.
-#[derive(Debug)]
-pub struct ResponseIterRef<'a> {
-    inner: PreOrderPartialChunkIterRef<'a>,
-    buffer: SmallVec<[BaoChunk; 10]>,
-}
-
-impl<'a> ResponseIterRef<'a> {
-    /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
-        Self {
-            inner: PreOrderPartialChunkIterRef::new(tree, ranges, tree.block_size.0),
-            buffer: SmallVec::new(),
-        }
-    }
-
-    /// Return a reference to the underlying tree.
-    pub fn tree(&self) -> &BaoTree {
-        self.inner.tree()
-    }
-}
-
 /// Reference implementation of the response iterator, using just the simple recursive
 /// implementation [crate::iter::select_nodes_rec].
-pub(crate) fn response_iter_ref_reference(
+pub(crate) fn partial_chunk_iter_reference(
     tree: BaoTree,
     ranges: &RangeSetRef<ChunkNum>,
-) -> Vec<BaoChunk> {
+    min_full_level: u8,
+) -> Vec<BaoChunk<&RangeSetRef<ChunkNum>>> {
     let mut res = Vec::new();
     select_nodes_rec(
         ChunkNum(0),
@@ -671,28 +677,24 @@ pub(crate) fn response_iter_ref_reference(
         true,
         ranges,
         tree.block_size.0 as u32,
-        &mut |x| res.push(x.without_ranges()),
+        min_full_level as u32,
+        &mut |x| res.push(x),
     );
     res
 }
 
 ///
 #[derive(Debug)]
-pub struct ResponseIterRef3<'a> {
-    iter: std::vec::IntoIter<BaoChunk>,
+pub struct PreOrderPartialChunkIterRef2<'a> {
+    iter: std::vec::IntoIter<BaoChunk<&'a RangeSetRef<ChunkNum>>>,
     tree: BaoTree,
-    _ranges: &'a RangeSetRef<ChunkNum>,
 }
 
-impl<'a> ResponseIterRef3<'a> {
+impl<'a> PreOrderPartialChunkIterRef2<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
-        let iter = response_iter_ref_reference(tree, ranges).into_iter();
-        Self {
-            iter,
-            tree,
-            _ranges: ranges,
-        }
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
+        let iter = partial_chunk_iter_reference(tree, ranges, min_level).into_iter();
+        Self { iter, tree }
     }
 
     /// Return a reference to the underlying tree.
@@ -701,11 +703,36 @@ impl<'a> ResponseIterRef3<'a> {
     }
 }
 
-impl<'a> Iterator for ResponseIterRef3<'a> {
-    type Item = BaoChunk;
+impl<'a> Iterator for PreOrderPartialChunkIterRef2<'a> {
+    type Item = BaoChunk<&'a RangeSetRef<ChunkNum>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
+    }
+}
+
+/// An iterator that produces chunks in pre order.
+///
+/// This wraps a `PreOrderPartialIterRef` and iterates over the chunk groups
+/// all the way down to individual chunks if needed.
+#[derive(Debug)]
+pub struct ResponseIterRef<'a> {
+    inner: PreOrderPartialChunkIterRef2<'a>,
+    buffer: SmallVec<[BaoChunk; 10]>,
+}
+
+impl<'a> ResponseIterRef<'a> {
+    /// Create a new iterator over the tree.
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
+        Self {
+            inner: PreOrderPartialChunkIterRef2::new(tree, ranges, tree.block_size.0),
+            buffer: SmallVec::new(),
+        }
+    }
+
+    /// Return a reference to the underlying tree.
+    pub fn tree(&self) -> &BaoTree {
+        self.inner.tree()
     }
 }
 
@@ -755,8 +782,9 @@ impl<'a> Iterator for ResponseIterRef<'a> {
                             size,
                             is_root,
                             ranges,
+                            0,
                             u32::MAX,
-                            &mut |item| self.buffer.push(item),
+                            &mut |item| self.buffer.push(item.without_ranges()),
                         );
                         self.buffer.reverse();
                     }
@@ -802,7 +830,7 @@ self_cell! {
     pub(crate) struct ResponseIterInner {
         owner: range_collections::RangeSet2<ChunkNum>,
         #[not_covariant]
-        dependent: ResponseIterRef3,
+        dependent: ResponseIterRef,
     }
 }
 
@@ -829,7 +857,7 @@ impl ResponseIter {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: RangeSet2<ChunkNum>) -> Self {
         Self(ResponseIterInner::new(ranges, |ranges| {
-            ResponseIterRef3::new(tree, ranges)
+            ResponseIterRef::new(tree, ranges)
         }))
     }
 
@@ -847,6 +875,23 @@ impl Iterator for ResponseIter {
     }
 }
 
+/// Split and canonicalize a range set at a given chunk number
+///
+/// Compared to [RangeSetRef::split], this function will canonicalize the second range
+pub(crate) fn split(
+    ranges: &RangeSetRef<ChunkNum>,
+    mid: ChunkNum,
+) -> (&RangeSetRef<ChunkNum>, &RangeSetRef<ChunkNum>) {
+    let (mut a, mut b) = ranges.split(mid);
+    if a.boundaries().len() > 0 && a.boundaries()[a.boundaries().len() - 1] == mid {
+        a = RangeSetRef::new(&a.boundaries()[..a.boundaries().len() - 1]).unwrap();
+    }
+    if b.boundaries().len() == 1 && b.boundaries()[0] <= mid {
+        b = RangeSetRef::new(&[ChunkNum(0)]).unwrap();
+    }
+    (a, b)
+}
+
 /// Encode ranges relevant to a query from a slice and outboard to a buffer
 ///
 /// This will compute the root hash, so it will have to traverse the entire tree.
@@ -861,6 +906,7 @@ pub(crate) fn encode_selected_rec(
     min_level: u32,
     res: &mut Vec<u8>,
 ) -> blake3::Hash {
+    println!("encode_selected_rec {} {}", start_chunk, data.len());
     use blake3::guts::{ChunkState, CHUNK_LEN};
     if data.len() <= CHUNK_LEN {
         if !query.is_empty() {
@@ -872,17 +918,20 @@ pub(crate) fn encode_selected_rec(
     } else {
         let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
-        let level = chunks.trailing_zeros() / 2;
+        let level = chunks.trailing_zeros() - 1;
+        println!("encode level {}", level);
         let mid = chunks / 2;
         let mid_bytes = mid * CHUNK_LEN;
         let mid_chunk = start_chunk + (mid as u64);
-        let (l_ranges, r_ranges) = query.split(mid_chunk);
+        let (l_ranges, r_ranges) = split(query, mid_chunk);
         // for empty ranges, we don't want to emit anything.
         // for full ranges where the level is at or below max_skip_level, we want to emit
         // just the data.
         //
         // todo: maybe call into blake3::guts::hash_subtree directly for this case? it would be faster.
-        let emit_parent = !query.is_empty() && (!query.is_all() || level >= min_level);
+        let full = query.is_all();
+        let emit_parent = !query.is_empty() && (!full || level >= min_level);
+        println!("c={} l={} => emit={}", start_chunk, level, emit_parent);
         let hash_offset = if emit_parent {
             // make some room for the hashes
             res.extend_from_slice(&[0xFFu8; 64]);
@@ -920,14 +969,16 @@ pub(crate) fn encode_selected_rec(
 ///
 /// This is the receive side equivalent of [bao_encode_selected_recursive].
 /// It does not do any hashing, but just emits the nodes that are relevant to a query.
-pub(crate) fn select_nodes_rec(
+pub(crate) fn select_nodes_rec<'a>(
     start_chunk: ChunkNum,
     size: usize,
     is_root: bool,
-    ranges: &RangeSetRef<ChunkNum>,
-    min_level: u32,
-    emit: &mut impl FnMut(BaoChunk),
+    ranges: &'a RangeSetRef<ChunkNum>,
+    tree_level: u32,
+    min_full_level: u32,
+    emit: &mut impl FnMut(BaoChunk<&'a RangeSetRef<ChunkNum>>),
 ) {
+    println!("select_nodes_rec {} {}", start_chunk, size);
     if ranges.is_empty() {
         return;
     }
@@ -937,7 +988,7 @@ pub(crate) fn select_nodes_rec(
             start_chunk,
             size,
             is_root,
-            ranges: (),
+            ranges,
         });
     } else {
         let chunks: usize = size / CHUNK_LEN + (size % CHUNK_LEN != 0) as usize;
@@ -945,13 +996,15 @@ pub(crate) fn select_nodes_rec(
         // chunks is always a power of two, 2 for level 0
         // so we must subtract 1 to get the level, and this is also safe
         let level = chunks.trailing_zeros() - 1;
-        if ranges.is_all() && level < min_level {
+        let full = ranges.is_all();
+        println!("select level={}", level);
+        if (level < tree_level) || (full && level < min_full_level) {
             // we are allowed to just emit the entire data as a leaf
             emit(BaoChunk::Leaf {
                 start_chunk,
                 size,
                 is_root,
-                ranges: (),
+                ranges,
             });
         } else {
             // split in half and recurse
@@ -959,25 +1012,33 @@ pub(crate) fn select_nodes_rec(
             let mid = chunks / 2;
             let mid_bytes = mid * CHUNK_LEN;
             let mid_chunk = start_chunk + (mid as u64);
-            let (l_ranges, r_ranges) = ranges.split(mid_chunk);
+            let (l_ranges, r_ranges) = split(ranges, mid_chunk);
             let node = TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(level as u8));
-            debug_assert_eq!(node.chunk_range().start, start_chunk);
-            debug_assert_eq!(node.level(), level);
+            println!("c={} l={} => emit={}", start_chunk, level, true);
             emit(BaoChunk::Parent {
                 node,
                 is_root,
                 left: !l_ranges.is_empty(),
                 right: !r_ranges.is_empty(),
-                ranges: (),
+                ranges,
             });
             // recurse to the left and right to compute the hashes and emit data
-            select_nodes_rec(start_chunk, mid_bytes, false, l_ranges, min_level, emit);
+            select_nodes_rec(
+                start_chunk,
+                mid_bytes,
+                false,
+                l_ranges,
+                tree_level,
+                min_full_level,
+                emit,
+            );
             select_nodes_rec(
                 mid_chunk,
                 size - mid_bytes,
                 false,
                 r_ranges,
-                min_level,
+                tree_level,
+                min_full_level,
                 emit,
             );
         }

@@ -15,7 +15,7 @@ use crate::{
     iter::{encode_selected_rec, shift_tree, BaoChunk},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
-use crate::{hash_subtree, iter::ResponseIterRef3};
+use crate::{hash_subtree, iter::ResponseIterRef};
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
@@ -340,7 +340,7 @@ enum Position<'a> {
         block_size: BlockSize,
     },
     /// currently reading the tree, all the info we need is in the iter
-    Content { iter: ResponseIterRef3<'a> },
+    Content { iter: ResponseIterRef<'a> },
 }
 
 /// Iterator that can be used to decode a response to a range request
@@ -398,7 +398,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                     read_len(&mut self.encoded).map_err(StartDecodeError::maybe_not_found)?;
                 let tree = BaoTree::new(size, *block_size);
                 self.inner = Position::Content {
-                    iter: ResponseIterRef3::new(tree, ranges),
+                    iter: ResponseIterRef::new(tree, ranges),
                 };
                 return Ok(Some(Header { size }.into()));
             }
@@ -523,7 +523,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     let mut out_buf = Vec::new();
     // write header
     encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
-    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, tree.block_size.0) {
+    for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent {
                 is_root,
