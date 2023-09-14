@@ -43,9 +43,8 @@ pub struct NodeInfo<'a> {
 pub struct PreOrderPartialIterRef<'a> {
     /// the tree we want to traverse
     tree: BaoTree,
-    /// the maximum level that is skipped from the traversal if it is fully
-    /// included in the query range.
-    max_skip_level: u8,
+    /// the minimum level to always emit, even if the node is fully within the query range
+    min_level: u8,
     /// stack of nodes to visit, together with the ranges that are relevant for the node
     ///
     /// The node is shifted by the block size, so these are not normal nodes!
@@ -60,13 +59,13 @@ pub struct PreOrderPartialIterRef<'a> {
 
 impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         let mut stack = SmallVec::new();
         let (shifted_root, shifted_filled_size) = shift_tree(tree.size, tree.block_size);
         stack.push((shifted_root, ranges));
         Self {
             tree,
-            max_skip_level,
+            min_level,
             stack,
             shifted_filled_size,
             shifted_root,
@@ -105,8 +104,7 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
             let full = ranges.boundaries().len() == 1 && ranges.boundaries()[0] <= start;
             // we can't recurse if the node is a leaf
             // we don't want to recurse if the node is full and below the minimum level
-            let query_leaf =
-                self.tree.is_leaf(node) || (full && node.level() <= self.max_skip_level as u32);
+            let query_leaf = shifted.is_leaf() || (full && node.level() < self.min_level as u32);
             // recursion is just pushing the children onto the stack
             if !query_leaf {
                 let l = shifted.left_child().unwrap();
@@ -519,9 +517,9 @@ pub struct PreOrderPartialChunkIterRef<'a> {
 
 impl<'a> PreOrderPartialChunkIterRef<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, max_skip_level: u8) -> Self {
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         Self {
-            inner: tree.ranges_pre_order_nodes_iter(ranges, max_skip_level),
+            inner: tree.ranges_pre_order_nodes_iter(ranges, min_level),
             // todo: get rid of this when &RangeSetRef has a default
             stack: [BaoChunk::empty(ranges), BaoChunk::empty(ranges)],
             index: 0,
@@ -556,6 +554,8 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
             if let Some(item) = self.pop() {
                 return Some(item);
             }
+            let inner_node = self.inner.next()?;
+            println!("{:?}", inner_node);
             let NodeInfo {
                 node,
                 is_root,
@@ -564,10 +564,23 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
                 l_ranges,
                 r_ranges,
                 query_leaf,
+                full,
                 ..
-            } = self.inner.next()?;
+            } = inner_node;
             let tree = &self.inner.tree;
             let is_leaf = tree.is_leaf(node);
+            // if query_leaf && full {
+            //     let tree = self.tree();
+            //     let bytes = tree.byte_range(node);
+            //     let start_chunk = bytes.start.chunks();
+            //     let size = (bytes.end.0 - bytes.start.0) as usize;
+            //     break Some(BaoChunk::Leaf {
+            //         start_chunk,
+            //         is_root,
+            //         size,
+            //         ranges,
+            //     });
+            // }
             if is_leaf {
                 let (s, m, e) = tree.leaf_byte_ranges3(node);
                 let l_start_chunk = node.chunk_range().start;
@@ -781,33 +794,7 @@ impl<'a> Iterator for ResponseIterRef2<'a> {
     type Item = BaoChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let inner_next = self.inner.next()?;
-        Some(match inner_next {
-            BaoChunk::Parent {
-                node,
-                is_root,
-                right,
-                left,
-                ranges: _,
-            } => BaoChunk::Parent {
-                node,
-                is_root,
-                right,
-                left,
-                ranges: (),
-            },
-            BaoChunk::Leaf {
-                size,
-                is_root,
-                start_chunk,
-                ..
-            } => BaoChunk::Leaf {
-                size,
-                is_root,
-                start_chunk,
-                ranges: (),
-            },
-        })
+        Some(self.inner.next()?.without_ranges())
     }
 }
 

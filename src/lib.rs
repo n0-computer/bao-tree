@@ -171,15 +171,15 @@ impl BaoTree {
     ///
     /// This is mostly used internally by the [PreOrderChunkIterRef]
     ///
-    /// When `max_skip_level` is set to a value greater than 0, the iterator will
-    /// skip all branch nodes that are at a level <= max_skip_level if they are fully
+    /// When `min_level` is set to a value greater than 0, the iterator will
+    /// skip all branch nodes that are at a level < min_level if they are fully
     /// covered by the ranges.
     pub fn ranges_pre_order_nodes_iter<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
-        max_skip_level: u8,
+        min_level: u8,
     ) -> PreOrderPartialIterRef<'a> {
-        PreOrderPartialIterRef::new(*self, ranges, max_skip_level)
+        PreOrderPartialIterRef::new(*self, ranges, min_level)
     }
 
     /// Root of the tree

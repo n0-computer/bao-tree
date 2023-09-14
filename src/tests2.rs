@@ -657,17 +657,20 @@ fn pre_order_node_iter_proptest(#[strategy(tree())] tree: BaoTree) {
 
 #[test]
 fn selection_reference_comparison_cases() {
-    let cases = [((1026, 1), RangeSet2::all()), ((2050, 1), RangeSet2::all())];
+    let cases = [
+        ((1026, 1), RangeSet2::all()),
+        ((2050, 1), RangeSet2::all()),
+        ((1066, 2), RangeSet2::from(..ChunkNum(1))),
+        ((1045, 0), RangeSet2::all()),
+    ];
     for ((size, block_level), ranges) in cases {
         println!("{} {} {:?}", size, block_level, ranges);
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         let expected = response_iter_ref_reference(tree, &ranges);
-
-        let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
-
-        let actual2 = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
-        if actual1 != expected {
-            println!("actual old {:?}", actual1);
+        // let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+        let actual2 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+        if actual2 != expected {
+            // println!("actual old {:?}", actual1);
             println!("actual new {:?}", actual2);
             println!("expected   {:?}", expected);
             panic!();
@@ -683,12 +686,11 @@ fn selection_reference_comparison_proptest(
     let (size, ranges) = size_and_selection;
     let tree = BaoTree::new(ByteNum(size as u64), block_size);
     let expected = response_iter_ref_reference(tree, &ranges);
-    let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
-    let actual2 = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
-    if actual1 != expected {
+    // let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+    let actual2 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+    if actual2 != expected {
         println!("");
         println!("{:?} {:?}", tree, ranges);
-        println!("actual old {:?}", actual1);
         println!("actual new {:?}", actual2);
         println!("expected   {:?}", expected);
         panic!();

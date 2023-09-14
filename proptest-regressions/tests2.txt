@@ -13,3 +13,4 @@ cc d548623db5ccd4f9e88b4a47eec67c08e2b8990eda3c98a2ca33262ecfee0eff # shrinks to
 cc 764f9e82e6d0813de8e2e710bdc5fe0941b376112d0e7b162faeffce3fa8303d # shrinks to input = _PreOrderNodeIterArgs { tree: BaoTree { size: 0, block_size: BlockSize(0) } }
 cc b59509e6b50b0a63780a84b3119fe2aee21e2e530cfffb9c198f96fd3525b8e3 # shrinks to input = _SelectionReferenceComparisonProptestArgs { size_and_selection: (1026, RangeSet{0..}), block_size: BlockSize(1) }
 cc 0880f9808ca097286a58956e1cf0dd877d1a8f20ec699cfd2438453496ab653f # shrinks to input = _EncodeDecodePartialFsmProptestArgs { size_and_selection: (4170, RangeSet{0..}), block_size: BlockSize(2) }
+cc 6b1eb0fd7884f0b06660892d74ea91beadccb780ab251d6104dc6a60cf66bf74 # shrinks to input = _SelectionReferenceComparisonProptestArgs { size_and_selection: (1045, RangeSet{0..}), block_size: BlockSize(0) }
