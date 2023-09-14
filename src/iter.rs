@@ -802,7 +802,7 @@ self_cell! {
     pub(crate) struct ResponseIterInner {
         owner: range_collections::RangeSet2<ChunkNum>,
         #[not_covariant]
-        dependent: ResponseIterRef,
+        dependent: ResponseIterRef3,
     }
 }
 
@@ -829,7 +829,7 @@ impl ResponseIter {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: RangeSet2<ChunkNum>) -> Self {
         Self(ResponseIterInner::new(ranges, |ranges| {
-            ResponseIterRef::new(tree, ranges)
+            ResponseIterRef3::new(tree, ranges)
         }))
     }
 

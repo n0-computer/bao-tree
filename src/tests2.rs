@@ -668,7 +668,7 @@ fn selection_reference_comparison_cases() {
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         let expected = response_iter_ref_reference(tree, &ranges);
         // let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
-        let actual2 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+        let actual2 = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
         if actual2 != expected {
             // println!("actual old {:?}", actual1);
             println!("actual new {:?}", actual2);
@@ -687,7 +687,7 @@ fn selection_reference_comparison_proptest(
     let tree = BaoTree::new(ByteNum(size as u64), block_size);
     let expected = response_iter_ref_reference(tree, &ranges);
     // let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
-    let actual2 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+    let actual2 = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
     if actual2 != expected {
         println!("");
         println!("{:?} {:?}", tree, ranges);
