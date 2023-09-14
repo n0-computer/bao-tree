@@ -360,6 +360,36 @@ impl<T> BaoChunk<T> {
             ranges,
         }
     }
+
+    /// Set the ranges to the unit value
+    pub fn without_ranges(&self) -> BaoChunk {
+        match self {
+            Self::Parent {
+                node,
+                is_root,
+                left,
+                right,
+                ..
+            } => BaoChunk::Parent {
+                node: *node,
+                is_root: *is_root,
+                left: *left,
+                right: *right,
+                ranges: (),
+            },
+            Self::Leaf {
+                start_chunk,
+                size,
+                is_root,
+                ..
+            } => BaoChunk::Leaf {
+                start_chunk: *start_chunk,
+                size: *size,
+                is_root: *is_root,
+                ranges: (),
+            },
+        }
+    }
 }
 
 /// Iterator over all chunks in a BaoTree in post-order.
@@ -615,6 +645,57 @@ impl<'a> ResponseIterRef<'a> {
     }
 }
 
+/// Reference implementation of the response iterator, using just the simple recursive
+/// implementation [crate::iter::select_nodes_rec].
+pub(crate) fn response_iter_ref_reference(
+    tree: BaoTree,
+    ranges: &RangeSetRef<ChunkNum>,
+) -> Vec<BaoChunk> {
+    let mut res = Vec::new();
+    select_nodes_rec(
+        ChunkNum(0),
+        tree.size.to_usize(),
+        true,
+        ranges,
+        tree.block_size.0 as u32,
+        &mut |x| res.push(x.without_ranges()),
+    );
+    res
+}
+
+///
+#[derive(Debug)]
+pub struct ResponseIterRef3<'a> {
+    iter: std::vec::IntoIter<BaoChunk>,
+    tree: BaoTree,
+    _ranges: &'a RangeSetRef<ChunkNum>,
+}
+
+impl<'a> ResponseIterRef3<'a> {
+    /// Create a new iterator over the tree.
+    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
+        let iter = response_iter_ref_reference(tree, ranges).into_iter();
+        Self {
+            iter,
+            tree,
+            _ranges: ranges,
+        }
+    }
+
+    /// Return a reference to the underlying tree.
+    pub fn tree(&self) -> &BaoTree {
+        &self.tree
+    }
+}
+
+impl<'a> Iterator for ResponseIterRef3<'a> {
+    type Item = BaoChunk;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
 impl<'a> Iterator for ResponseIterRef<'a> {
     type Item = BaoChunk;
 
@@ -790,7 +871,7 @@ pub(crate) fn encode_selected_rec(
     data: &[u8],
     is_root: bool,
     query: &RangeSetRef<ChunkNum>,
-    max_skip_level: u32,
+    min_level: u32,
     res: &mut Vec<u8>,
 ) -> blake3::Hash {
     use blake3::guts::{ChunkState, CHUNK_LEN};
@@ -804,7 +885,7 @@ pub(crate) fn encode_selected_rec(
     } else {
         let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
-        let level = chunks.trailing_zeros();
+        let level = chunks.trailing_zeros() / 2;
         let mid = chunks / 2;
         let mid_bytes = mid * CHUNK_LEN;
         let mid_chunk = start_chunk + (mid as u64);
@@ -814,8 +895,7 @@ pub(crate) fn encode_selected_rec(
         // just the data.
         //
         // todo: maybe call into blake3::guts::hash_subtree directly for this case? it would be faster.
-        #[allow(clippy::nonminimal_bool)]
-        let emit_parent = !query.is_empty() && !(query.is_all() && level <= max_skip_level);
+        let emit_parent = !query.is_empty() && (!query.is_all() || level >= min_level);
         let hash_offset = if emit_parent {
             // make some room for the hashes
             res.extend_from_slice(&[0xFFu8; 64]);
@@ -829,7 +909,7 @@ pub(crate) fn encode_selected_rec(
             &data[..mid_bytes],
             false,
             l_ranges,
-            max_skip_level,
+            min_level,
             res,
         );
         let right = encode_selected_rec(
@@ -837,7 +917,7 @@ pub(crate) fn encode_selected_rec(
             &data[mid_bytes..],
             false,
             r_ranges,
-            max_skip_level,
+            min_level,
             res,
         );
         // backfill the hashes if needed
@@ -858,7 +938,7 @@ pub(crate) fn select_nodes_rec(
     size: usize,
     is_root: bool,
     ranges: &RangeSetRef<ChunkNum>,
-    max_skip_level: u32,
+    min_level: u32,
     emit: &mut impl FnMut(BaoChunk),
 ) {
     if ranges.is_empty() {
@@ -878,7 +958,7 @@ pub(crate) fn select_nodes_rec(
         // chunks is always a power of two, 2 for level 0
         // so we must subtract 1 to get the level, and this is also safe
         let level = chunks.trailing_zeros() - 1;
-        if ranges.is_all() && level <= max_skip_level {
+        if ranges.is_all() && level < min_level {
             // we are allowed to just emit the entire data as a leaf
             emit(BaoChunk::Leaf {
                 start_chunk,
@@ -904,20 +984,13 @@ pub(crate) fn select_nodes_rec(
                 ranges: (),
             });
             // recurse to the left and right to compute the hashes and emit data
-            select_nodes_rec(
-                start_chunk,
-                mid_bytes,
-                false,
-                l_ranges,
-                max_skip_level,
-                emit,
-            );
+            select_nodes_rec(start_chunk, mid_bytes, false, l_ranges, min_level, emit);
             select_nodes_rec(
                 mid_chunk,
                 size - mid_bytes,
                 false,
                 r_ranges,
-                max_skip_level,
+                min_level,
                 emit,
             );
         }

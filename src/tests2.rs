@@ -13,7 +13,7 @@ use proptest::prelude::*;
 use proptest::strategy::{Just, Strategy};
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 
-use crate::iter::{ResponseIterRef, ResponseIterRef2};
+use crate::iter::{response_iter_ref_reference, ResponseIterRef, ResponseIterRef2};
 use crate::{
     blake3, hash_subtree,
     io::{
@@ -74,7 +74,11 @@ fn size_and_selection(
     size_range: Range<usize>,
     n: usize,
 ) -> impl Strategy<Value = (usize, RangeSet2<ChunkNum>)> {
-    size_range.prop_flat_map(move |size| (Just(size), selection(size as u64, n)))
+    let selection = prop_oneof! {
+        8 => selection(size_range.end as u64, n),
+        1 => Just(RangeSet2::all()),
+    };
+    size_range.prop_flat_map(move |size| (Just(size), selection.clone()))
 }
 
 /// Check that the pre order traversal iterator is consistent with the pre order
@@ -630,7 +634,7 @@ fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>)
         tree.size.to_usize(),
         true,
         ranges,
-        tree.block_size.0 as u32,
+        tree.block_size.0 as u32 + 1,
         &mut |x| {
             let node = match x {
                 BaoChunk::Parent { node, .. } => node,
@@ -644,29 +648,31 @@ fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>)
     res
 }
 
-/// Reference implementation of the response iterator, using just the simple recursive
-/// implementation [crate::iter::select_nodes_rec].
-fn response_iter_ref_reference(
-    tree: BaoTree,
-    ranges: &RangeSetRef<ChunkNum>,
-) -> Vec<BaoChunk> {
-    let mut res = Vec::new();
-    select_nodes_rec(
-        ChunkNum(0),
-        tree.size.to_usize(),
-        true,
-        ranges,
-        tree.block_size.0 as u32,
-        &mut |x| res.push(x),
-    );
-    res
-}
-
 #[test_strategy::proptest]
 fn pre_order_node_iter_proptest(#[strategy(tree())] tree: BaoTree) {
-    let iter = tree.pre_order_nodes_iter().collect::<Vec<_>>();
-    let reference = pre_order_nodes_iter_reference(tree, &RangeSet2::all());
-    prop_assert_eq!(iter, reference);
+    let actual = tree.pre_order_nodes_iter().collect::<Vec<_>>();
+    let expected = pre_order_nodes_iter_reference(tree, &RangeSet2::all());
+    prop_assert_eq!(expected, actual);
+}
+
+#[test]
+fn selection_reference_comparison_cases() {
+    let cases = [((1026, 1), RangeSet2::all()), ((2050, 1), RangeSet2::all())];
+    for ((size, block_level), ranges) in cases {
+        println!("{} {} {:?}", size, block_level, ranges);
+        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+        let expected = response_iter_ref_reference(tree, &ranges);
+
+        let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+
+        let actual2 = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+        if actual1 != expected {
+            println!("actual old {:?}", actual1);
+            println!("actual new {:?}", actual2);
+            println!("expected   {:?}", expected);
+            panic!();
+        }
+    }
 }
 
 #[test_strategy::proptest]
@@ -677,10 +683,14 @@ fn selection_reference_comparison_proptest(
     let (size, ranges) = size_and_selection;
     let tree = BaoTree::new(ByteNum(size as u64), block_size);
     let expected = response_iter_ref_reference(tree, &ranges);
-
-    let actual = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
-    prop_assert_eq!(&actual, &expected);
-
-    let actual = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
-    prop_assert_eq!(&actual, &expected);
+    let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+    let actual2 = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+    if actual1 != expected {
+        println!("");
+        println!("{:?} {:?}", tree, ranges);
+        println!("actual old {:?}", actual1);
+        println!("actual new {:?}", actual2);
+        println!("expected   {:?}", expected);
+        panic!();
+    }
 }

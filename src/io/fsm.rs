@@ -404,10 +404,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
         &self.0.stack[0]
     }
 
-    async fn next0(
-        &mut self,
-        chunk: BaoChunk,
-    ) -> std::result::Result<BaoContentItem, DecodeError> {
+    async fn next0(&mut self, chunk: BaoChunk) -> std::result::Result<BaoContentItem, DecodeError> {
         Ok(match chunk {
             BaoChunk::Parent {
                 is_root,

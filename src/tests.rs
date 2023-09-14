@@ -734,14 +734,14 @@ fn range_union<K: RangeSetEntry>(
 #[test]
 fn encode_selected_rec_cases() {
     let data = make_test_data(1024 * 3);
-    let overhead = |data, max_skip_level| {
+    let overhead = |data, min_level: u32| {
         let mut actual_encoded = Vec::new();
         encode_selected_rec(
             ChunkNum(0),
             data,
             true,
             &RangeSet2::all(),
-            max_skip_level,
+            min_level,
             &mut actual_encoded,
         );
         actual_encoded.len() - data.len()
