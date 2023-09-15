@@ -345,11 +345,11 @@ mod test_support {
         data: &[u8],
         ranges: &RangeSetRef<ChunkNum>,
         block_size: BlockSize,
-    ) -> Vec<u8> {
+    ) -> (Vec<u8>, blake3::Hash) {
         let mut res = Vec::new();
         let size = ByteNum(data.len() as u64);
         res.extend_from_slice(&size.0.to_le_bytes());
-        let _hash = encode_selected_rec(
+        let hash = encode_selected_rec(
             ChunkNum(0),
             data,
             true,
@@ -358,7 +358,7 @@ mod test_support {
             true,
             &mut res,
         );
-        res
+        (res, hash)
     }
 
     #[macro_export]
@@ -403,6 +403,10 @@ mod tests {
                 let end = a.max(b);
                 (len, start..end)
             })
+    }
+
+    fn size_and_start() -> impl Strategy<Value = (usize, usize)> {
+        (1..100000usize).prop_flat_map(|len| (Just(len), (0..len)))
     }
 
     /// Compare the outboard from the bao crate to the outboard from the reference implementation
@@ -450,7 +454,28 @@ mod tests {
         let chunk_start = ByteNum(start as u64).full_chunks();
         let chunk_end = ByteNum(end as u64).chunks().max(chunk_start + 1);
         let ranges = RangeSet2::from(chunk_start..chunk_end);
-        let actual_encoded = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
+        let actual_encoded = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
         prop_assert_eq!(expected_encoded, actual_encoded);
+    }
+
+    /// Decode a single chunk with the reference encode impl [encode_ranges_reference] and
+    /// decode it using the bao crate
+    #[test_strategy::proptest]
+    fn bao_decode_slice_comparison(#[strategy(size_and_start())] size_and_start: (usize, usize)) {
+        // ignore the end, we always want to encode a single chunk
+        let (size, start) = size_and_start;
+        let end = start + 1;
+        let data = make_test_data(size);
+        let chunk_start = ByteNum(start as u64).full_chunks();
+        let chunk_end = ByteNum(end as u64).chunks().max(chunk_start + 1);
+        let ranges = RangeSet2::from(chunk_start..chunk_end);
+        let (encoded, hash) = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
+        let bao_hash = bao::Hash::from(*hash.as_bytes());
+        let mut decoder =
+            bao::decode::SliceDecoder::new(Cursor::new(&encoded), &bao_hash, start as u64, 1);
+        let mut expected_decoded = Vec::new();
+        decoder.read_to_end(&mut expected_decoded).unwrap();
+        let actual_decoded = data[start..end.min(data.len())].to_vec();
+        prop_assert_eq!(expected_decoded, actual_decoded);
     }
 }

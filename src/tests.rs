@@ -105,7 +105,7 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     let hash = ob.root();
     let outboard = ob.into_inner_with_suffix();
     let ranges = RangeSet2::from(range);
-    let actual = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
+    let actual = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
     assert_eq!(expected.len(), actual.len());
     assert_eq!(expected, actual);
 
@@ -242,7 +242,7 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
     if range.start == range.end {
         range.end.0 += 1;
     };
-    let encoded = encode_ranges_reference(&data, &RangeSet2::from(range.clone()), block_size);
+    let encoded = encode_ranges_reference(&data, &RangeSet2::from(range.clone()), block_size).0;
     let expected = data.clone();
     let mut all_ranges: range_collections::RangeSet<[ByteNum; 2]> = RangeSet2::empty();
     let mut ec = Cursor::new(encoded);
