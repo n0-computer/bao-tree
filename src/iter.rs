@@ -8,7 +8,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use self_cell::self_cell;
 use smallvec::SmallVec;
 
-use crate::{blake3, BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode};
+use crate::{blake3, BaoTree, BlockSize, ChunkNum, TreeNode};
 
 /// Extended node info.
 ///
@@ -61,7 +61,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
         let mut stack = SmallVec::new();
-        let (shifted_root, shifted_filled_size) = shift_tree(tree.size, tree.block_size);
+        let (shifted_root, shifted_filled_size) = tree.shifted();
         stack.push((shifted_root, ranges));
         Self {
             tree,
@@ -126,27 +126,6 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
             });
         }
     }
-}
-
-/// Given a tree of size `size` and block size `block_size`,
-/// compute the root node and the number of nodes for a shifted tree.
-pub(crate) fn shift_tree(size: ByteNum, level: BlockSize) -> (TreeNode, TreeNode) {
-    let level = level.0;
-    let size = size.0;
-    let shift = 10 + level;
-    let mask = (1 << shift) - 1;
-    // number of full blocks of size 1024 << level
-    let full_blocks = size >> shift;
-    // 1 if the last block is non zero, 0 otherwise
-    let open_block = ((size & mask) != 0) as u64;
-    // total number of blocks, rounding up to 1 if there are no blocks
-    let blocks = (full_blocks + open_block).max(1);
-    let n = (blocks + 1) / 2;
-    // root node
-    let root = n.next_power_of_two() - 1;
-    // number of nodes in the tree
-    let filled_size = n + n.saturating_sub(1);
-    (TreeNode(root), TreeNode(filled_size))
 }
 
 /// Iterator over all nodes in a tree in post-order.
@@ -425,7 +404,7 @@ pub struct PostOrderChunkIter {
 impl PostOrderChunkIter {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree) -> Self {
-        let (shifted_root, shifted_len) = shift_tree(tree.size, tree.block_size);
+        let (shifted_root, shifted_len) = tree.shifted();
         let inner = PostOrderNodeIter::new(shifted_root, shifted_len);
         Self {
             tree,
@@ -540,7 +519,7 @@ pub(crate) fn partial_chunk_iter_reference(
         tree.size.to_usize(),
         true,
         ranges,
-        tree.block_size.0 as u32,
+        tree.block_size.to_u32(),
         min_full_level as u32,
         &mut |x| res.push(x),
     );
@@ -561,7 +540,7 @@ pub(crate) fn response_iter_reference(
         true,
         ranges,
         0,
-        tree.block_size.0 as u32,
+        tree.block_size.to_u32(),
         &mut |x| res.push(x.without_ranges()),
     );
     res
@@ -629,7 +608,7 @@ impl<'a> PreOrderPartialChunkIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_full_level: u8) -> Self {
         let mut stack = SmallVec::new();
-        let (shifted_root, shifted_filled_size) = shift_tree(tree.size, tree.block_size);
+        let (shifted_root, shifted_filled_size) = tree.shifted();
         stack.push((shifted_root, ranges));
         Self {
             tree,
@@ -862,23 +841,36 @@ pub(crate) fn split(
     (a, b)
 }
 
-/// Encode ranges relevant to a query from a slice and outboard to a buffer
+/// Encode ranges relevant to a query from a slice and outboard to a buffer.
 ///
 /// This will compute the root hash, so it will have to traverse the entire tree.
 /// The `ranges` parameter just controls which parts of the data are written.
 ///
 /// Except for writing to a buffer, this is the same as [hash_subtree].
+/// The `min_level` parameter controls the minimum level that will be emitted as a leaf.
+/// Set this to 0 to disable chunk groups entirely.
+/// The `emit_data` parameter controls whether the data is written to the buffer.
+/// When setting this to false and setting query to `RangeSet::all()`, this can be used
+/// to write an outboard.
+///
+/// `res` will not contain the length prefix, so if you want a bao compatible format,
+/// you need to prepend it yourself.
+///
+/// This is used as a reference implementation in tests, but also to compute hashes
+/// below the chunk group size when creating responses for outboards with a chunk group
+/// size of >0.
 pub(crate) fn encode_selected_rec(
     start_chunk: ChunkNum,
     data: &[u8],
     is_root: bool,
     query: &RangeSetRef<ChunkNum>,
     min_level: u32,
+    emit_data: bool,
     res: &mut Vec<u8>,
 ) -> blake3::Hash {
     use blake3::guts::{ChunkState, CHUNK_LEN};
     if data.len() <= CHUNK_LEN {
-        if !query.is_empty() {
+        if emit_data && !query.is_empty() {
             res.extend_from_slice(data);
         }
         let mut hasher = ChunkState::new(start_chunk.0);
@@ -893,7 +885,7 @@ pub(crate) fn encode_selected_rec(
         let mid_chunk = start_chunk + (mid as u64);
         let (l_ranges, r_ranges) = split(query, mid_chunk);
         // for empty ranges, we don't want to emit anything.
-        // for full ranges where the level is at or below max_skip_level, we want to emit
+        // for full ranges where the level is below min_level, we want to emit
         // just the data.
         //
         // todo: maybe call into blake3::guts::hash_subtree directly for this case? it would be faster.
@@ -913,6 +905,7 @@ pub(crate) fn encode_selected_rec(
             false,
             l_ranges,
             min_level,
+            emit_data,
             res,
         );
         let right = encode_selected_rec(
@@ -921,6 +914,7 @@ pub(crate) fn encode_selected_rec(
             false,
             r_ranges,
             min_level,
+            emit_data,
             res,
         );
         // backfill the hashes if needed
@@ -936,6 +930,17 @@ pub(crate) fn encode_selected_rec(
 ///
 /// This is the receive side equivalent of [bao_encode_selected_recursive].
 /// It does not do any hashing, but just emits the nodes that are relevant to a query.
+///
+/// The tree is given as `start_chunk`, `size` and `is_root`.
+///
+/// To traverse an entire tree, use `0` for `start_chunk`, `tree.size` for `size` and
+/// `true` for `is_root`.
+///
+/// `tree_level` is the smallest level the iterator will emit. Set this to `tree.block_size`
+/// `min_full_level` is the smallest level that will be emitted as a leaf if it is fully
+/// within the query range.
+///
+/// To disable chunk groups entirely, just set both `tree_level` and `min_full_level` to 0.
 #[cfg(test)]
 pub(crate) fn select_nodes_rec<'a>(
     start_chunk: ChunkNum,

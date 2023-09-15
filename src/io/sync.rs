@@ -12,7 +12,7 @@ use crate::{
         outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
         Header, Leaf, Parent,
     },
-    iter::{encode_selected_rec, shift_tree, BaoChunk},
+    iter::{encode_selected_rec, BaoChunk},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 use crate::{hash_subtree, iter::ResponseIterRef};
@@ -316,7 +316,7 @@ where
     }
     let tree = outboard.tree();
     let root_hash = outboard.root();
-    let (shifted_root, shifted_filled_size) = shift_tree(tree.size, tree.block_size);
+    let (shifted_root, shifted_filled_size) = tree.shifted();
     let mut validator = RecursiveValidator {
         tree,
         shifted_filled_size,
@@ -571,7 +571,8 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                         buf,
                         is_root,
                         ranges,
-                        tree.block_size.0 as u32,
+                        tree.block_size.to_u32(),
+                        true,
                         &mut out_buf,
                     );
                     (actual, &out_buf[..])

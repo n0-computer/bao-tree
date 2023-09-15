@@ -110,6 +110,27 @@ impl BaoTree {
         self.size
     }
 
+    /// Given a tree of size `size` and block size `block_size`,
+    /// compute the root node and the number of nodes for a shifted tree.
+    pub(crate) fn shifted(&self) -> (TreeNode, TreeNode) {
+        let level = self.block_size.0;
+        let size = self.size.0;
+        let shift = 10 + level;
+        let mask = (1 << shift) - 1;
+        // number of full blocks of size 1024 << level
+        let full_blocks = size >> shift;
+        // 1 if the last block is non zero, 0 otherwise
+        let open_block = ((size & mask) != 0) as u64;
+        // total number of blocks, rounding up to 1 if there are no blocks
+        let blocks = (full_blocks + open_block).max(1);
+        let n = (blocks + 1) / 2;
+        // root node
+        let root = n.next_power_of_two() - 1;
+        // number of nodes in the tree
+        let filled_size = n + n.saturating_sub(1);
+        (TreeNode(root), TreeNode(filled_size))
+    }
+
     fn byte_range(&self, node: TreeNode) -> Range<ByteNum> {
         let start = node.chunk_range().start.to_bytes();
         let end = node.chunk_range().end.to_bytes();
@@ -153,7 +174,7 @@ impl BaoTree {
     /// Traverse the entire tree in post order as [TreeNode]s,
     /// down to the level given by the block size.
     pub fn post_order_nodes_iter(&self) -> impl Iterator<Item = TreeNode> {
-        let (root, len) = shift_tree(self.size, self.block_size);
+        let (root, len) = self.shifted();
         let shift = self.block_size.0;
         PostOrderNodeIter::new(root, len).map(move |x| x.subtract_block_size(shift))
     }
@@ -161,7 +182,7 @@ impl BaoTree {
     /// Traverse the entire tree in pre order as [TreeNode]s,
     /// down to the level given by the block size.
     pub fn pre_order_nodes_iter(&self) -> impl Iterator<Item = TreeNode> {
-        let (root, len) = shift_tree(self.size, self.block_size);
+        let (root, len) = self.shifted();
         let shift = self.block_size.0;
         PreOrderNodeIter::new(root, len).map(move |x| x.subtract_block_size(shift))
     }
@@ -193,15 +214,6 @@ impl BaoTree {
         let blocks = (full_blocks + open_block).max(1);
         let chunks = ChunkNum(blocks);
         TreeNode::root(chunks)
-    }
-
-    ///
-    pub fn root_for_level(&self) -> TreeNode {
-        let mut root = self.root();
-        while root.level() < self.block_size.0 as u32 {
-            root = root.parent().unwrap();
-        }
-        root
     }
 
     /// Number of blocks in the tree
@@ -239,7 +251,7 @@ impl BaoTree {
     /// If a tree has a non-zero block size, this is different than the node
     /// being a leaf (level=0).
     const fn is_leaf(&self, node: TreeNode) -> bool {
-        node.level() == self.block_size.0 as u32
+        node.level() == self.block_size.to_u32()
     }
 
     /// true if the given node is persisted
@@ -255,10 +267,10 @@ impl BaoTree {
     #[inline]
     const fn is_relevant_for_outboard(&self, node: TreeNode) -> bool {
         let level = node.level();
-        if level < self.block_size.0 as u32 {
+        if level < self.block_size.to_u32() {
             // too small, this outboard does not track it
             false
-        } else if level > self.block_size.0 as u32 {
+        } else if level > self.block_size.to_u32() {
             // a parent node, always relevant
             true
         } else {
@@ -272,7 +284,7 @@ impl BaoTree {
         let shifted = node.add_block_size(self.block_size.0)?;
         let is_half_leaf = shifted.is_leaf() && node.mid().to_bytes() >= self.size;
         if !is_half_leaf {
-            let (_, tree_filled_size) = shift_tree(self.size, self.block_size);
+            let (_, tree_filled_size) = self.shifted();
             Some(pre_order_offset_loop(shifted.0, tree_filled_size.0))
         } else {
             None
@@ -350,6 +362,12 @@ impl ChunkNum {
 /// you to find the position where validation failed.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TreeNode(u64);
+
+impl fmt::Display for TreeNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 impl fmt::Debug for TreeNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -472,17 +490,29 @@ impl TreeNode {
 
     /// Get the left child of this node, or None if it is a child node.
     pub fn left_child(&self) -> Option<Self> {
-        self.left_child0().map(Self)
+        let offset = 1 << self.level().checked_sub(1)?;
+        Some(Self(self.0 - offset))
     }
 
     /// Get the right child of this node, or None if it is a child node.
     pub fn right_child(&self) -> Option<Self> {
-        self.right_child0().map(Self)
+        let offset = 1 << self.level().checked_sub(1)?;
+        Some(Self(self.0 + offset))
     }
 
     /// Unrestricted parent, can only be None if we are at the top
     pub fn parent(&self) -> Option<Self> {
-        self.parent0().map(Self)
+        let level = self.level();
+        if level == 63 {
+            return None;
+        }
+        let span = 1u64 << level;
+        let offset = self.0;
+        Some(Self(if (offset & (span * 2)) == 0 {
+            offset + span
+        } else {
+            offset - span
+        }))
     }
 
     /// Restricted parent, will be None if we call parent on the root
@@ -501,34 +531,10 @@ impl TreeNode {
     /// Get a valid right descendant for an offset
     pub(crate) fn right_descendant(&self, len: Self) -> Option<Self> {
         let mut node = self.right_child()?;
-        while node.0 >= len.0 {
+        while node >= len {
             node = node.left_child()?;
         }
         Some(node)
-    }
-
-    fn left_child0(&self) -> Option<u64> {
-        let offset = 1 << self.level().checked_sub(1)?;
-        Some(self.0 - offset)
-    }
-
-    fn right_child0(&self) -> Option<u64> {
-        let offset = 1 << self.level().checked_sub(1)?;
-        Some(self.0 + offset)
-    }
-
-    fn parent0(&self) -> Option<u64> {
-        let level = self.level();
-        if level == 63 {
-            return None;
-        }
-        let span = 1u64 << level;
-        let offset = self.0;
-        Some(if (offset & (span * 2)) == 0 {
-            offset + span
-        } else {
-            offset - span
-        })
     }
 
     /// Get the range of nodes this node covers
@@ -542,23 +548,12 @@ impl TreeNode {
 
     /// Get the range of blocks this node covers
     pub fn chunk_range(&self) -> Range<ChunkNum> {
-        let Range { start, end } = self.chunk_range0();
-        ChunkNum(start)..ChunkNum(end)
-    }
-
-    /// Range of blocks this node covers
-    const fn chunk_range0(&self) -> Range<u64> {
         let level = self.level();
         let span = 1 << level;
         let mid = self.0 + 1;
         // at level 0 (leaf), range will be nn..nn+2
         // at level >0 (branch), range will be centered on nn+1
-        mid - span..mid + span
-    }
-
-    /// Get the post order offset of this node
-    pub fn post_order_offset(&self) -> u64 {
-        self.post_order_offset0()
+        ChunkNum(mid - span)..ChunkNum(mid + span)
     }
 
     /// the number of times you have to go right from the root to get to this node
@@ -568,8 +563,9 @@ impl TreeNode {
         (self.0 + 1).count_ones() - 1
     }
 
+    /// Get the post order offset of this node
     #[inline]
-    const fn post_order_offset0(&self) -> u64 {
+    pub const fn post_order_offset(&self) -> u64 {
         // compute number of nodes below me
         let below_me = self.count_below();
         // compute next ancestor that is to the left
@@ -582,19 +578,16 @@ impl TreeNode {
     }
 
     /// Get the range of post order offsets this node covers
-    pub fn post_order_range(&self) -> Range<u64> {
-        self.post_order_range0()
-    }
-
-    #[inline]
-    const fn post_order_range0(&self) -> Range<u64> {
-        let offset = self.post_order_offset0();
+    pub const fn post_order_range(&self) -> Range<u64> {
+        let offset = self.post_order_offset();
         let end = offset + 1;
         let start = offset - self.count_below();
         start..end
     }
 
     /// Get the next left ancestor, or None if we don't have one
+    ///
+    /// this is a separate fn so it can be const.
     #[inline]
     const fn next_left_ancestor0(&self) -> Option<u64> {
         // add 1 to go to the representation where trailing zeroes = level

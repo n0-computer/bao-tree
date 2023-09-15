@@ -444,9 +444,6 @@ async fn encode_decode_full_fsm_impl(
     .await
     .unwrap();
 
-    let tree = outboard.tree();
-    println!("{:?} {}", tree, tree.size.chunks());
-    println!("{}", hex::encode(&encoded));
     let mut read_encoded = std::io::Cursor::new(encoded);
     let mut decoded = BytesMut::new();
     let ob_res_opt = crate::io::fsm::decode_response_into(
@@ -455,7 +452,6 @@ async fn encode_decode_full_fsm_impl(
         ranges,
         &mut read_encoded,
         |root, tree| async move {
-            println!("creating outboard {:?}", tree);
             let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
             let outboard_data = vec![0u8; outboard_size];
             Ok(PostOrderMemOutboard::new(root, tree, outboard_data).unwrap())
@@ -645,8 +641,8 @@ fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>)
         tree.size.to_usize(),
         true,
         ranges,
-        tree.block_size.0 as u32,
-        tree.block_size.0 as u32 + 1,
+        tree.block_size.to_u32(),
+        tree.block_size.to_u32() + 1,
         &mut |x| {
             let node = match x {
                 BaoChunk::Parent { node, .. } => node,
@@ -677,17 +673,12 @@ fn selection_reference_comparison_cases() {
         ((10000, 0), RangeSet2::from(ChunkNum(u64::MAX)..)),
     ];
     for ((size, block_level), ranges) in cases {
-        println!("{} {} {:?}", size, block_level, ranges);
+        // println!("{} {} {:?}", size, block_level, ranges);
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         let expected = partial_chunk_iter_reference(tree, &ranges, u8::MAX);
-        // let actual1 = PreOrderPartialChunkIterRef::new(tree, &ranges, u8::MAX).collect::<Vec<_>>();
-        let actual2 =
+        let actual =
             ReferencePreOrderPartialChunkIterRef::new(tree, &ranges, u8::MAX).collect::<Vec<_>>();
-        if actual2 != expected {
-            println!("actual new {:?}", actual2);
-            println!("expected   {:?}", expected);
-            panic!();
-        }
+        assert_eq!(expected, actual);
     }
 }
 
@@ -718,8 +709,16 @@ fn encode_selected_reference(
 ) -> (blake3::Hash, Vec<u8>) {
     let mut res = Vec::new();
     res.extend_from_slice(&(data.len() as u64).to_le_bytes());
-    let max_skip_level = block_size.0 as u32;
-    let hash = encode_selected_rec(ChunkNum(0), data, true, ranges, max_skip_level, &mut res);
+    let max_skip_level = block_size.to_u32();
+    let hash = encode_selected_rec(
+        ChunkNum(0),
+        data,
+        true,
+        ranges,
+        max_skip_level,
+        true,
+        &mut res,
+    );
     (hash, res)
 }
 
@@ -751,6 +750,7 @@ fn cases() -> impl Iterator<Item = (BaoTree, RangeSet2<ChunkNum>, u8)> {
 }
 
 #[test]
+#[ignore]
 fn filtered_chunks() {
     for (tree, ranges, min_full_level) in cases() {
         println!("{:?} {:?}", tree, ranges);

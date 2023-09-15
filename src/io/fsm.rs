@@ -9,7 +9,7 @@ use std::{io, result};
 
 use crate::{
     blake3, hash_subtree,
-    iter::{encode_selected_rec, shift_tree, ResponseIter},
+    iter::{encode_selected_rec, ResponseIter},
 };
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
@@ -597,7 +597,8 @@ where
                         &bytes,
                         is_root,
                         ranges,
-                        tree.block_size.0 as u32,
+                        tree.block_size.to_u32(),
+                        true,
                         &mut out_buf,
                     );
                     (actual, &out_buf[..])
@@ -726,7 +727,7 @@ where
     }
     let tree = outboard.tree();
     let root_hash = outboard.root();
-    let (shifted_root, shifted_filled_size) = shift_tree(tree.size, tree.block_size);
+    let (shifted_root, shifted_filled_size) = tree.shifted();
     let mut validator = RecursiveValidator {
         tree,
         shifted_filled_size,
