@@ -37,6 +37,14 @@ mod tests;
 #[cfg(test)]
 mod tests2;
 
+/// A set of chunk ranges
+pub type ChunkRanges = range_collections::RangeSet2<ChunkNum>;
+
+/// A referenceable set of chunk ranges
+///
+/// [ChunkRanges] implements [AsRef<ChunkRangesRef>].
+pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
+
 fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     if data.len().is_power_of_two() {
         blake3::guts::hash_subtree(start_chunk, data, is_root)

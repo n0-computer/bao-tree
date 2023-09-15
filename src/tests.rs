@@ -6,7 +6,7 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
-use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
+use range_collections::RangeSet2;
 
 use crate::{
     assert_tuple_eq, blake3,
@@ -18,10 +18,10 @@ use crate::{
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
     prop_assert_tuple_eq,
     rec::{
-        encode_ranges_reference, encode_selected_rec, make_test_data,
+        encode_ranges_reference, encode_selected_rec, make_test_data, range_union,
         ReferencePreOrderPartialChunkIterRef,
     },
-    recursive_hash_subtree, split,
+    recursive_hash_subtree, split, ChunkRanges, ChunkRangesRef,
 };
 
 use super::{
@@ -104,12 +104,12 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     let ob = PostOrderMemOutboard::create(&data, BlockSize::ZERO);
     let hash = ob.root();
     let outboard = ob.into_inner_with_suffix();
-    let ranges = RangeSet2::from(range);
+    let ranges = ChunkRanges::from(range);
     let actual = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
     assert_eq!(expected.len(), actual.len());
     assert_eq!(expected, actual);
 
-    let content_range = RangeSet2::from(..ByteNum(data.len() as u64).chunks());
+    let content_range = ChunkRanges::from(..ByteNum(data.len() as u64).chunks());
     if !content_range.is_superset(&ranges) {
         // the behaviour of bao/abao and us is different in this case.
         // if the query ranges are non empty outside the content range, we will return
@@ -135,7 +135,7 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     let range = ChunkNum(range.start)..ChunkNum(range.end);
     let (encoded, root) = encode_slice_reference(&data, range.clone());
     let expected = data;
-    let ranges = RangeSet2::from(range);
+    let ranges = ChunkRanges::from(range);
     let mut ec = Cursor::new(encoded);
     for item in decode_ranges_into_chunks(root, BlockSize::ZERO, &mut ec, &ranges) {
         let (pos, slice) = item.unwrap();
@@ -154,7 +154,7 @@ mod fsm_tests {
         let range = ChunkNum(range.start)..ChunkNum(range.end);
         let (encoded, root) = encode_slice_reference(&data, range.clone());
         let expected = data;
-        let ranges = RangeSet2::from(range);
+        let ranges = ChunkRanges::from(range);
         let mut ec = Cursor::new(encoded);
         let at_start = ResponseDecoderStart::new(root, ranges, BlockSize::ZERO, &mut ec);
         let (mut reading, _size) = at_start.next().await.unwrap();
@@ -242,11 +242,11 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
     if range.start == range.end {
         range.end.0 += 1;
     };
-    let encoded = encode_ranges_reference(&data, &RangeSet2::from(range.clone()), block_size).0;
+    let encoded = encode_ranges_reference(&data, &ChunkRanges::from(range.clone()), block_size).0;
     let expected = data.clone();
     let mut all_ranges: range_collections::RangeSet<[ByteNum; 2]> = RangeSet2::empty();
     let mut ec = Cursor::new(encoded);
-    for item in decode_ranges_into_chunks(root, block_size, &mut ec, &RangeSet2::from(range)) {
+    for item in decode_ranges_into_chunks(root, block_size, &mut ec, &ChunkRanges::from(range)) {
         let (pos, slice) = item.unwrap();
         // compute all data ranges
         all_ranges |= RangeSet2::from(pos..pos + (slice.len() as u64));
@@ -520,7 +520,7 @@ pub fn decode_ranges_into_chunks<'a>(
     root: blake3::Hash,
     block_size: BlockSize,
     encoded: impl Read + 'a,
-    ranges: &'a RangeSetRef<ChunkNum>,
+    ranges: &'a ChunkRangesRef,
 ) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
     let scratch = BytesMut::with_capacity(block_size.bytes());
     let iter = DecodeResponseIter::new(root, block_size, encoded, ranges, scratch);
@@ -542,13 +542,13 @@ pub fn decode_ranges_into_chunks<'a>(
 /// Recursive reference implementation, just used in tests
 fn iterate_part_preorder_reference<'a>(
     tree: &BaoTree,
-    ranges: &'a RangeSetRef<ChunkNum>,
+    ranges: &'a ChunkRangesRef,
     max_skip_level: u8,
 ) -> Vec<NodeInfo<'a>> {
     fn iterate_part_rec<'a>(
         tree: &BaoTree,
         node: TreeNode,
-        ranges: &'a RangeSetRef<ChunkNum>,
+        ranges: &'a ChunkRangesRef,
         max_skip_level: u32,
         is_root: bool,
         res: &mut Vec<NodeInfo<'a>>,
@@ -631,7 +631,7 @@ fn size_and_slice() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
 
 fn get_leaf_ranges(
     tree: BaoTree,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
     max_skip_level: u8,
 ) -> impl Iterator<Item = Range<u64>> + '_ {
     tree.ranges_pre_order_chunks_iter_ref(ranges, max_skip_level)
@@ -652,14 +652,14 @@ fn get_leaf_ranges(
 /// Create a random selection
 /// `size` is the size of the data
 /// `n` is the number of ranges, roughly the complexity of the selection
-fn selection(size: u64, n: usize) -> impl Strategy<Value = RangeSet2<ChunkNum>> {
+fn selection(size: u64, n: usize) -> impl Strategy<Value = ChunkRanges> {
     let chunks = BaoTree::new(ByteNum(size), BlockSize(0)).chunks();
     proptest::collection::vec((..chunks.0, ..chunks.0), n).prop_map(|e| {
-        let mut res = RangeSet2::empty();
+        let mut res = ChunkRanges::empty();
         for (a, b) in e {
             let min = a.min(b);
             let max = a.max(b) + 1;
-            let elem = RangeSet2::from(ChunkNum(min)..ChunkNum(max));
+            let elem = ChunkRanges::from(ChunkNum(min)..ChunkNum(max));
             if res != elem {
                 res ^= elem;
             }
@@ -671,24 +671,8 @@ fn selection(size: u64, n: usize) -> impl Strategy<Value = RangeSet2<ChunkNum>> 
 fn size_and_selection(
     size_range: Range<usize>,
     n: usize,
-) -> impl Strategy<Value = (usize, RangeSet2<ChunkNum>)> {
+) -> impl Strategy<Value = (usize, ChunkRanges)> {
     size_range.prop_flat_map(move |size| (Just(size), selection(size as u64, n)))
-}
-
-/// Compute the union of an iterator of ranges. The ranges should be non-overlapping, otherwise
-/// the result is None
-fn range_union<K: RangeSetEntry>(
-    ranges: impl IntoIterator<Item = Range<K>>,
-) -> Option<RangeSet2<K>> {
-    let mut res = RangeSet2::empty();
-    for r in ranges.into_iter() {
-        let part = RangeSet2::from(r);
-        if part.intersects(&res) {
-            return None;
-        }
-        res |= part;
-    }
-    Some(res)
 }
 
 #[test]
@@ -700,7 +684,7 @@ fn encode_selected_rec_cases() {
             ChunkNum(0),
             data,
             true,
-            &RangeSet2::all(),
+            &ChunkRanges::all(),
             min_level,
             true,
             &mut actual_encoded,
@@ -716,7 +700,7 @@ fn encode_selected_rec_cases() {
 fn encode_selected_reference(
     data: &[u8],
     block_size: BlockSize,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
 ) -> (blake3::Hash, Vec<u8>) {
     let mut res = Vec::new();
     res.extend_from_slice(&(data.len() as u64).to_le_bytes());
@@ -750,15 +734,15 @@ fn encode_single_chunk_large() {
     };
 
     // check the expected size for various ranges
-    let ranges = RangeSet2::from(..ChunkNum(1));
+    let ranges = ChunkRanges::from(..ChunkNum(1));
     let encoded = get_encoded(&ranges);
     assert_eq!(encoded.len(), 8 + 15 * 64 + 1024);
 
-    let ranges = RangeSet2::from(ChunkNum(1000)..ChunkNum(1001));
+    let ranges = ChunkRanges::from(ChunkNum(1000)..ChunkNum(1001));
     let encoded = get_encoded(&ranges);
     assert_eq!(encoded.len(), 8 + 15 * 64 + 1024);
 
-    let ranges = RangeSet2::from(ChunkNum(3000)..ChunkNum(3001));
+    let ranges = ChunkRanges::from(ChunkNum(3000)..ChunkNum(3001));
     let encoded = get_encoded(&ranges);
     assert_eq!(encoded.len(), 8 + 15 * 64 + 1024);
 }
@@ -774,7 +758,7 @@ fn last_chunk(size: u64) -> Range<u64> {
 }
 
 fn select_last_chunk_impl(size: u64, block_size: u8) -> (Vec<Range<u64>>, Vec<Range<u64>>) {
-    let range = RangeSet2::from(ChunkNum(u64::MAX)..);
+    let range = ChunkRanges::from(ChunkNum(u64::MAX)..);
     let selection =
         ResponseIterRef::new(BaoTree::new(ByteNum(size), BlockSize(block_size)), &range)
             .filter_map(|item| match item {
@@ -795,14 +779,14 @@ fn encode_last_chunk_impl(size: u64, block_size: u8) -> (Vec<u8>, Vec<u8>) {
     let data = make_test_data(size as usize);
     let outboard = PostOrderMemOutboard::create(&data, BlockSize(block_size));
 
-    let range = RangeSet2::from(ChunkNum(u64::MAX)..);
+    let range = ChunkRanges::from(ChunkNum(u64::MAX)..);
     let mut encoded1 = Vec::new();
     encode_ranges_validated(&data, &outboard, &range, &mut encoded1).unwrap();
 
     let lc = last_chunk(size);
     let sc = ByteNum(lc.start).chunks();
     let ec = ByteNum(lc.end).chunks();
-    let range = RangeSet2::from(sc..ec);
+    let range = ChunkRanges::from(sc..ec);
     let mut encoded2 = Vec::new();
     encode_ranges_validated(&data, &outboard, &range, &mut encoded2).unwrap();
     (encoded1, encoded2)
@@ -845,8 +829,8 @@ fn test_post_order_node_iter() {
 #[ignore]
 fn test_pre_order_chunks_iter_ref() {
     let cases = [
-        // (8193, RangeSet2::all()),
-        (8193, RangeSet2::from(..ChunkNum(1))),
+        // (8193, ChunkRanges::all()),
+        (8193, ChunkRanges::from(..ChunkNum(1))),
     ];
     for (size, ranges) in cases {
         for i in 0..5 {
@@ -902,7 +886,7 @@ fn pre_order_iter_comparison_impl(len: u64, level: u8) -> Pair<Vec<TreeNode>> {
     let tree = BaoTree::new(ByteNum(len), BlockSize(level));
     let iter1 = tree.pre_order_nodes_iter().collect::<Vec<_>>();
     let iter2 = tree
-        .ranges_pre_order_nodes_iter(&RangeSet2::all(), 0)
+        .ranges_pre_order_nodes_iter(&ChunkRanges::all(), 0)
         .map(|x| x.node)
         .collect::<Vec<_>>();
     (iter1, iter2)
@@ -1000,7 +984,7 @@ proptest! {
     #[test]
     fn max_skip_level(size in 0..32786u64, block_size in 0..2u8, max_skip_level in 0..2u8) {
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_size));
-        let ranges = RangeSet2::all();
+        let ranges = ChunkRanges::all();
         let leaf_ranges = get_leaf_ranges(tree, &ranges, max_skip_level).collect::<Vec<_>>();
         prop_assert_eq!(range_union(leaf_ranges), Some(RangeSet2::from(0..size)));
     }
@@ -1072,7 +1056,7 @@ proptest! {
     fn partial_iterator_reference_comparison((len, start, size) in size_and_slice_overlapping()) {
         let tree = BaoTree::new(len, BlockSize::ZERO);
         let chunk_range = start .. start + size;
-        let rs = RangeSet2::from(chunk_range);
+        let rs = ChunkRanges::from(chunk_range);
         let iter1 = iterate_part_preorder_reference(&tree, &rs, 0);
         let iter2 = tree.ranges_pre_order_nodes_iter(&rs, 0).collect::<Vec<_>>();
         prop_assert_eq!(&iter1, &iter2);

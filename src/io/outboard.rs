@@ -145,7 +145,7 @@ pub struct PostOrderMemOutboard<T = Vec<u8>> {
     /// tree defining the data
     pub(crate) tree: BaoTree,
     /// hashes without length suffix
-    pub(crate) data: T,
+    pub data: T,
 }
 
 fn to_hex(data: &[u8], target: &mut String) {
@@ -225,6 +225,11 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
         } else {
             Err("invalid outboard data size")
         }
+    }
+
+    /// Get the inner data.
+    pub fn data(&self) -> &T {
+        &self.data
     }
 
     /// Map the outboard data to a new type.
@@ -368,7 +373,7 @@ pub struct PreOrderMemOutboard<T = Vec<u8>> {
     /// tree defining the data
     pub(crate) tree: BaoTree,
     /// hashes with length prefix
-    pub(crate) data: T,
+    pub data: T,
 }
 
 impl PreOrderMemOutboard {
@@ -401,6 +406,11 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
         } else {
             Err("invalid outboard data size")
         }
+    }
+
+    /// Get the inner data.
+    pub fn data(&self) -> &T {
+        &self.data
     }
 
     /// Map the outboard data to a new type.

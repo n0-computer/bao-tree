@@ -9,14 +9,14 @@
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use proptest::strategy::{Just, Strategy};
-use range_collections::{RangeSet2, RangeSetRef};
+use range_collections::RangeSet2;
 use std::ops::Range;
 
 use crate::rec::{
     get_leaf_ranges, make_test_data, partial_chunk_iter_reference, range_union,
     response_iter_reference, ReferencePreOrderPartialChunkIterRef,
 };
-use crate::{assert_tuple_eq, prop_assert_tuple_eq};
+use crate::{assert_tuple_eq, prop_assert_tuple_eq, ChunkRanges, ChunkRangesRef};
 use crate::{
     blake3, hash_subtree,
     io::{
@@ -45,14 +45,14 @@ fn block_size() -> impl Strategy<Value = BlockSize> {
 /// Create a random selection
 /// `size` is the size of the data
 /// `n` is the number of ranges, roughly the complexity of the selection
-fn selection(size: u64, n: usize) -> impl Strategy<Value = RangeSet2<ChunkNum>> {
+fn selection(size: u64, n: usize) -> impl Strategy<Value = ChunkRanges> {
     let chunks = BaoTree::new(ByteNum(size), BlockSize(0)).chunks();
     proptest::collection::vec((..chunks.0, ..chunks.0), n).prop_map(|e| {
-        let mut res = RangeSet2::empty();
+        let mut res = ChunkRanges::empty();
         for (a, b) in e {
             let min = a.min(b);
             let max = a.max(b) + 1;
-            let elem = RangeSet2::from(ChunkNum(min)..ChunkNum(max));
+            let elem = ChunkRanges::from(ChunkNum(min)..ChunkNum(max));
             if res != elem {
                 res ^= elem;
             }
@@ -64,11 +64,11 @@ fn selection(size: u64, n: usize) -> impl Strategy<Value = RangeSet2<ChunkNum>> 
 fn size_and_selection(
     size_range: Range<usize>,
     n: usize,
-) -> impl Strategy<Value = (usize, RangeSet2<ChunkNum>)> {
+) -> impl Strategy<Value = (usize, ChunkRanges)> {
     let selection = prop_oneof! {
         8 => selection(size_range.end as u64, n),
-        1 => Just(RangeSet2::all()),
-        1 => Just(RangeSet2::from(ChunkNum(u64::MAX)..))
+        1 => Just(ChunkRanges::all()),
+        1 => Just(ChunkRanges::from(ChunkNum(u64::MAX)..))
     };
     size_range.prop_flat_map(move |size| (Just(size), selection.clone()))
 }
@@ -229,12 +229,12 @@ fn mem_outboard_flip_proptest(#[strategy(tree())] tree: BaoTree) {
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
-fn valid_ranges_sync(outboard: &PostOrderMemOutboard) -> RangeSet2<ChunkNum> {
+fn valid_ranges_sync(outboard: &PostOrderMemOutboard) -> ChunkRanges {
     crate::io::sync::valid_ranges(outboard).unwrap()
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
-fn valid_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> RangeSet2<ChunkNum> {
+fn valid_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> ChunkRanges {
     futures::executor::block_on(crate::io::fsm::valid_ranges(outboard)).unwrap()
 }
 
@@ -243,7 +243,7 @@ fn validate_outboard_sync_pos_impl(tree: BaoTree) {
     let block_size = tree.block_size;
     let data = make_test_data(size);
     let outboard = PostOrderMemOutboard::create(data, block_size);
-    let expected = RangeSet2::from(..outboard.tree().chunks());
+    let expected = ChunkRanges::from(..outboard.tree().chunks());
     let actual = valid_ranges_sync(&outboard);
     assert_eq!(expected, actual)
 }
@@ -258,7 +258,7 @@ fn validate_outboard_fsm_pos_impl(tree: BaoTree) {
     let block_size = tree.block_size;
     let data = make_test_data(size);
     let mut outboard = PostOrderMemOutboard::create(data, block_size);
-    let expected = RangeSet2::from(..outboard.tree().chunks());
+    let expected = ChunkRanges::from(..outboard.tree().chunks());
     let actual = valid_ranges_fsm(&mut outboard);
     assert_eq!(expected, actual)
 }
@@ -285,7 +285,7 @@ fn validate_outboard_sync_neg_impl(tree: BaoTree, rand: u32) {
     let block_size = tree.block_size;
     let data = make_test_data(size);
     let mut outboard = PostOrderMemOutboard::create(data, block_size);
-    let expected = RangeSet2::from(..outboard.tree().chunks());
+    let expected = ChunkRanges::from(..outboard.tree().chunks());
     if !outboard.data.is_empty() {
         // flip a random bit in the outboard
         flip_bit(&mut outboard.data, rand);
@@ -316,7 +316,7 @@ fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
     let block_size = tree.block_size;
     let data = make_test_data(size);
     let mut outboard = PostOrderMemOutboard::create(data, block_size);
-    let expected = RangeSet2::from(..outboard.tree().chunks());
+    let expected = ChunkRanges::from(..outboard.tree().chunks());
     if !outboard.data.is_empty() {
         // flip a random bit in the outboard
         flip_bit(&mut outboard.data, rand);
@@ -341,9 +341,9 @@ fn encode_decode_full_sync_impl(
     (Vec<u8>, PostOrderMemOutboard),
     (Vec<u8>, PostOrderMemOutboard),
 ) {
-    let ranges = RangeSet2::all();
+    let ranges = ChunkRanges::all();
     let mut encoded = Vec::new();
-    crate::io::sync::encode_ranges_validated(data, &outboard, &RangeSet2::all(), &mut encoded)
+    crate::io::sync::encode_ranges_validated(data, &outboard, &ChunkRanges::all(), &mut encoded)
         .unwrap();
     let mut encoded_read = std::io::Cursor::new(encoded);
     let mut decoded = Vec::new();
@@ -377,12 +377,12 @@ async fn encode_decode_full_fsm_impl(
     (Vec<u8>, PostOrderMemOutboard),
 ) {
     let mut outboard = outboard;
-    let ranges = RangeSet2::all();
+    let ranges = ChunkRanges::all();
     let mut encoded = Vec::new();
     crate::io::fsm::encode_ranges_validated(
         Bytes::from(data.clone()),
         &mut outboard,
-        &RangeSet2::all(),
+        &ChunkRanges::all(),
         &mut encoded,
     )
     .await
@@ -413,7 +413,7 @@ async fn encode_decode_full_fsm_impl(
 fn encode_decode_partial_sync_impl(
     data: &[u8],
     outboard: PostOrderMemOutboard,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
 ) -> bool {
     let mut encoded = Vec::new();
     crate::io::sync::encode_ranges_validated(data, &outboard, ranges, &mut encoded).unwrap();
@@ -463,7 +463,7 @@ fn encode_decode_partial_sync_impl(
 async fn encode_decode_partial_fsm_impl(
     data: &[u8],
     outboard: PostOrderMemOutboard,
-    ranges: RangeSet2<ChunkNum>,
+    ranges: ChunkRanges,
 ) -> bool {
     let mut encoded = Vec::new();
     let mut outboard = outboard;
@@ -536,7 +536,7 @@ fn encode_decode_full_sync_proptest(#[strategy(tree())] tree: BaoTree) {
 
 #[test_strategy::proptest]
 fn encode_decode_partial_sync_proptest(
-    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
 ) {
     let (size, selection) = size_and_selection;
@@ -567,7 +567,7 @@ fn encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
 
 #[test_strategy::proptest]
 fn encode_decode_partial_fsm_proptest(
-    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
 ) {
     let (size, selection) = size_and_selection;
@@ -578,7 +578,7 @@ fn encode_decode_partial_fsm_proptest(
     prop_assert!(ok);
 }
 
-fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>) -> Vec<TreeNode> {
+fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &ChunkRangesRef) -> Vec<TreeNode> {
     let mut res = Vec::new();
     select_nodes_rec(
         ChunkNum(0),
@@ -603,18 +603,18 @@ fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &RangeSetRef<ChunkNum>)
 #[test_strategy::proptest]
 fn pre_order_node_iter_proptest(#[strategy(tree())] tree: BaoTree) {
     let actual = tree.pre_order_nodes_iter().collect::<Vec<_>>();
-    let expected = pre_order_nodes_iter_reference(tree, &RangeSet2::all());
+    let expected = pre_order_nodes_iter_reference(tree, &ChunkRanges::all());
     prop_assert_eq!(expected, actual);
 }
 
 #[test]
 fn selection_reference_comparison_cases() {
     let cases = [
-        ((1026, 1), RangeSet2::all()),
-        ((2050, 1), RangeSet2::all()),
-        ((1066, 2), RangeSet2::from(..ChunkNum(1))),
-        ((1045, 0), RangeSet2::all()),
-        ((10000, 0), RangeSet2::from(ChunkNum(u64::MAX)..)),
+        ((1026, 1), ChunkRanges::all()),
+        ((2050, 1), ChunkRanges::all()),
+        ((1066, 2), ChunkRanges::from(..ChunkNum(1))),
+        ((1045, 0), ChunkRanges::all()),
+        ((10000, 0), ChunkRanges::from(ChunkNum(u64::MAX)..)),
     ];
     for ((size, block_level), ranges) in cases {
         // println!("{} {} {:?}", size, block_level, ranges);
@@ -628,7 +628,7 @@ fn selection_reference_comparison_cases() {
 
 #[test_strategy::proptest]
 fn selection_reference_comparison_proptest(
-    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
 ) {
     let (size, ranges) = size_and_selection;
@@ -649,7 +649,7 @@ fn selection_reference_comparison_proptest(
 fn encode_selected_reference(
     data: &[u8],
     block_size: BlockSize,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
 ) -> (blake3::Hash, Vec<u8>) {
     let mut res = Vec::new();
     res.extend_from_slice(&(data.len() as u64).to_le_bytes());
@@ -666,22 +666,22 @@ fn encode_selected_reference(
     (hash, res)
 }
 
-fn cases() -> impl Iterator<Item = (BaoTree, RangeSet2<ChunkNum>, u8)> {
+fn cases() -> impl Iterator<Item = (BaoTree, ChunkRanges, u8)> {
     [
-        // ((1, 0), RangeSet2::all(), 0),
-        // ((1025, 0), RangeSet2::all(), 0),
-        // ((2048, 0), RangeSet2::all(), 0),
-        // ((2049, 0), RangeSet2::all(), 0),
-        // ((2049, 1), RangeSet2::all(), 0),
-        // ((2049, 0), RangeSet2::from(..ChunkNum(1)), 0),
-        // ((1024 * 32, 0), RangeSet2::from(..ChunkNum(1)), 4),
-        // ((1024 * 32, 0), RangeSet2::all(), 4),
-        // ((1024 * 32, 0), RangeSet2::from(ChunkNum(16)..), 4),
-        // ((1024 * 32, 0), RangeSet2::from(..ChunkNum(16)), 4),
-        // ((2048 + 1, 0), RangeSet2::from(..ChunkNum(2)), 0),
-        // ((8192 + 1, 0), RangeSet2::from(..ChunkNum(8)), 2),
-        // ((1037, 0), RangeSet2::all(), 1),
-        ((1024 + 1, 0), RangeSet2::from(..ChunkNum(1)), 2),
+        // ((1, 0), ChunkRanges::all(), 0),
+        // ((1025, 0), ChunkRanges::all(), 0),
+        // ((2048, 0), ChunkRanges::all(), 0),
+        // ((2049, 0), ChunkRanges::all(), 0),
+        // ((2049, 1), ChunkRanges::all(), 0),
+        // ((2049, 0), ChunkRanges::from(..ChunkNum(1)), 0),
+        // ((1024 * 32, 0), ChunkRanges::from(..ChunkNum(1)), 4),
+        // ((1024 * 32, 0), ChunkRanges::all(), 4),
+        // ((1024 * 32, 0), ChunkRanges::from(ChunkNum(16)..), 4),
+        // ((1024 * 32, 0), ChunkRanges::from(..ChunkNum(16)), 4),
+        // ((2048 + 1, 0), ChunkRanges::from(..ChunkNum(2)), 0),
+        // ((8192 + 1, 0), ChunkRanges::from(..ChunkNum(8)), 2),
+        // ((1037, 0), ChunkRanges::all(), 1),
+        ((1024 + 1, 0), ChunkRanges::from(..ChunkNum(1)), 2),
     ]
     .into_iter()
     .map(|((size, block_level), ranges, min_full_level)| {
@@ -733,7 +733,7 @@ fn response_iter_cases() {
 
 #[test_strategy::proptest]
 fn response_iter_proptest(
-    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
 ) {
     let (size, ranges) = size_and_selection;
@@ -756,7 +756,7 @@ fn response_iter_proptest(
 #[test]
 fn response_iter_2_cases() {
     let cases =
-        [((1024 + 1, 1), RangeSet2::all())]
+        [((1024 + 1, 1), ChunkRanges::all())]
             .into_iter()
             .map(|((size, block_level), ranges)| {
                 (BaoTree::new(ByteNum(size), BlockSize(block_level)), ranges)
@@ -780,7 +780,7 @@ fn response_iter_2_cases() {
 
 #[test_strategy::proptest]
 fn response_iter_2_proptest(
-    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
 ) {
     let (size, ranges) = size_and_selection;

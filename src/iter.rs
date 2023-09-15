@@ -4,11 +4,10 @@
 //! They can be used without lifetime parameters using self referencing structs.
 use std::fmt::{self, Debug};
 
-use range_collections::{RangeSet2, RangeSetRef};
 use self_cell::self_cell;
 use smallvec::SmallVec;
 
-use crate::{split, BaoTree, BlockSize, ChunkNum, TreeNode};
+use crate::{split, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, TreeNode};
 
 /// Extended node info.
 ///
@@ -23,11 +22,11 @@ pub struct NodeInfo<'a> {
     /// the node is the root node (needs special handling when computing hash)
     pub is_root: bool,
     /// ranges of the node and it's two children
-    pub ranges: &'a RangeSetRef<ChunkNum>,
+    pub ranges: &'a ChunkRangesRef,
     /// left child intersection with the query range
-    pub l_ranges: &'a RangeSetRef<ChunkNum>,
+    pub l_ranges: &'a ChunkRangesRef,
     /// right child intersection with the query range
-    pub r_ranges: &'a RangeSetRef<ChunkNum>,
+    pub r_ranges: &'a ChunkRangesRef,
     /// the node is fully included in the query range
     pub full: bool,
     /// the node is a leaf for the purpose of this query
@@ -48,7 +47,7 @@ pub struct PreOrderPartialIterRef<'a> {
     /// stack of nodes to visit, together with the ranges that are relevant for the node
     ///
     /// The node is shifted by the block size, so these are not normal nodes!
-    stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
+    stack: SmallVec<[(TreeNode, &'a ChunkRangesRef); 8]>,
     /// number of valid nodes, needed in shifted.right_descendant
     ///
     /// This is also shifted by the block size!
@@ -59,7 +58,7 @@ pub struct PreOrderPartialIterRef<'a> {
 
 impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
+    pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef, min_level: u8) -> Self {
         let mut stack = SmallVec::new();
         let (shifted_root, shifted_filled_size) = tree.shifted();
         stack.push((shifted_root, ranges));
@@ -517,7 +516,7 @@ pub struct PreOrderPartialChunkIterRef<'a> {
     /// stack of nodes to visit, together with the ranges that are relevant for the node
     ///
     /// The node is shifted by the block size, so these are not normal nodes!
-    stack: SmallVec<[(TreeNode, &'a RangeSetRef<ChunkNum>); 8]>,
+    stack: SmallVec<[(TreeNode, &'a ChunkRangesRef); 8]>,
     /// number of valid nodes, needed in shifted.right_descendant
     ///
     /// This is also shifted by the block size!
@@ -525,12 +524,12 @@ pub struct PreOrderPartialChunkIterRef<'a> {
     /// The root node, shifted by the block size, needed for the is_root check
     shifted_root: TreeNode,
     /// chunk buffer. This will only ever contain leaves, and will never be more than 2 elements
-    buffer: SmallVec<[BaoChunk<&'a RangeSetRef<ChunkNum>>; 2]>,
+    buffer: SmallVec<[BaoChunk<&'a ChunkRangesRef>; 2]>,
 }
 
 impl<'a> PreOrderPartialChunkIterRef<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_full_level: u8) -> Self {
+    pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef, min_full_level: u8) -> Self {
         let mut stack = SmallVec::new();
         let (shifted_root, shifted_filled_size) = tree.shifted();
         stack.push((shifted_root, ranges));
@@ -556,7 +555,7 @@ impl<'a> PreOrderPartialChunkIterRef<'a> {
 }
 
 impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
-    type Item = BaoChunk<&'a RangeSetRef<ChunkNum>>;
+    type Item = BaoChunk<&'a ChunkRangesRef>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(item) = self.buffer.pop() {
@@ -672,7 +671,7 @@ pub struct ResponseIterRef<'a> {
 
 impl<'a> ResponseIterRef<'a> {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
+    pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef) -> Self {
         let tree1 = BaoTree::new(tree.size, BlockSize::ZERO);
         Self {
             inner: PreOrderPartialChunkIterRef::new(tree1, ranges, tree.block_size.0),
@@ -699,7 +698,7 @@ impl<'a> Iterator for ResponseIterRef<'a> {
 
 self_cell! {
     pub(crate) struct ResponseIterInner {
-        owner: range_collections::RangeSet2<ChunkNum>,
+        owner: ChunkRanges,
         #[not_covariant]
         dependent: ResponseIterRef,
     }
@@ -726,7 +725,7 @@ impl fmt::Debug for ResponseIter {
 
 impl ResponseIter {
     /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: RangeSet2<ChunkNum>) -> Self {
+    pub fn new(tree: BaoTree, ranges: ChunkRanges) -> Self {
         Self(ResponseIterInner::new(ranges, |ranges| {
             ResponseIterRef::new(tree, ranges)
         }))

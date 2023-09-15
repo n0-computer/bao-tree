@@ -7,11 +7,12 @@
 //! without having to box the futures.
 use std::{io, result};
 
-use crate::{blake3, hash_subtree, iter::ResponseIter, rec::encode_selected_rec};
+use crate::{
+    blake3, hash_subtree, iter::ResponseIter, rec::encode_selected_rec, ChunkRanges, ChunkRangesRef,
+};
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};
-use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -22,7 +23,7 @@ use crate::{
         Leaf, Parent,
     },
     iter::BaoChunk,
-    BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
+    BaoTree, BlockSize, ByteNum, TreeNode,
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
@@ -258,7 +259,7 @@ pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::H
 /// Response decoder state machine, at the start of a stream
 #[derive(Debug)]
 pub struct ResponseDecoderStart<R> {
-    ranges: RangeSet2<ChunkNum>,
+    ranges: ChunkRanges,
     block_size: BlockSize,
     hash: blake3::Hash,
     encoded: R,
@@ -267,12 +268,7 @@ pub struct ResponseDecoderStart<R> {
 impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
     /// Create a new response decoder state machine, at the start of a stream
     /// where you don't yet know the size.
-    pub fn new(
-        hash: blake3::Hash,
-        ranges: RangeSet2<ChunkNum>,
-        block_size: BlockSize,
-        encoded: R,
-    ) -> Self {
+    pub fn new(hash: blake3::Hash, ranges: ChunkRanges, block_size: BlockSize, encoded: R) -> Self {
         Self {
             ranges,
             block_size,
@@ -317,7 +313,7 @@ impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
     }
 
     /// The ranges we requested
-    pub fn ranges(&self) -> &RangeSet2<ChunkNum> {
+    pub fn ranges(&self) -> &ChunkRanges {
         &self.ranges
     }
 }
@@ -331,7 +327,7 @@ struct ResponseDecoderReadingInner<R> {
 }
 
 impl<R> ResponseDecoderReadingInner<R> {
-    fn new(tree: BaoTree, hash: blake3::Hash, ranges: RangeSet2<ChunkNum>, encoded: R) -> Self {
+    fn new(tree: BaoTree, hash: blake3::Hash, ranges: ChunkRanges, encoded: R) -> Self {
         let mut res = Self {
             iter: ResponseIter::new(tree, ranges),
             stack: SmallVec::new(),
@@ -365,7 +361,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
     /// Create a new response decoder state machine, when you have already read the size.
     ///
     /// The size as well as the chunk size is given in the `tree` parameter.
-    pub fn new(hash: blake3::Hash, ranges: RangeSet2<ChunkNum>, tree: BaoTree, encoded: R) -> Self {
+    pub fn new(hash: blake3::Hash, ranges: ChunkRanges, tree: BaoTree, encoded: R) -> Self {
         let mut stack = SmallVec::new();
         stack.push(hash);
         Self(Box::new(ResponseDecoderReadingInner {
@@ -472,7 +468,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
 pub async fn encode_ranges<D, O, W>(
     mut data: D,
     mut outboard: O,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError>
 where
@@ -524,7 +520,7 @@ where
 pub async fn encode_ranges_validated<D, O, W>(
     mut data: D,
     mut outboard: O,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError>
 where
@@ -623,7 +619,7 @@ where
 pub async fn decode_response_into<R, O, W, F, Fut>(
     root: blake3::Hash,
     block_size: BlockSize,
-    ranges: RangeSet2<ChunkNum>,
+    ranges: ChunkRanges,
     encoded: R,
     create: F,
     mut target: W,
@@ -674,14 +670,14 @@ fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
 }
 
 /// Given an outboard, return a range set of all valid ranges
-pub async fn valid_ranges<O>(outboard: &mut O) -> io::Result<RangeSet2<ChunkNum>>
+pub async fn valid_ranges<O>(outboard: &mut O) -> io::Result<ChunkRanges>
 where
     O: Outboard,
 {
     struct RecursiveValidator<'a, O: Outboard> {
         tree: BaoTree,
         shifted_filled_size: TreeNode,
-        res: RangeSet2<ChunkNum>,
+        res: ChunkRanges,
         outboard: &'a mut O,
     }
 
@@ -709,7 +705,7 @@ where
                 if shifted.is_leaf() {
                     let start = node.chunk_range().start;
                     let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
-                    self.res |= RangeSet2::from(start..end);
+                    self.res |= ChunkRanges::from(start..end);
                 } else {
                     // recurse
                     let left = shifted.left_child().unwrap();
@@ -728,7 +724,7 @@ where
     let mut validator = RecursiveValidator {
         tree,
         shifted_filled_size,
-        res: RangeSet2::empty(),
+        res: ChunkRanges::empty(),
         outboard,
     };
     validator

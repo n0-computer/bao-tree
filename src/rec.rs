@@ -2,9 +2,7 @@
 //!
 //! Encocding is used to compute hashes, decoding is only used in tests as a
 //! reference implementation.
-use range_collections::RangeSetRef;
-
-use crate::{blake3, split, ChunkNum};
+use crate::{blake3, split, ChunkNum, ChunkRangesRef};
 
 #[cfg(test)]
 use crate::{iter::BaoChunk, BaoTree, BlockSize, TreeNode};
@@ -31,7 +29,7 @@ pub(crate) fn encode_selected_rec(
     start_chunk: ChunkNum,
     data: &[u8],
     is_root: bool,
-    query: &RangeSetRef<ChunkNum>,
+    query: &ChunkRangesRef,
     min_level: u32,
     emit_data: bool,
     res: &mut Vec<u8>,
@@ -100,7 +98,7 @@ mod test_support {
 
     use range_collections::{range_set::RangeSetEntry, RangeSet2};
 
-    use crate::ByteNum;
+    use crate::{ByteNum, ChunkRanges};
 
     use super::*;
 
@@ -123,10 +121,10 @@ mod test_support {
         start_chunk: ChunkNum,
         size: usize,
         is_root: bool,
-        ranges: &'a RangeSetRef<ChunkNum>,
+        ranges: &'a ChunkRangesRef,
         tree_level: u32,
         min_full_level: u32,
-        emit: &mut impl FnMut(BaoChunk<&'a RangeSetRef<ChunkNum>>),
+        emit: &mut impl FnMut(BaoChunk<&'a ChunkRangesRef>),
     ) {
         if ranges.is_empty() {
             return;
@@ -201,7 +199,7 @@ mod test_support {
             ChunkNum(0),
             data,
             true,
-            &RangeSet2::all(),
+            &ChunkRanges::all(),
             0,
             false,
             &mut res,
@@ -216,7 +214,7 @@ mod test_support {
             ChunkNum(0),
             data,
             true,
-            &RangeSet2::all(),
+            &ChunkRanges::all(),
             0,
             true,
             &mut res,
@@ -228,9 +226,9 @@ mod test_support {
     /// implementation [select_nodes_rec].
     pub(crate) fn partial_chunk_iter_reference(
         tree: BaoTree,
-        ranges: &RangeSetRef<ChunkNum>,
+        ranges: &ChunkRangesRef,
         min_full_level: u8,
-    ) -> Vec<BaoChunk<&RangeSetRef<ChunkNum>>> {
+    ) -> Vec<BaoChunk<&ChunkRangesRef>> {
         let mut res = Vec::new();
         select_nodes_rec(
             ChunkNum(0),
@@ -246,10 +244,7 @@ mod test_support {
 
     /// Reference implementation of the response iterator, using just the simple recursive
     /// implementation [select_nodes_rec].
-    pub(crate) fn response_iter_reference(
-        tree: BaoTree,
-        ranges: &RangeSetRef<ChunkNum>,
-    ) -> Vec<BaoChunk> {
+    pub(crate) fn response_iter_reference(tree: BaoTree, ranges: &ChunkRangesRef) -> Vec<BaoChunk> {
         let mut res = Vec::new();
         select_nodes_rec(
             ChunkNum(0),
@@ -270,13 +265,13 @@ mod test_support {
     /// testing.
     #[derive(Debug)]
     pub struct ReferencePreOrderPartialChunkIterRef<'a> {
-        iter: std::vec::IntoIter<BaoChunk<&'a RangeSetRef<ChunkNum>>>,
+        iter: std::vec::IntoIter<BaoChunk<&'a ChunkRangesRef>>,
         tree: BaoTree,
     }
 
     impl<'a> ReferencePreOrderPartialChunkIterRef<'a> {
         /// Create a new iterator over the tree.
-        pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_full_level: u8) -> Self {
+        pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef, min_full_level: u8) -> Self {
             let iter = partial_chunk_iter_reference(tree, ranges, min_full_level).into_iter();
             Self { iter, tree }
         }
@@ -289,7 +284,7 @@ mod test_support {
     }
 
     impl<'a> Iterator for ReferencePreOrderPartialChunkIterRef<'a> {
-        type Item = BaoChunk<&'a RangeSetRef<ChunkNum>>;
+        type Item = BaoChunk<&'a ChunkRangesRef>;
 
         fn next(&mut self) -> Option<Self::Item> {
             self.iter.next()
@@ -343,7 +338,7 @@ mod test_support {
 
     pub fn encode_ranges_reference(
         data: &[u8],
-        ranges: &RangeSetRef<ChunkNum>,
+        ranges: &ChunkRangesRef,
         block_size: BlockSize,
     ) -> (Vec<u8>, blake3::Hash) {
         let mut res = Vec::new();
@@ -388,10 +383,8 @@ mod tests {
         ops::Range,
     };
 
+    use crate::{ByteNum, ChunkRanges};
     use proptest::prelude::*;
-    use range_collections::RangeSet2;
-
-    use crate::ByteNum;
 
     use super::*;
 
@@ -453,7 +446,7 @@ mod tests {
         encoder.read_to_end(&mut expected_encoded).unwrap();
         let chunk_start = ByteNum(start as u64).full_chunks();
         let chunk_end = ByteNum(end as u64).chunks().max(chunk_start + 1);
-        let ranges = RangeSet2::from(chunk_start..chunk_end);
+        let ranges = ChunkRanges::from(chunk_start..chunk_end);
         let actual_encoded = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
         prop_assert_eq!(expected_encoded, actual_encoded);
     }
@@ -468,7 +461,7 @@ mod tests {
         let data = make_test_data(size);
         let chunk_start = ByteNum(start as u64).full_chunks();
         let chunk_end = ByteNum(end as u64).chunks().max(chunk_start + 1);
-        let ranges = RangeSet2::from(chunk_start..chunk_end);
+        let ranges = ChunkRanges::from(chunk_start..chunk_end);
         let (encoded, hash) = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
         let bao_hash = bao::Hash::from(*hash.as_bytes());
         let mut decoder =

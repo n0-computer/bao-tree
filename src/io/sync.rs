@@ -14,13 +14,13 @@ use crate::{
     },
     iter::BaoChunk,
     rec::encode_selected_rec,
-    BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
+    BaoTree, BlockSize, ByteNum, ChunkRanges, ChunkRangesRef, TreeNode,
 };
 use crate::{hash_subtree, iter::ResponseIterRef};
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
-use range_collections::{range_set::RangeSetRange, RangeSet2, RangeSetRef};
+use range_collections::{range_set::RangeSetRange, RangeSetRef};
 use smallvec::SmallVec;
 
 use super::{DecodeError, StartDecodeError};
@@ -272,14 +272,14 @@ impl PostOrderMemOutboard {
 }
 
 /// Given an outboard, return a range set of all valid ranges
-pub fn valid_ranges<O>(outboard: &O) -> io::Result<RangeSet2<ChunkNum>>
+pub fn valid_ranges<O>(outboard: &O) -> io::Result<ChunkRanges>
 where
     O: Outboard,
 {
     struct RecursiveValidator<'a, O: Outboard> {
         tree: BaoTree,
         shifted_filled_size: TreeNode,
-        res: RangeSet2<ChunkNum>,
+        res: ChunkRanges,
         outboard: &'a O,
     }
 
@@ -304,7 +304,7 @@ where
             if shifted.is_leaf() {
                 let start = node.chunk_range().start;
                 let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
-                self.res |= RangeSet2::from(start..end);
+                self.res |= ChunkRanges::from(start..end);
             } else {
                 // recurse
                 let left = shifted.left_child().unwrap();
@@ -321,7 +321,7 @@ where
     let mut validator = RecursiveValidator {
         tree,
         shifted_filled_size,
-        res: RangeSet2::empty(),
+        res: ChunkRanges::empty(),
         outboard,
     };
     validator.validate_rec(&root_hash, shifted_root, true)?;
@@ -337,7 +337,7 @@ enum Position<'a> {
     /// currently reading the header, so don't know how big the tree is
     /// so we need to store the ranges and the chunk group log
     Header {
-        ranges: &'a RangeSetRef<ChunkNum>,
+        ranges: &'a ChunkRangesRef,
         block_size: BlockSize,
     },
     /// currently reading the tree, all the info we need is in the iter
@@ -363,7 +363,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         root: blake3::Hash,
         block_size: BlockSize,
         encoded: R,
-        ranges: &'a RangeSetRef<ChunkNum>,
+        ranges: &'a ChunkRangesRef,
         buf: BytesMut,
     ) -> Self {
         let mut stack = SmallVec::new();
@@ -473,7 +473,7 @@ impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
 pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     data: D,
     outboard: O,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError> {
     let data = data;
@@ -512,7 +512,7 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
 pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     data: D,
     outboard: O,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError> {
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
@@ -599,7 +599,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
 pub fn decode_response_into<R, O, W>(
     root: blake3::Hash,
     block_size: BlockSize,
-    ranges: &RangeSetRef<ChunkNum>,
+    ranges: &ChunkRangesRef,
     encoded: R,
     create: impl FnOnce(BaoTree, blake3::Hash) -> io::Result<O>,
     mut target: W,
@@ -738,7 +738,7 @@ fn read_range(from: impl ReadAt, range: Range<ByteNum>, buf: &mut [u8]) -> std::
 }
 
 /// Given an outboard and a file, return all valid ranges
-pub fn valid_file_ranges<O, R>(outboard: &O, reader: R) -> io::Result<RangeSet2<ChunkNum>>
+pub fn valid_file_ranges<O, R>(outboard: &O, reader: R) -> io::Result<ChunkRanges>
 where
     O: Outboard,
     R: ReadAt,
@@ -746,7 +746,7 @@ where
     struct RecursiveValidator<'a, O: Outboard, R: ReadAt> {
         tree: BaoTree,
         valid_nodes: TreeNode,
-        res: RangeSet2<ChunkNum>,
+        res: ChunkRanges,
         outboard: &'a O,
         reader: R,
         buffer: Vec<u8>,
@@ -770,13 +770,13 @@ where
                     let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
                     let actual = hash_subtree(s.chunks().0, l_data, false);
                     if actual == l_hash {
-                        self.res |= RangeSet2::from(s.chunks()..m.chunks());
+                        self.res |= ChunkRanges::from(s.chunks()..m.chunks());
                     }
 
                     let r_data = read_range(&mut self.reader, m..e, &mut self.buffer)?;
                     let actual = hash_subtree(m.chunks().0, r_data, false);
                     if actual == r_hash {
-                        self.res |= RangeSet2::from(m.chunks()..e.chunks());
+                        self.res |= ChunkRanges::from(m.chunks()..e.chunks());
                     }
                 } else {
                     // recurse
@@ -790,7 +790,7 @@ where
                 let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
                 let actual = hash_subtree(s.chunks().0, l_data, is_root);
                 if actual == *parent_hash {
-                    self.res |= RangeSet2::from(s.chunks()..m.chunks());
+                    self.res |= ChunkRanges::from(s.chunks()..m.chunks());
                 }
             };
             Ok(())
@@ -801,7 +801,7 @@ where
     let mut validator = RecursiveValidator {
         tree,
         valid_nodes: tree.filled_size(),
-        res: RangeSet2::empty(),
+        res: ChunkRanges::empty(),
         outboard,
         reader,
         buffer: vec![0; tree.block_size.bytes()],
