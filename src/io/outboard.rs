@@ -4,12 +4,9 @@
 //! Implementations for in-memory outboards, for outboards where the data resides on disk,
 //! and a special implementation [EmptyOutboard] that just ignores all writes.
 
-use super::TreeNode;
+use super::{sync::write_outboard_from_mem, TreeNode};
 use crate::{blake3, BaoTree, BlockSize, ByteNum};
-use std::{
-    fmt,
-    io::{self, Cursor},
-};
+use std::{fmt, io};
 
 /// An empty outboard, that just returns 0 hashes for all nodes.
 ///
@@ -172,20 +169,12 @@ impl PostOrderMemOutboard {
         let data = data.as_ref();
         let tree = BaoTree::new(ByteNum(data.len() as u64), block_size);
         let outboard_len: usize = (tree.outboard_hash_pairs() * 64).try_into().unwrap();
-        let mut res = Vec::with_capacity(outboard_len);
-        let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-        let hash = crate::io::sync::outboard_post_order_impl(
-            tree,
-            &mut Cursor::new(data),
-            &mut res,
-            &mut buffer,
-        )
-        .unwrap();
-        Self {
-            root: hash,
-            tree,
-            data: res,
-        }
+        let outboard_data = vec![0; outboard_len];
+        let root = blake3::Hash::from_bytes([0; 32]);
+        let mut outboard = Self::new(root, tree, outboard_data).unwrap();
+        let root = write_outboard_from_mem(data, &mut outboard).unwrap();
+        outboard.root = root;
+        outboard
     }
 
     /// returns the outboard data, with the length suffix.
@@ -356,7 +345,7 @@ fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutbo
 }
 
 /// A pre order outboard that is optimized for memory storage.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PreOrderMemOutboard<T = Vec<u8>> {
     /// root hash
     pub(crate) root: blake3::Hash,
@@ -389,6 +378,21 @@ impl PreOrderMemOutboard {
         res.splice(0..0, self.tree.size.0.to_le_bytes());
         res
     }
+
+    /// Create a new outboard from `data` and a `block_size`.
+    ///
+    /// This will hash the data and create an outboard
+    pub fn create(data: impl AsRef<[u8]>, block_size: BlockSize) -> Self {
+        let data = data.as_ref();
+        let tree = BaoTree::new(ByteNum(data.len() as u64), block_size);
+        let outboard_len: usize = (tree.outboard_hash_pairs() * 64).try_into().unwrap();
+        let outboard_data = vec![0u8; outboard_len];
+        let root = blake3::Hash::from_bytes([0; 32]);
+        let mut outboard = Self::new(root, tree, outboard_data).unwrap();
+        let root = write_outboard_from_mem(data, &mut outboard).unwrap();
+        outboard.root = root;
+        outboard
+    }
 }
 
 impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
@@ -412,11 +416,6 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
         } else {
             Err("invalid outboard data size")
         }
-    }
-
-    /// Get the inner data.
-    pub fn data(&self) -> &T {
-        &self.data
     }
 
     /// Map the outboard data to a new type.

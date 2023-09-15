@@ -16,7 +16,6 @@ use crate::{
     rec::encode_selected_rec,
     BaoTree, BlockSize, ByteNum, ChunkRanges, ChunkRangesRef, TreeNode,
 };
-use crate::{hash_subtree, iter::ResponseIterRef};
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
@@ -24,6 +23,7 @@ use range_collections::{range_set::RangeSetRange, RangeSetRef};
 use smallvec::SmallVec;
 
 use super::{DecodeError, StartDecodeError};
+use crate::{hash_subtree, iter::ResponseIterRef};
 
 macro_rules! io_error {
     ($($arg:tt)*) => {
@@ -704,6 +704,50 @@ pub(crate) fn outboard_post_order_impl(
             } => {
                 let buf = &mut buffer[..size];
                 data.read_exact(buf)?;
+                let hash = hash_subtree(start_chunk.0, buf, is_root);
+                stack.push(hash);
+            }
+        }
+    }
+    debug_assert_eq!(stack.len(), 1);
+    let hash = stack.pop().unwrap();
+    Ok(hash)
+}
+
+/// Fill a mutable outboard from the given in memory data
+pub(crate) fn write_outboard_from_mem<O: Outboard + OutboardMut>(
+    data: &[u8],
+    mut outboard: O,
+) -> io::Result<blake3::Hash> {
+    let tree = outboard.tree();
+    if tree.size != ByteNum(data.len() as u64) {
+        io_error!(
+            "data size does not match outboard size: {} != {}",
+            data.len(),
+            tree.size
+        );
+    }
+    // do not allocate for small trees
+    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+    for item in tree.post_order_chunks_iter() {
+        match item {
+            BaoChunk::Parent { is_root, node, .. } => {
+                let right_hash = stack.pop().unwrap();
+                let left_hash = stack.pop().unwrap();
+                let pair = (left_hash, right_hash);
+                outboard.save(node, &pair)?;
+                let parent = parent_cv(&left_hash, &right_hash, is_root);
+                stack.push(parent);
+            }
+            BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ..
+            } => {
+                let start = start_chunk.to_bytes().to_usize();
+                let end = start + size;
+                let buf = &data[start..end];
                 let hash = hash_subtree(start_chunk.0, buf, is_root);
                 stack.push(hash);
             }

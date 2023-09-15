@@ -395,8 +395,7 @@ pub struct PostOrderChunkIter {
     tree: BaoTree,
     inner: PostOrderNodeIter,
     // stack with 2 elements, since we can only have 2 items in flight
-    stack: [BaoChunk; 2],
-    index: usize,
+    stack: SmallVec<[BaoChunk; 2]>,
     shifted_root: TreeNode,
 }
 
@@ -409,22 +408,7 @@ impl PostOrderChunkIter {
             tree,
             inner,
             stack: Default::default(),
-            index: 0,
             shifted_root,
-        }
-    }
-
-    fn push(&mut self, item: BaoChunk) {
-        self.stack[self.index] = item;
-        self.index += 1;
-    }
-
-    fn pop(&mut self) -> Option<BaoChunk> {
-        if self.index > 0 {
-            self.index -= 1;
-            Some(self.stack[self.index])
-        } else {
-            None
         }
     }
 }
@@ -434,7 +418,7 @@ impl Iterator for PostOrderChunkIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if let Some(item) = self.pop() {
+            if let Some(item) = self.stack.pop() {
                 return Some(item);
             }
             let shifted = self.inner.next()?;
@@ -450,14 +434,14 @@ impl Iterator for PostOrderChunkIter {
                 // for the half leaf we emit just the leaf
                 // for all other leaves we emit the parent and two leaves
                 if !is_half_leaf {
-                    self.push(BaoChunk::Parent {
+                    self.stack.push(BaoChunk::Parent {
                         node,
                         is_root,
                         left: true,
                         right: true,
                         ranges: (),
                     });
-                    self.push(BaoChunk::Leaf {
+                    self.stack.push(BaoChunk::Leaf {
                         is_root: false,
                         start_chunk: r_start_chunk,
                         size: (e - m).to_usize(),
@@ -471,7 +455,7 @@ impl Iterator for PostOrderChunkIter {
                     ranges: (),
                 });
             } else {
-                self.push(BaoChunk::Parent {
+                self.stack.push(BaoChunk::Parent {
                     node,
                     is_root,
                     left: true,

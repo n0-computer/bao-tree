@@ -990,13 +990,15 @@ proptest! {
     }
 
     #[test]
-    fn flip(len in 0usize..1) {
+    fn flip(len in 0usize..100000) {
         let data = make_test_data(len);
         let post1 = post_order_outboard_reference(&data);
         let post2 = post_order_outboard_reference_2(&data);
         prop_assert_eq!(&post1, &post2);
         prop_assert_eq!(&post1, &post1.flip().flip());
     }
+
+
 
     /// Check that the unrestricted pre-order iterator is the same as the
     /// restricted pre-order iterator for the entire tree.

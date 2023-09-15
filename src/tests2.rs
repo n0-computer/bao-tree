@@ -12,6 +12,7 @@ use proptest::strategy::{Just, Strategy};
 use range_collections::RangeSet2;
 use std::ops::Range;
 
+use crate::io::outboard::PreOrderMemOutboard;
 use crate::rec::{
     get_leaf_ranges, make_test_data, partial_chunk_iter_reference, range_union,
     response_iter_reference, ReferencePreOrderPartialChunkIterRef,
@@ -219,8 +220,11 @@ fn post_oder_outboard_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
 
 fn mem_outboard_flip_impl(tree: BaoTree) {
     let data = make_test_data(tree.size.to_usize());
-    let outboard = PostOrderMemOutboard::create(data, tree.block_size);
-    assert_eq!(outboard, outboard.flip().flip());
+    let post = PostOrderMemOutboard::create(&data, tree.block_size);
+    let pre = PreOrderMemOutboard::create(data, tree.block_size);
+    assert_eq!(post, pre.flip());
+    assert_eq!(pre, post.flip());
+    assert_eq!(post, post.flip().flip());
 }
 
 #[test_strategy::proptest]
