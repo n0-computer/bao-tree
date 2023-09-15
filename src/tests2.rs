@@ -7,15 +7,18 @@
 //! There is a test called <testname>_cases that calls the test with a few hardcoded values, either
 //! handcrafted or from a previous failure of a proptest.
 use std::ops::Range;
+use std::thread::panicking;
 
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use proptest::strategy::{Just, Strategy};
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
+use smallvec::SmallVec;
 
 use crate::iter::{
-    encode_selected_rec, partial_chunk_iter_reference, PreOrderPartialChunkIterRef,
-    PreOrderPartialChunkIterRef2,
+    encode_selected_rec, partial_chunk_iter_reference, response_iter_reference, shift_tree, split,
+    PreOrderPartialChunkIterRef, PreOrderPartialChunkIterRef2, PreOrderPartialChunkIterRef4,
+    ResponseIterRef, ResponseIterRef2,
 };
 use crate::{
     blake3, hash_subtree,
@@ -673,10 +676,9 @@ fn selection_reference_comparison_cases() {
         println!("{} {} {:?}", size, block_level, ranges);
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         let expected = partial_chunk_iter_reference(tree, &ranges, u8::MAX);
-        // let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
+        // let actual1 = PreOrderPartialChunkIterRef::new(tree, &ranges, u8::MAX).collect::<Vec<_>>();
         let actual2 = PreOrderPartialChunkIterRef2::new(tree, &ranges, u8::MAX).collect::<Vec<_>>();
         if actual2 != expected {
-            // println!("actual old {:?}", actual1);
             println!("actual new {:?}", actual2);
             println!("expected   {:?}", expected);
             panic!();
@@ -716,9 +718,8 @@ fn encode_selected_reference(
     (hash, res)
 }
 
-#[test]
-fn filtered_chunks() {
-    let cases = [
+fn cases() -> impl Iterator<Item = (BaoTree, RangeSet2<ChunkNum>, u8)> {
+    [
         // ((1, 0), RangeSet2::all(), 0),
         // ((1025, 0), RangeSet2::all(), 0),
         // ((2048, 0), RangeSet2::all(), 0),
@@ -730,19 +731,122 @@ fn filtered_chunks() {
         // ((1024 * 32, 0), RangeSet2::from(ChunkNum(16)..), 4),
         // ((1024 * 32, 0), RangeSet2::from(..ChunkNum(16)), 4),
         // ((2048 + 1, 0), RangeSet2::from(..ChunkNum(2)), 0),
-        ((8192 + 1, 0), RangeSet2::from(..ChunkNum(8)), 2),
-    ];
-    for ((size, block_level), ranges, min_full_level) in cases {
-        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
-        let res =
-            PreOrderPartialChunkIterRef2::new(tree, &ranges, min_full_level).collect::<Vec<_>>();
+        // ((8192 + 1, 0), RangeSet2::from(..ChunkNum(8)), 2),
+        // ((1037, 0), RangeSet2::all(), 1),
+        ((1024 + 1, 0), RangeSet2::from(..ChunkNum(1)), 2),
+    ]
+    .into_iter()
+    .map(|((size, block_level), ranges, min_full_level)| {
+        (
+            BaoTree::new(ByteNum(size), BlockSize(block_level)),
+            ranges,
+            min_full_level,
+        )
+    })
+}
+
+#[test]
+fn filtered_chunks() {
+    for (tree, ranges, min_full_level) in cases() {
         println!("{:?} {:?}", tree, ranges);
-        for item in res {
+        println!("encode:");
+        let data = make_test_data(tree.size.to_usize());
+        let (_, encoded) = encode_selected_reference(&data, BlockSize(min_full_level), &ranges);
+        println!("{}", hex::encode(&encoded));
+        println!("select:");
+        let selected =
+            PreOrderPartialChunkIterRef2::new(tree, &ranges, min_full_level).collect::<Vec<_>>();
+        for item in selected {
             println!("{}", item.to_debug_string(10));
         }
-        let data = make_test_data(size as usize);
-        println!("{}", tree.block_size);
-        let (hash, encoded) = encode_selected_reference(&data, BlockSize(min_full_level), &ranges);
-        println!("{}", hex::encode(&encoded));
+    }
+}
+
+#[test]
+fn response_iter_cases() {
+    for (tree, ranges, min_full_level) in cases() {
+        let expected = partial_chunk_iter_reference(tree, &ranges, min_full_level);
+        let actual =
+            PreOrderPartialChunkIterRef4::new(tree, &ranges, min_full_level).collect::<Vec<_>>();
+        if expected != actual {
+            println!("expected:");
+            for chunk in expected {
+                println!("{}", chunk.to_debug_string(10));
+            }
+            println!("actual:");
+            for chunk in actual {
+                println!("{}", chunk.to_debug_string(10));
+            }
+            panic!();
+        }
+    }
+}
+
+#[test_strategy::proptest]
+fn response_iter_proptest(
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(block_size())] block_size: BlockSize,
+) {
+    let (size, ranges) = size_and_selection;
+    let tree = BaoTree::new(ByteNum(size as u64), BlockSize::ZERO);
+    let expected = partial_chunk_iter_reference(tree, &ranges, block_size.0);
+    let actual = PreOrderPartialChunkIterRef4::new(tree, &ranges, block_size.0).collect::<Vec<_>>();
+    if expected != actual {
+        println!("expected:");
+        for chunk in expected {
+            println!("{}", chunk.to_debug_string(10));
+        }
+        println!("actual:");
+        for chunk in actual {
+            println!("{}", chunk.to_debug_string(10));
+        }
+        panic!();
+    }
+}
+
+#[test]
+fn response_iter_2_cases() {
+    let cases =
+        [((1024 + 1, 1), RangeSet2::all())]
+            .into_iter()
+            .map(|((size, block_level), ranges)| {
+                (BaoTree::new(ByteNum(size), BlockSize(block_level)), ranges)
+            });
+    for (tree, ranges) in cases {
+        let expected = response_iter_reference(tree, &ranges);
+        let actual = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+        if expected != actual {
+            println!("expected:");
+            for chunk in expected {
+                println!("{}", chunk.to_debug_string(10));
+            }
+            println!("actual:");
+            for chunk in actual {
+                println!("{}", chunk.to_debug_string(10));
+            }
+            panic!();
+        }
+    }
+}
+
+#[test_strategy::proptest]
+fn response_iter_2_proptest(
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, RangeSet2<ChunkNum>),
+    #[strategy(block_size())] block_size: BlockSize,
+) {
+    let (size, ranges) = size_and_selection;
+    let tree = BaoTree::new(ByteNum(size as u64), block_size);
+    let expected = response_iter_reference(tree, &ranges);
+    let actual = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+    if expected != actual {
+        println!("expected:");
+        for chunk in expected {
+            println!("{}", chunk.to_debug_string(10));
+        }
+        println!("actual:");
+        for chunk in actual {
+            println!("{}", chunk.to_debug_string(10));
+        }
+        panic!();
     }
 }
