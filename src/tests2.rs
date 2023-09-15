@@ -9,13 +9,14 @@
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use proptest::strategy::{Just, Strategy};
-use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
+use range_collections::{RangeSet2, RangeSetRef};
 use std::ops::Range;
 
-use crate::iter::{
-    encode_selected_rec, partial_chunk_iter_reference, response_iter_reference,
-    PreOrderPartialChunkIterRef, ReferencePreOrderPartialChunkIterRef, ResponseIterRef,
+use crate::rec::{
+    get_leaf_ranges, make_test_data, partial_chunk_iter_reference, range_union,
+    response_iter_reference, ReferencePreOrderPartialChunkIterRef,
 };
+use crate::{assert_tuple_eq, prop_assert_tuple_eq};
 use crate::{
     blake3, hash_subtree,
     io::{
@@ -24,22 +25,10 @@ use crate::{
         sync::{DecodeResponseItem, Outboard},
         Header, Leaf, Parent,
     },
-    iter::{select_nodes_rec, BaoChunk},
+    iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
+    rec::{encode_selected_rec, select_nodes_rec},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
-
-macro_rules! assert_tuple_eq {
-    ($tuple:expr) => {
-        assert_eq!($tuple.0, $tuple.1);
-    };
-}
-
-macro_rules! prop_assert_tuple_eq {
-    ($tuple:expr) => {
-        let (a, b) = $tuple;
-        ::proptest::prop_assert_eq!(a, b);
-    };
-}
 
 fn tree() -> impl Strategy<Value = BaoTree> {
     (0u64..100000, 0u8..5).prop_map(|(size, block_size)| {
@@ -133,51 +122,6 @@ fn post_traversal_offset_impl(tree: BaoTree) {
 #[test_strategy::proptest]
 fn post_traversal_offset_proptest(#[strategy(tree())] tree: BaoTree) {
     post_traversal_offset_impl(tree);
-}
-
-/// Make test data that has each chunk filled with the cunk number as an u8
-///
-/// This makes sure that every chunk has a different hash, and makes it easy
-/// to see pages in hex dumps.
-fn make_test_data(n: usize) -> Vec<u8> {
-    let mut data = Vec::with_capacity(n);
-    for i in 0..n {
-        data.push((i / 1024) as u8);
-    }
-    data
-}
-
-/// Compute the union of an iterator of ranges. The ranges should be non-overlapping, otherwise
-/// the result is None
-fn range_union<K: RangeSetEntry>(
-    ranges: impl IntoIterator<Item = Range<K>>,
-) -> Option<RangeSet2<K>> {
-    let mut res = RangeSet2::empty();
-    for r in ranges.into_iter() {
-        let part = RangeSet2::from(r);
-        if part.intersects(&res) {
-            return None;
-        }
-        res |= part;
-    }
-    Some(res)
-}
-
-fn get_leaf_ranges<R>(
-    iter: impl IntoIterator<Item = BaoChunk<R>>,
-) -> impl Iterator<Item = Range<ByteNum>> {
-    iter.into_iter().filter_map(|e| {
-        if let BaoChunk::Leaf {
-            start_chunk, size, ..
-        } = e
-        {
-            let start = start_chunk.to_bytes();
-            let end = start + (size as u64);
-            Some(start..end)
-        } else {
-            None
-        }
-    })
 }
 
 /// Check that the post order traversal iterator is consistent with the post order

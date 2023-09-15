@@ -24,6 +24,7 @@ use std::{
 #[macro_use]
 mod macros;
 pub mod iter;
+mod rec;
 mod tree;
 use iter::*;
 use tree::BlockNum;
@@ -636,4 +637,23 @@ fn pre_order_offset_loop(node: u64, len: u64) -> u64 {
         span = pspan;
     }
     left - (left.count_ones() as u64) + parent_count
+}
+
+/// Split and canonicalize a range set at a given chunk number
+///
+/// Compared to [RangeSetRef::split], this function will canonicalize the second range
+pub(crate) fn split(
+    ranges: &RangeSetRef<ChunkNum>,
+    mid: ChunkNum,
+) -> (&RangeSetRef<ChunkNum>, &RangeSetRef<ChunkNum>) {
+    let (mut a, mut b) = ranges.split(mid);
+    // todo: the canonicalization for a should be done in RangeSetRef::split.
+    // this is just a workaround until that bug is fixed.
+    if a.boundaries().last() == Some(&mid) {
+        a = RangeSetRef::new(&a.boundaries()[..a.boundaries().len() - 1]).unwrap();
+    }
+    if b.boundaries().len() == 1 && b.boundaries()[0] <= mid {
+        b = RangeSetRef::new(&[ChunkNum(0)]).unwrap();
+    }
+    (a, b)
 }

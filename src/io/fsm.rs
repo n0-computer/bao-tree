@@ -7,10 +7,7 @@
 //! without having to box the futures.
 use std::{io, result};
 
-use crate::{
-    blake3, hash_subtree,
-    iter::{encode_selected_rec, ResponseIter},
-};
+use crate::{blake3, hash_subtree, iter::ResponseIter, rec::encode_selected_rec};
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};

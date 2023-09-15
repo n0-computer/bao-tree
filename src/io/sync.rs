@@ -12,7 +12,8 @@ use crate::{
         outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
         Header, Leaf, Parent,
     },
-    iter::{encode_selected_rec, BaoChunk},
+    iter::BaoChunk,
+    rec::encode_selected_rec,
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
 use crate::{hash_subtree, iter::ResponseIterRef};

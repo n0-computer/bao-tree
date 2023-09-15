@@ -9,17 +9,19 @@ use proptest::prelude::*;
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
 
 use crate::{
-    blake3,
+    assert_tuple_eq, blake3,
     io::{
         outboard::PreOrderMemOutboard,
         sync::{DecodeResponseItem, Outboard},
         Leaf,
     },
-    iter::{
-        encode_selected_rec, split, PostOrderChunkIter, PreOrderPartialIterRef,
-        ReferencePreOrderPartialChunkIterRef, ResponseIterRef,
+    iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
+    prop_assert_tuple_eq,
+    rec::{
+        encode_ranges_reference, encode_selected_rec, make_test_data,
+        ReferencePreOrderPartialChunkIterRef,
     },
-    recursive_hash_subtree,
+    recursive_hash_subtree, split,
 };
 
 use super::{
@@ -30,27 +32,6 @@ use super::{
     tree::{ByteNum, ChunkNum},
     BaoTree, BlockSize, TreeNode,
 };
-
-macro_rules! assert_tuple_eq {
-    ($tuple:expr) => {
-        assert_eq!($tuple.0, $tuple.1);
-    };
-}
-
-macro_rules! prop_assert_tuple_eq {
-    ($tuple:expr) => {
-        let (a, b) = $tuple;
-        prop_assert_eq!(a, b);
-    };
-}
-
-fn make_test_data(n: usize) -> Vec<u8> {
-    let mut data = Vec::with_capacity(n);
-    for i in 0..n {
-        data.push((i / 1024) as u8);
-    }
-    data
-}
 
 /// Compute the blake3 hash for the given data,
 ///
@@ -63,26 +44,6 @@ fn bao_tree_blake3_impl(data: Vec<u8>) -> (blake3::Hash, blake3::Hash) {
     let expected = blake3::hash(&data);
     let actual = blake3_hash(&data);
     (expected, actual)
-}
-
-fn encode_ranges_reference(
-    data: &[u8],
-    ranges: &RangeSetRef<ChunkNum>,
-    block_size: BlockSize,
-) -> Vec<u8> {
-    let mut res = Vec::new();
-    let size = ByteNum(data.len() as u64);
-    res.extend_from_slice(&size.0.to_le_bytes());
-    let _hash = encode_selected_rec(
-        ChunkNum(0),
-        data,
-        true,
-        ranges,
-        block_size.to_u32(),
-        true,
-        &mut res,
-    );
-    res
 }
 
 /// Computes a reference post order outboard using the abao crate (chunk_group_log = 0) and the non-standard finalize_post_order function.
@@ -186,7 +147,7 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
 #[cfg(feature = "tokio_fsm")]
 mod fsm_tests {
     use super::*;
-    use crate::io::fsm::*;
+    use crate::{io::fsm::*, rec::make_test_data};
 
     /// range is a range of chunks. Just using u64 for convenience in tests
     async fn bao_tree_decode_slice_fsm_impl(data: Vec<u8>, range: Range<u64>) {
