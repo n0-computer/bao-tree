@@ -383,7 +383,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     /// Get a reference to the tree used for decoding.
     ///
     /// This is only available after the first chunk has been decoded.
-    pub fn tree(&self) -> Option<&BaoTree> {
+    pub fn tree(&self) -> Option<BaoTree> {
         match &self.inner {
             Position::Content { iter } => Some(iter.tree()),
             Position::Header { .. } => None,

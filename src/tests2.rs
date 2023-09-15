@@ -6,19 +6,15 @@
 //! There is a proptest called <testname>_proptest that calls the test multiple times with random data.
 //! There is a test called <testname>_cases that calls the test with a few hardcoded values, either
 //! handcrafted or from a previous failure of a proptest.
-use std::ops::Range;
-use std::thread::panicking;
-
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use proptest::strategy::{Just, Strategy};
 use range_collections::{range_set::RangeSetEntry, RangeSet2, RangeSetRef};
-use smallvec::SmallVec;
+use std::ops::Range;
 
 use crate::iter::{
-    encode_selected_rec, partial_chunk_iter_reference, response_iter_reference, shift_tree, split,
-    PreOrderPartialChunkIterRef, PreOrderPartialChunkIterRef2, PreOrderPartialChunkIterRef4,
-    ResponseIterRef, ResponseIterRef2,
+    encode_selected_rec, partial_chunk_iter_reference, response_iter_reference,
+    PreOrderPartialChunkIterRef, ReferencePreOrderPartialChunkIterRef, ResponseIterRef,
 };
 use crate::{
     blake3, hash_subtree,
@@ -279,7 +275,7 @@ fn post_oder_outboard_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
 
 fn mem_outboard_flip_impl(tree: BaoTree) {
     let data = make_test_data(tree.size.to_usize());
-    let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
+    let outboard = PostOrderMemOutboard::create(data, tree.block_size);
     assert_eq!(outboard, outboard.flip().flip());
 }
 
@@ -403,7 +399,7 @@ fn encode_decode_full_sync_impl(
 ) {
     let ranges = RangeSet2::all();
     let mut encoded = Vec::new();
-    crate::io::sync::encode_ranges_validated(&data, &outboard, &RangeSet2::all(), &mut encoded)
+    crate::io::sync::encode_ranges_validated(data, &outboard, &RangeSet2::all(), &mut encoded)
         .unwrap();
     let mut encoded_read = std::io::Cursor::new(encoded);
     let mut decoded = Vec::new();
@@ -447,6 +443,10 @@ async fn encode_decode_full_fsm_impl(
     )
     .await
     .unwrap();
+
+    let tree = outboard.tree();
+    println!("{:?} {}", tree, tree.size.chunks());
+    println!("{}", hex::encode(&encoded));
     let mut read_encoded = std::io::Cursor::new(encoded);
     let mut decoded = BytesMut::new();
     let ob_res_opt = crate::io::fsm::decode_response_into(
@@ -455,6 +455,7 @@ async fn encode_decode_full_fsm_impl(
         ranges,
         &mut read_encoded,
         |root, tree| async move {
+            println!("creating outboard {:?}", tree);
             let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
             let outboard_data = vec![0u8; outboard_size];
             Ok(PostOrderMemOutboard::new(root, tree, outboard_data).unwrap())
@@ -466,7 +467,7 @@ async fn encode_decode_full_fsm_impl(
     let ob_res = ob_res_opt.unwrap_or_else(|| {
         PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]).unwrap()
     });
-    ((decoded.to_vec(), ob_res), (data, outboard))
+    ((data, outboard), (decoded.to_vec(), ob_res))
 }
 
 fn encode_decode_partial_sync_impl(
@@ -475,7 +476,7 @@ fn encode_decode_partial_sync_impl(
     ranges: &RangeSetRef<ChunkNum>,
 ) -> bool {
     let mut encoded = Vec::new();
-    crate::io::sync::encode_ranges_validated(&data, &outboard, &ranges, &mut encoded).unwrap();
+    crate::io::sync::encode_ranges_validated(data, &outboard, ranges, &mut encoded).unwrap();
     let expected_data = data;
     let encoded_read = std::io::Cursor::new(encoded);
     let buf = BytesMut::new();
@@ -546,38 +547,30 @@ async fn encode_decode_partial_fsm_impl(
     if size != outboard.tree.size {
         return false;
     }
-    loop {
-        match reading.next().await {
-            ResponseDecoderReadingNext::More((reading1, result)) => {
-                let item = match result {
-                    Ok(item) => item,
-                    Err(_) => {
+    while let ResponseDecoderReadingNext::More((reading1, result)) = reading.next().await {
+        let item = match result {
+            Ok(item) => item,
+            Err(_) => {
+                return false;
+            }
+        };
+        match item {
+            BaoContentItem::Leaf(Leaf { offset, data }) => {
+                // check that the data matches
+                if expected_data[offset.to_usize()..offset.to_usize() + data.len()] != data {
+                    return false;
+                }
+            }
+            BaoContentItem::Parent(Parent { node, pair }) => {
+                // check that the hash pair matches
+                if let Some(expected_pair) = outboard.load(node).unwrap() {
+                    if pair != expected_pair {
                         return false;
                     }
-                };
-                match item {
-                    BaoContentItem::Leaf(Leaf { offset, data }) => {
-                        // check that the data matches
-                        if expected_data[offset.to_usize()..offset.to_usize() + data.len()] != data
-                        {
-                            return false;
-                        }
-                    }
-                    BaoContentItem::Parent(Parent { node, pair }) => {
-                        // check that the hash pair matches
-                        if let Some(expected_pair) = outboard.load(node).unwrap() {
-                            if pair != expected_pair {
-                                return false;
-                            }
-                        }
-                    }
                 }
-                reading = reading1;
-            }
-            ResponseDecoderReadingNext::Done(_reader) => {
-                break;
             }
         }
+        reading = reading1;
     }
     true
 }
@@ -588,7 +581,7 @@ fn encode_decode_full_sync_cases() {
     for (size, block_level) in cases {
         let data = &make_test_data(size);
         let block_size = BlockSize(block_level);
-        let outboard = PostOrderMemOutboard::create(&data, block_size);
+        let outboard = PostOrderMemOutboard::create(data, block_size);
         let pair = encode_decode_full_sync_impl(data, outboard);
         assert_tuple_eq!(pair);
     }
@@ -613,11 +606,22 @@ fn encode_decode_partial_sync_proptest(
     prop_assert!(ok);
 }
 
+#[test]
+fn encode_decode_full_fsm_cases() {
+    let cases = [BaoTree::new(ByteNum(0x1001), BlockSize(1))];
+    for tree in cases {
+        let data = make_test_data(tree.size.to_usize());
+        let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
+        let pair = futures::executor::block_on(encode_decode_full_fsm_impl(data, outboard));
+        assert_tuple_eq!(pair);
+    }
+}
+
 #[test_strategy::proptest]
 fn encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.to_usize());
     let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
-    let pair = futures::executor::block_on(encode_decode_full_fsm_impl(data.into(), outboard));
+    let pair = futures::executor::block_on(encode_decode_full_fsm_impl(data, outboard));
     prop_assert_tuple_eq!(pair);
 }
 
@@ -677,7 +681,8 @@ fn selection_reference_comparison_cases() {
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         let expected = partial_chunk_iter_reference(tree, &ranges, u8::MAX);
         // let actual1 = PreOrderPartialChunkIterRef::new(tree, &ranges, u8::MAX).collect::<Vec<_>>();
-        let actual2 = PreOrderPartialChunkIterRef2::new(tree, &ranges, u8::MAX).collect::<Vec<_>>();
+        let actual2 =
+            ReferencePreOrderPartialChunkIterRef::new(tree, &ranges, u8::MAX).collect::<Vec<_>>();
         if actual2 != expected {
             println!("actual new {:?}", actual2);
             println!("expected   {:?}", expected);
@@ -695,9 +700,9 @@ fn selection_reference_comparison_proptest(
     let tree = BaoTree::new(ByteNum(size as u64), block_size);
     let expected = partial_chunk_iter_reference(tree, &ranges, 0);
     // let actual1 = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
-    let actual2 = PreOrderPartialChunkIterRef2::new(tree, &ranges, 0).collect::<Vec<_>>();
+    let actual2 = ReferencePreOrderPartialChunkIterRef::new(tree, &ranges, 0).collect::<Vec<_>>();
     if actual2 != expected {
-        println!("");
+        println!();
         println!("{:?} {:?}", tree, ranges);
         println!("actual new {:?}", actual2);
         println!("expected   {:?}", expected);
@@ -754,8 +759,8 @@ fn filtered_chunks() {
         let (_, encoded) = encode_selected_reference(&data, BlockSize(min_full_level), &ranges);
         println!("{}", hex::encode(&encoded));
         println!("select:");
-        let selected =
-            PreOrderPartialChunkIterRef2::new(tree, &ranges, min_full_level).collect::<Vec<_>>();
+        let selected = ReferencePreOrderPartialChunkIterRef::new(tree, &ranges, min_full_level)
+            .collect::<Vec<_>>();
         for item in selected {
             println!("{}", item.to_debug_string(10));
         }
@@ -767,7 +772,7 @@ fn response_iter_cases() {
     for (tree, ranges, min_full_level) in cases() {
         let expected = partial_chunk_iter_reference(tree, &ranges, min_full_level);
         let actual =
-            PreOrderPartialChunkIterRef4::new(tree, &ranges, min_full_level).collect::<Vec<_>>();
+            PreOrderPartialChunkIterRef::new(tree, &ranges, min_full_level).collect::<Vec<_>>();
         if expected != actual {
             println!("expected:");
             for chunk in expected {
@@ -790,7 +795,7 @@ fn response_iter_proptest(
     let (size, ranges) = size_and_selection;
     let tree = BaoTree::new(ByteNum(size as u64), BlockSize::ZERO);
     let expected = partial_chunk_iter_reference(tree, &ranges, block_size.0);
-    let actual = PreOrderPartialChunkIterRef4::new(tree, &ranges, block_size.0).collect::<Vec<_>>();
+    let actual = PreOrderPartialChunkIterRef::new(tree, &ranges, block_size.0).collect::<Vec<_>>();
     if expected != actual {
         println!("expected:");
         for chunk in expected {
@@ -814,7 +819,7 @@ fn response_iter_2_cases() {
             });
     for (tree, ranges) in cases {
         let expected = response_iter_reference(tree, &ranges);
-        let actual = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+        let actual = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
         if expected != actual {
             println!("expected:");
             for chunk in expected {
@@ -837,7 +842,7 @@ fn response_iter_2_proptest(
     let (size, ranges) = size_and_selection;
     let tree = BaoTree::new(ByteNum(size as u64), block_size);
     let expected = response_iter_reference(tree, &ranges);
-    let actual = ResponseIterRef2::new(tree, &ranges).collect::<Vec<_>>();
+    let actual = ResponseIterRef::new(tree, &ranges).collect::<Vec<_>>();
     if expected != actual {
         println!("expected:");
         for chunk in expected {

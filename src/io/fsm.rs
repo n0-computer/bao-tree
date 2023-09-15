@@ -395,7 +395,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
     }
 
     /// The tree geometry
-    pub fn tree(&self) -> &BaoTree {
+    pub fn tree(&self) -> BaoTree {
         self.0.iter.tree()
     }
 
@@ -656,7 +656,7 @@ where
                 } else {
                     let tree = reading.tree();
                     let create = create.take().unwrap();
-                    let new = create(root, *tree).await?;
+                    let new = create(root, tree).await?;
                     outboard = Some(new);
                     outboard.as_mut().unwrap()
                 };

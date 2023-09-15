@@ -16,8 +16,8 @@ use crate::{
         Leaf,
     },
     iter::{
-        encode_selected_rec, split, PostOrderChunkIter, PreOrderPartialChunkIterRef,
-        PreOrderPartialChunkIterRef2, PreOrderPartialIterRef, ResponseIterRef,
+        encode_selected_rec, split, PostOrderChunkIter, PreOrderPartialIterRef,
+        ReferencePreOrderPartialChunkIterRef, ResponseIterRef,
     },
     recursive_hash_subtree,
 };
@@ -887,7 +887,7 @@ fn test_pre_order_chunks_iter_ref() {
         }
         for i in 0..5 {
             let tree = BaoTree::new(ByteNum(size), BlockSize(i));
-            let items = PreOrderPartialChunkIterRef2::new(tree, &ranges, tree.block_size.0);
+            let items = ReferencePreOrderPartialChunkIterRef::new(tree, &ranges, tree.block_size.0);
             println!("{}", i);
             for item in items {
                 println!("{:?}", item);

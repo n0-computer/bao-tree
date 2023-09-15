@@ -380,16 +380,6 @@ impl<T> BaoChunk<T> {
         }
     }
 
-    /// Create a dummy empty range
-    fn empty(ranges: T) -> Self {
-        Self::Leaf {
-            size: 0,
-            is_root: false,
-            start_chunk: ChunkNum(0),
-            ranges,
-        }
-    }
-
     /// Set the ranges to the unit value
     pub fn without_ranges(&self) -> BaoChunk {
         match self {
@@ -536,135 +526,9 @@ impl<T: Default> Default for BaoChunk<T> {
     }
 }
 
-/// An iterator that produces chunks in pre order, but only for the parts of the
-/// tree that are relevant for a query.
-#[derive(Debug)]
-pub struct PreOrderPartialChunkIterRef<'a> {
-    inner: PreOrderPartialIterRef<'a>,
-    // stack with 2 elements, since we can only have 2 items in flight
-    stack: [BaoChunk<&'a RangeSetRef<ChunkNum>>; 2],
-    index: usize,
-}
-
-impl<'a> PreOrderPartialChunkIterRef<'a> {
-    /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_level: u8) -> Self {
-        Self {
-            inner: tree.ranges_pre_order_nodes_iter(ranges, min_level),
-            // todo: get rid of this when &RangeSetRef has a default
-            stack: [BaoChunk::empty(ranges), BaoChunk::empty(ranges)],
-            index: 0,
-        }
-    }
-
-    /// Return a reference to the underlying tree.
-    pub fn tree(&self) -> &BaoTree {
-        self.inner.tree()
-    }
-
-    fn push(&mut self, item: BaoChunk<&'a RangeSetRef<ChunkNum>>) {
-        self.stack[self.index] = item;
-        self.index += 1;
-    }
-
-    fn pop(&mut self) -> Option<BaoChunk<&'a RangeSetRef<ChunkNum>>> {
-        if self.index > 0 {
-            self.index -= 1;
-            Some(self.stack[self.index])
-        } else {
-            None
-        }
-    }
-}
-
-impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
-    type Item = BaoChunk<&'a RangeSetRef<ChunkNum>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(item) = self.pop() {
-                return Some(item);
-            }
-            let inner_node = self.inner.next()?;
-            println!("{:?}", inner_node);
-            let NodeInfo {
-                node,
-                is_root,
-                is_half_leaf,
-                ranges,
-                l_ranges,
-                r_ranges,
-                query_leaf,
-                ..
-            } = inner_node;
-            let tree = &self.inner.tree;
-            let is_leaf = tree.is_leaf(node);
-            // if query_leaf && full {
-            //     let tree = self.tree();
-            //     let bytes = tree.byte_range(node);
-            //     let start_chunk = bytes.start.chunks();
-            //     let size = (bytes.end.0 - bytes.start.0) as usize;
-            //     break Some(BaoChunk::Leaf {
-            //         start_chunk,
-            //         is_root,
-            //         size,
-            //         ranges,
-            //     });
-            // }
-            if is_leaf {
-                let (s, m, e) = tree.leaf_byte_ranges3(node);
-                let l_start_chunk = node.chunk_range().start;
-                let r_start_chunk = l_start_chunk + tree.chunk_group_chunks();
-                if !r_ranges.is_empty() && !is_half_leaf {
-                    self.push(BaoChunk::Leaf {
-                        is_root: false,
-                        start_chunk: r_start_chunk,
-                        size: (e - m).to_usize(),
-                        ranges: r_ranges,
-                    });
-                };
-                if !l_ranges.is_empty() {
-                    self.push(BaoChunk::Leaf {
-                        is_root: is_root && is_half_leaf,
-                        start_chunk: l_start_chunk,
-                        size: (m - s).to_usize(),
-                        ranges: l_ranges,
-                    });
-                };
-            }
-            // the last leaf is a special case, since it does not have a parent if it is <= half full
-            if !is_half_leaf {
-                let chunk = if query_leaf && !is_leaf {
-                    // the node is a leaf for the purpose of this query despite not being a leaf,
-                    // so we need to return a BaoChunk::Leaf spanning the whole node
-                    let tree = self.tree();
-                    let bytes = tree.byte_range(node);
-                    let start_chunk = bytes.start.chunks();
-                    let size = (bytes.end.0 - bytes.start.0) as usize;
-                    BaoChunk::Leaf {
-                        start_chunk,
-                        is_root,
-                        size,
-                        ranges,
-                    }
-                } else {
-                    // the node is not a leaf, so we need to return a BaoChunk::Parent
-                    BaoChunk::Parent {
-                        is_root,
-                        left: !l_ranges.is_empty(),
-                        right: !r_ranges.is_empty(),
-                        node,
-                        ranges,
-                    }
-                };
-                break Some(chunk);
-            }
-        }
-    }
-}
-
 /// Reference implementation of the response iterator, using just the simple recursive
 /// implementation [crate::iter::select_nodes_rec].
+#[cfg(test)]
 pub(crate) fn partial_chunk_iter_reference(
     tree: BaoTree,
     ranges: &RangeSetRef<ChunkNum>,
@@ -685,6 +549,7 @@ pub(crate) fn partial_chunk_iter_reference(
 
 /// Reference implementation of the response iterator, using just the simple recursive
 /// implementation [crate::iter::select_nodes_rec].
+#[cfg(test)]
 pub(crate) fn response_iter_reference(
     tree: BaoTree,
     ranges: &RangeSetRef<ChunkNum>,
@@ -702,14 +567,20 @@ pub(crate) fn response_iter_reference(
     res
 }
 
+/// A reference implementation of [PreOrderPartialChunkIterRef] that just uses the recursive
+/// implementation [crate::iter::select_nodes_rec].
 ///
+/// This is not a proper iterator since it computes all elements at once, but it is useful for
+/// testing.
+#[cfg(test)]
 #[derive(Debug)]
-pub struct PreOrderPartialChunkIterRef2<'a> {
+pub struct ReferencePreOrderPartialChunkIterRef<'a> {
     iter: std::vec::IntoIter<BaoChunk<&'a RangeSetRef<ChunkNum>>>,
     tree: BaoTree,
 }
 
-impl<'a> PreOrderPartialChunkIterRef2<'a> {
+#[cfg(test)]
+impl<'a> ReferencePreOrderPartialChunkIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_full_level: u8) -> Self {
         let iter = partial_chunk_iter_reference(tree, ranges, min_full_level).into_iter();
@@ -722,7 +593,8 @@ impl<'a> PreOrderPartialChunkIterRef2<'a> {
     }
 }
 
-impl<'a> Iterator for PreOrderPartialChunkIterRef2<'a> {
+#[cfg(test)]
+impl<'a> Iterator for ReferencePreOrderPartialChunkIterRef<'a> {
     type Item = BaoChunk<&'a RangeSetRef<ChunkNum>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -734,7 +606,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef2<'a> {
 ///
 /// This is mostly used internally
 #[derive(Debug)]
-pub struct PreOrderPartialChunkIterRef4<'a> {
+pub struct PreOrderPartialChunkIterRef<'a> {
     /// the tree we want to traverse
     tree: BaoTree,
     /// the minimum level to always emit, even if the node is fully within the query range
@@ -753,7 +625,7 @@ pub struct PreOrderPartialChunkIterRef4<'a> {
     buffer: SmallVec<[BaoChunk<&'a RangeSetRef<ChunkNum>>; 2]>,
 }
 
-impl<'a> PreOrderPartialChunkIterRef4<'a> {
+impl<'a> PreOrderPartialChunkIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>, min_full_level: u8) -> Self {
         let mut stack = SmallVec::new();
@@ -773,9 +645,14 @@ impl<'a> PreOrderPartialChunkIterRef4<'a> {
     pub fn tree(&self) -> &BaoTree {
         &self.tree
     }
+
+    /// Get the minimum level to always emit, even if the node is fully within the query range
+    pub fn min_full_level(&self) -> u8 {
+        self.min_full_level
+    }
 }
 
-impl<'a> Iterator for PreOrderPartialChunkIterRef4<'a> {
+impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
     type Item = BaoChunk<&'a RangeSetRef<ChunkNum>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -783,101 +660,99 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef4<'a> {
             return Some(item);
         }
         let tree = &self.tree;
-        loop {
-            let (shifted, ranges) = self.stack.pop()?;
-            debug_assert!(!ranges.is_empty());
-            let node = shifted.subtract_block_size(tree.block_size.0);
-            // we don't want to recurse if the node is full and below the minimum level
-            let query_leaf = ranges.is_all() && node.level() < self.min_full_level as u32;
-            // check if the node is the root by comparing the shifted node to the shifted root
-            let is_root = shifted == self.shifted_root;
-            let chunk_range = node.chunk_range();
-            let byte_range = tree.byte_range(node);
-            let size = (byte_range.end - byte_range.start).to_usize();
-            // There are three cases.
-            if query_leaf {
-                // The node is a query leaf, meaning that we stop descending because the
-                // node is fully within the query range and it's level is below min_full_level.
-                // This can be fully disabled by setting min_full_level to 0.
-                //
-                // In this case we just emit the range of the node, and don't recurse.
-                break Some(BaoChunk::Leaf {
+        let (shifted, ranges) = self.stack.pop()?;
+        debug_assert!(!ranges.is_empty());
+        let node = shifted.subtract_block_size(tree.block_size.0);
+        // we don't want to recurse if the node is full and below the minimum level
+        let query_leaf = ranges.is_all() && node.level() < self.min_full_level as u32;
+        // check if the node is the root by comparing the shifted node to the shifted root
+        let is_root = shifted == self.shifted_root;
+        let chunk_range = node.chunk_range();
+        let byte_range = tree.byte_range(node);
+        let size = (byte_range.end - byte_range.start).to_usize();
+        // There are three cases.
+        if query_leaf {
+            // The node is a query leaf, meaning that we stop descending because the
+            // node is fully within the query range and it's level is below min_full_level.
+            // This can be fully disabled by setting min_full_level to 0.
+            //
+            // In this case we just emit the range of the node, and don't recurse.
+            Some(BaoChunk::Leaf {
+                start_chunk: chunk_range.start,
+                size,
+                is_root,
+                ranges,
+            })
+        } else if !shifted.is_leaf() {
+            // The node is either not fully within the query range, or it's level is above
+            // min_full_level. In this case we need to recurse.
+            let (l_ranges, r_ranges) = split(ranges, node.mid());
+            // emit right child first, so it gets yielded last
+            if !r_ranges.is_empty() {
+                let r = shifted.right_descendant(self.shifted_filled_size).unwrap();
+                self.stack.push((r, r_ranges));
+            }
+            // emit left child second, so it gets yielded first
+            if !l_ranges.is_empty() {
+                let l = shifted.left_child().unwrap();
+                self.stack.push((l, l_ranges));
+            }
+            // immediately emit the parent
+            Some(BaoChunk::Parent {
+                node,
+                left: !l_ranges.is_empty(),
+                right: !r_ranges.is_empty(),
+                is_root,
+                ranges,
+            })
+        } else {
+            // The node is a real leaf.
+            //
+            // If it is a normal leaf and we got this far, we need to split it into 2 ranges.
+            // E.g. the first leaf of a tree covers the range 0..2048, but we want two 1024
+            // byte BLAKE3 chunks.
+            //
+            // There is a special case for the last leaf, if its right range is not within the
+            // tree. In this case we don't need to split it, and can just emit it as is.
+            let mid_chunk = node.mid();
+            let mid = mid_chunk.to_bytes();
+            if mid >= tree.size {
+                // this is the last leaf node, and only it's left part is in the range
+                // we can just emit it without splitting
+                Some(BaoChunk::Leaf {
                     start_chunk: chunk_range.start,
                     size,
                     is_root,
                     ranges,
-                });
-            } else if !shifted.is_leaf() {
-                // The node is either not fully within the query range, or it's level is above
-                // min_full_level. In this case we need to recurse.
+                })
+            } else {
                 let (l_ranges, r_ranges) = split(ranges, node.mid());
-                // emit right child first, so it gets yielded last
+                // emit right range first, so it gets yielded last
                 if !r_ranges.is_empty() {
-                    let r = shifted.right_descendant(self.shifted_filled_size).unwrap();
-                    self.stack.push((r, r_ranges));
+                    self.buffer.push(BaoChunk::Leaf {
+                        start_chunk: mid_chunk,
+                        size: (byte_range.end - mid).to_usize(),
+                        is_root: false,
+                        ranges: r_ranges,
+                    });
                 }
-                // emit left child second, so it gets yielded first
+                // emit left range second, so it gets yielded first
                 if !l_ranges.is_empty() {
-                    let l = shifted.left_child().unwrap();
-                    self.stack.push((l, l_ranges));
+                    self.buffer.push(BaoChunk::Leaf {
+                        start_chunk: chunk_range.start,
+                        size: (mid - byte_range.start).to_usize(),
+                        is_root: false,
+                        ranges: l_ranges,
+                    });
                 }
                 // immediately emit the parent
-                break Some(BaoChunk::Parent {
+                Some(BaoChunk::Parent {
                     node,
                     left: !l_ranges.is_empty(),
                     right: !r_ranges.is_empty(),
                     is_root,
                     ranges,
-                });
-            } else {
-                // The node is a real leaf.
-                //
-                // If it is a normal leaf and we got this far, we need to split it into 2 ranges.
-                // E.g. the first leaf of a tree covers the range 0..2048, but we want two 1024
-                // byte BLAKE3 chunks.
-                //
-                // There is a special case for the last leaf, if its right range is not within the
-                // tree. In this case we don't need to split it, and can just emit it as is.
-                let mid_chunk = node.mid();
-                let mid = mid_chunk.to_bytes();
-                if mid >= tree.size {
-                    // this is the last leaf node, and only it's left part is in the range
-                    // we can just emit it without splitting
-                    break Some(BaoChunk::Leaf {
-                        start_chunk: chunk_range.start,
-                        size,
-                        is_root,
-                        ranges,
-                    });
-                } else {
-                    let (l_ranges, r_ranges) = split(ranges, node.mid());
-                    // emit right range first, so it gets yielded last
-                    if !r_ranges.is_empty() {
-                        self.buffer.push(BaoChunk::Leaf {
-                            start_chunk: mid_chunk,
-                            size: (byte_range.end - mid).to_usize(),
-                            is_root: false,
-                            ranges: r_ranges,
-                        });
-                    }
-                    // emit left range second, so it gets yielded first
-                    if !l_ranges.is_empty() {
-                        self.buffer.push(BaoChunk::Leaf {
-                            start_chunk: chunk_range.start,
-                            size: (mid - byte_range.start).to_usize(),
-                            is_root: false,
-                            ranges: l_ranges,
-                        });
-                    }
-                    // immediately emit the parent
-                    break Some(BaoChunk::Parent {
-                        node,
-                        left: !l_ranges.is_empty(),
-                        right: !r_ranges.is_empty(),
-                        is_root,
-                        ranges,
-                    });
-                }
+                })
             }
         }
     }
@@ -889,108 +764,29 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef4<'a> {
 /// all the way down to individual chunks if needed.
 #[derive(Debug)]
 pub struct ResponseIterRef<'a> {
-    inner: PreOrderPartialChunkIterRef4<'a>,
-    buffer: SmallVec<[BaoChunk; 10]>,
+    inner: PreOrderPartialChunkIterRef<'a>,
 }
 
 impl<'a> ResponseIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
+        let tree1 = BaoTree::new(tree.size, BlockSize::ZERO);
         Self {
-            inner: PreOrderPartialChunkIterRef4::new(tree, ranges, tree.block_size.0),
-            buffer: SmallVec::new(),
+            inner: PreOrderPartialChunkIterRef::new(tree1, ranges, tree.block_size.0),
         }
     }
 
-    /// Return a reference to the underlying tree.
-    pub fn tree(&self) -> &BaoTree {
-        self.inner.tree()
+    /// Return the underlying tree.
+    pub fn tree(&self) -> BaoTree {
+        // the inner iterator uses a tree with block size 0, so we need to return the original tree
+        BaoTree::new(
+            self.inner.tree().size,
+            BlockSize(self.inner.min_full_level()),
+        )
     }
 }
 
 impl<'a> Iterator for ResponseIterRef<'a> {
-    type Item = BaoChunk;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(item) = self.buffer.pop() {
-                break Some(item);
-            }
-            let inner_next = self.inner.next()?;
-            match inner_next {
-                BaoChunk::Parent {
-                    node,
-                    is_root,
-                    right,
-                    left,
-                    ranges: _,
-                } => {
-                    break Some(BaoChunk::Parent {
-                        node,
-                        is_root,
-                        right,
-                        left,
-                        ranges: (),
-                    });
-                }
-                BaoChunk::Leaf {
-                    size,
-                    is_root,
-                    start_chunk,
-                    ranges,
-                } => {
-                    if self.tree().block_size == BlockSize(0) || ranges.is_all() {
-                        break Some(BaoChunk::Leaf {
-                            size,
-                            is_root,
-                            start_chunk,
-                            ranges: (),
-                        });
-                    } else {
-                        // create a little tree just for this leaf
-                        self.buffer.clear();
-                        select_nodes_rec(
-                            start_chunk,
-                            size,
-                            is_root,
-                            ranges,
-                            0,
-                            u32::MAX,
-                            &mut |item| self.buffer.push(item.without_ranges()),
-                        );
-                        self.buffer.reverse();
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// An iterator that produces chunks in pre order.
-///
-/// This wraps a `PreOrderPartialIterRef` and iterates over the chunk groups
-/// all the way down to individual chunks if needed.
-#[derive(Debug)]
-pub struct ResponseIterRef2<'a> {
-    inner: PreOrderPartialChunkIterRef4<'a>,
-}
-
-impl<'a> ResponseIterRef2<'a> {
-    /// Create a new iterator over the tree.
-    pub fn new(tree: BaoTree, ranges: &'a RangeSetRef<ChunkNum>) -> Self {
-        let tree1 = BaoTree::new(tree.size, BlockSize::ZERO);
-        Self {
-            inner: PreOrderPartialChunkIterRef4::new(tree1, ranges, tree.block_size.0),
-        }
-    }
-
-    /// Return a reference to the underlying tree.
-    pub fn tree(&self) -> &BaoTree {
-        self.inner.tree()
-    }
-}
-
-impl<'a> Iterator for ResponseIterRef2<'a> {
     type Item = BaoChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1011,7 +807,7 @@ impl ResponseIterInner {
         self.with_dependent_mut(|_, iter| iter.next())
     }
 
-    fn tree(&self) -> &BaoTree {
+    fn tree(&self) -> BaoTree {
         self.with_dependent(|_, iter| iter.tree())
     }
 }
@@ -1034,7 +830,7 @@ impl ResponseIter {
     }
 
     /// The tree this iterator is iterating over.
-    pub fn tree(&self) -> &BaoTree {
+    pub fn tree(&self) -> BaoTree {
         self.0.tree()
     }
 }
@@ -1057,7 +853,7 @@ pub(crate) fn split(
     let (mut a, mut b) = ranges.split(mid);
     // todo: the canonicalization for a should be done in RangeSetRef::split.
     // this is just a workaround until that bug is fixed.
-    if a.boundaries().len() > 0 && a.boundaries()[a.boundaries().len() - 1] == mid {
+    if a.boundaries().last() == Some(&mid) {
         a = RangeSetRef::new(&a.boundaries()[..a.boundaries().len() - 1]).unwrap();
     }
     if b.boundaries().len() == 1 && b.boundaries()[0] <= mid {
@@ -1140,6 +936,7 @@ pub(crate) fn encode_selected_rec(
 ///
 /// This is the receive side equivalent of [bao_encode_selected_recursive].
 /// It does not do any hashing, but just emits the nodes that are relevant to a query.
+#[cfg(test)]
 pub(crate) fn select_nodes_rec<'a>(
     start_chunk: ChunkNum,
     size: usize,

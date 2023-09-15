@@ -142,25 +142,12 @@ impl BaoTree {
     ///
     /// This iterator is used by both the sync and async io code for encoding
     /// from an outboard and ranges as well as decoding an encoded stream.
-    pub fn ranges_pre_order_chunks_iter_ref_3<'a>(
+    pub fn ranges_pre_order_chunks_iter_ref<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
         min_level: u8,
     ) -> PreOrderPartialChunkIterRef<'a> {
         PreOrderPartialChunkIterRef::new(*self, ranges, min_level)
-    }
-
-    /// Traverse the part of the tree that is relevant for a ranges querys
-    /// in pre order as [BaoChunk]s
-    ///
-    /// This iterator is used by both the sync and async io code for encoding
-    /// from an outboard and ranges as well as decoding an encoded stream.
-    pub fn ranges_pre_order_chunks_iter_ref<'a>(
-        &self,
-        ranges: &'a RangeSetRef<ChunkNum>,
-        min_level: u8,
-    ) -> PreOrderPartialChunkIterRef4<'a> {
-        PreOrderPartialChunkIterRef4::new(*self, ranges, min_level)
     }
 
     /// Traverse the entire tree in post order as [TreeNode]s,
@@ -382,6 +369,10 @@ impl TreeNode {
     /// The start chunk must be the start of a subtree with the given level.
     /// So for level 0, the start chunk must even. For level 1, the start chunk
     /// must be divisible by 4, etc.
+    ///
+    /// This is a bridge from the recursive reference implementation to the node
+    /// based implementations, and is therefore only used in tests.
+    #[cfg(test)]
     fn from_start_chunk_and_level(start_chunk: ChunkNum, level: BlockSize) -> Self {
         let start_chunk = start_chunk.0;
         let level = level.0;
