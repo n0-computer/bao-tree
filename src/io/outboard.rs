@@ -148,28 +148,18 @@ pub struct PostOrderMemOutboard<T = Vec<u8>> {
     pub data: T,
 }
 
-fn to_hex(data: &[u8], target: &mut String) {
-    let table = b"0123456789abcdef";
-    for &b in data.iter() {
-        target.push(table[(b >> 4) as usize] as char);
-        target.push(table[(b & 0xf) as usize] as char);
-    }
-}
-
 impl<T: AsRef<[u8]>> fmt::Debug for PostOrderMemOutboard<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut text = String::new();
-        for chunk in self.data.as_ref().chunks(64) {
-            for hash in chunk.chunks(32) {
-                to_hex(hash, &mut text);
-                text.push(' ');
-            }
-            text.push(' ');
-        }
+        let pairs = self
+            .data
+            .as_ref()
+            .chunks_exact(64)
+            .map(|chunk| parse_hash_pair(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
         f.debug_struct("PostOrderMemOutboard")
             .field("root", &self.root)
             .field("tree", &self.tree)
-            .field("data", &text.trim_end())
+            .field("data", &pairs)
             .finish()
     }
 }
@@ -366,7 +356,7 @@ fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutbo
 }
 
 /// A pre order outboard that is optimized for memory storage.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PreOrderMemOutboard<T = Vec<u8>> {
     /// root hash
     pub(crate) root: blake3::Hash,
@@ -374,6 +364,22 @@ pub struct PreOrderMemOutboard<T = Vec<u8>> {
     pub(crate) tree: BaoTree,
     /// hashes with length prefix
     pub data: T,
+}
+
+impl<T: AsRef<[u8]>> fmt::Debug for PreOrderMemOutboard<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pairs = self
+            .data
+            .as_ref()
+            .chunks_exact(64)
+            .map(|chunk| parse_hash_pair(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        f.debug_struct("PreOrderMemOutboard")
+            .field("root", &self.root)
+            .field("tree", &self.tree)
+            .field("data", &pairs)
+            .finish()
+    }
 }
 
 impl PreOrderMemOutboard {
