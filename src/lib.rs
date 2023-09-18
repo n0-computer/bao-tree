@@ -16,17 +16,15 @@
 //! All this is then used in the [io] module to implement the actual io, both
 //! synchronous and asynchronous.
 #![deny(missing_docs)]
-use io::outboard::PostOrderMemOutboard;
-use range_collections::{range_set::RangeSetEntry, RangeSetRef};
+use range_collections::RangeSetRef;
 use std::{
     fmt::{self, Debug},
-    io::Cursor,
-    ops::{Range, RangeFrom},
-    result,
+    ops::Range,
 };
 #[macro_use]
 mod macros;
 pub mod iter;
+mod rec;
 mod tree;
 use iter::*;
 use tree::BlockNum;
@@ -36,6 +34,16 @@ pub use iroh_blake3 as blake3;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests2;
+
+/// A set of chunk ranges
+pub type ChunkRanges = range_collections::RangeSet2<ChunkNum>;
+
+/// A referenceable set of chunk ranges
+///
+/// [ChunkRanges] implements [AsRef<ChunkRangesRef>].
+pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
 fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     if data.len().is_power_of_two() {
@@ -66,16 +74,19 @@ fn recursive_hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake
 /// Defines a Bao tree.
 ///
 /// This is just the specification of the tree, it does not contain any actual data.
+///
+/// Usually trees are self-contained. This means that the tree starts at chunk 0,
+/// and the hash of the root node is computed with the is_root flag set to true.
+///
+/// For some internal use, it is also possible to create trees that are just subtrees
+/// of a larger tree. In this case, the start_chunk is the chunk number of the first
+/// chunk in the tree, and the is_root flag can be false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaoTree {
     /// Total number of bytes in the file
     size: ByteNum,
     /// Log base 2 of the chunk group size
     block_size: BlockSize,
-    /// true if this is a self-contained tree, false if it is part of a larger tree
-    is_root: bool,
-    /// start chunk of the tree, can only be non-zero if this is not a self-contained tree
-    root: TreeNode,
 }
 
 /// An offset of a node in a post-order outboard
@@ -98,32 +109,9 @@ impl PostOrderOffset {
 }
 
 impl BaoTree {
-    /// Create a new empty BaoTree with the given block size
-    pub fn empty(block_size: BlockSize) -> Self {
-        Self::new(ByteNum(0), block_size)
-    }
-
-    /// Create a new BaoTree
+    /// Create a new self contained BaoTree
     pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
-        // compute the root from the size and block size
-        let root = TreeNode::root(size.blocks(block_size).max(BlockNum(1)));
-        Self::new_with_root(size, block_size, root, true)
-    }
-
-    /// Compute the post order outboard for the given data, returning a in mem data structure
-    pub(crate) fn outboard_post_order_mem(
-        data: impl AsRef<[u8]>,
-        block_size: BlockSize,
-    ) -> PostOrderMemOutboard {
-        let data = data.as_ref();
-        let tree = Self::new(ByteNum(data.len() as u64), block_size);
-        let outboard_len: usize = (tree.outboard_hash_pairs() * 64 + 8).try_into().unwrap();
-        let mut res = Vec::with_capacity(outboard_len);
-        let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-        let hash =
-            io::sync::outboard_post_order_impl(tree, &mut Cursor::new(data), &mut res, &mut buffer)
-                .unwrap();
-        PostOrderMemOutboard::new(hash, tree, res)
+        Self { size, block_size }
     }
 
     /// The size of the blob from which this tree was constructed, in bytes
@@ -131,28 +119,43 @@ impl BaoTree {
         self.size
     }
 
-    fn byte_range(&self, node: TreeNode) -> Range<ByteNum> {
-        let start = node.block_range().start.to_bytes(self.block_size);
-        let end = node.block_range().end.to_bytes(self.block_size);
-        start..end.min(self.size)
+    /// Given a tree of size `size` and block size `block_size`,
+    /// compute the root node and the number of nodes for a shifted tree.
+    pub(crate) fn shifted(&self) -> (TreeNode, TreeNode) {
+        let level = self.block_size.0;
+        let size = self.size.0;
+        let shift = 10 + level;
+        let mask = (1 << shift) - 1;
+        // number of full blocks of size 1024 << level
+        let full_blocks = size >> shift;
+        // 1 if the last block is non zero, 0 otherwise
+        let open_block = ((size & mask) != 0) as u64;
+        // total number of blocks, rounding up to 1 if there are no blocks
+        let blocks = (full_blocks + open_block).max(1);
+        let n = (blocks + 1) / 2;
+        // root node
+        let root = n.next_power_of_two() - 1;
+        // number of nodes in the tree
+        let filled_size = n + n.saturating_sub(1);
+        (TreeNode(root), TreeNode(filled_size))
     }
 
-    fn chunk_range(&self, node: TreeNode) -> Range<ChunkNum> {
-        let start = node.block_range().start.to_chunks(self.block_size);
-        let end = node.block_range().end.to_chunks(self.block_size);
-        start..end.min(self.size.chunks())
+    fn byte_range(&self, node: TreeNode) -> Range<ByteNum> {
+        let start = node.chunk_range().start.to_bytes();
+        let end = node.chunk_range().end.to_bytes();
+        start..end.min(self.size)
     }
 
     /// Compute the byte ranges for a leaf node
     ///
     /// Returns two ranges, the first is the left range, the second is the right range
     /// If the leaf is partially contained in the tree, the right range will be empty
-    fn leaf_byte_ranges3(&self, leaf: LeafNode) -> (ByteNum, ByteNum, ByteNum) {
-        let chunk_group_bytes = self.chunk_group_bytes();
-        let start = chunk_group_bytes * leaf.0;
-        let mid = start + chunk_group_bytes;
-        let end = start + chunk_group_bytes * 2;
-        debug_assert!(start < self.size || (start == 0 && self.size == 0));
+    fn leaf_byte_ranges3(&self, leaf: TreeNode) -> (ByteNum, ByteNum, ByteNum) {
+        let Range { start, end } = leaf.byte_range();
+        let mid = leaf.mid().to_bytes();
+        if !(start < self.size || (start == 0 && self.size == 0)) {
+            debug_assert!(start < self.size || (start == 0 && self.size == 0));
+        }
         (start, mid.min(self.size), end.min(self.size))
     }
 
@@ -172,21 +175,25 @@ impl BaoTree {
     pub fn ranges_pre_order_chunks_iter_ref<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
-        max_skip_level: u8,
-    ) -> PreOrderChunkIterRef<'a> {
-        PreOrderChunkIterRef::new(*self, ranges, max_skip_level)
+        min_level: u8,
+    ) -> PreOrderPartialChunkIterRef<'a> {
+        PreOrderPartialChunkIterRef::new(*self, ranges, min_level)
     }
 
-    /// Traverse the entire tree in post order as [TreeNode]s
-    ///
-    /// This is mostly used internally by the [PostOrderChunkIter]
-    pub fn post_order_nodes_iter(&self) -> PostOrderNodeIter {
-        PostOrderNodeIter::new(*self)
+    /// Traverse the entire tree in post order as [TreeNode]s,
+    /// down to the level given by the block size.
+    pub fn post_order_nodes_iter(&self) -> impl Iterator<Item = TreeNode> {
+        let (root, len) = self.shifted();
+        let shift = self.block_size.0;
+        PostOrderNodeIter::new(root, len).map(move |x| x.subtract_block_size(shift))
     }
 
-    /// Traverse the entire tree in pre order as [TreeNode]s
-    pub fn pre_order_nodes_iter(&self) -> PreOrderNodeIter {
-        PreOrderNodeIter::new(*self)
+    /// Traverse the entire tree in pre order as [TreeNode]s,
+    /// down to the level given by the block size.
+    pub fn pre_order_nodes_iter(&self) -> impl Iterator<Item = TreeNode> {
+        let (root, len) = self.shifted();
+        let shift = self.block_size.0;
+        PreOrderNodeIter::new(root, len).map(move |x| x.subtract_block_size(shift))
     }
 
     /// Traverse the part of the tree that is relevant for a ranges querys
@@ -194,62 +201,42 @@ impl BaoTree {
     ///
     /// This is mostly used internally by the [PreOrderChunkIterRef]
     ///
-    /// When `max_skip_level` is set to a value greater than 0, the iterator will
-    /// skip all branch nodes that are at a level <= max_skip_level if they are fully
+    /// When `min_level` is set to a value greater than 0, the iterator will
+    /// skip all branch nodes that are at a level < min_level if they are fully
     /// covered by the ranges.
     pub fn ranges_pre_order_nodes_iter<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
-        max_skip_level: u8,
+        min_level: u8,
     ) -> PreOrderPartialIterRef<'a> {
-        PreOrderPartialIterRef::new(*self, ranges, max_skip_level)
-    }
-
-    /// Create a new BaoTree with a start chunk
-    ///
-    /// This is used for trees that are part of a larger file.
-    /// The start chunk is the chunk number of the first chunk in the tree.
-    ///
-    /// This is mostly used internally.
-    pub fn new_with_root(
-        size: ByteNum,
-        block_size: BlockSize,
-        root: TreeNode,
-        is_root: bool,
-    ) -> Self {
-        Self {
-            size,
-            block_size,
-            root,
-            is_root,
-        }
+        PreOrderPartialIterRef::new(*self, ranges, min_level)
     }
 
     /// Root of the tree
     ///
-    /// For a self-contained tree, this is the global root of the tree.
-    /// For a tree that is part of a larger tree, this is the root of the
-    /// subtree that this tree represents.
+    /// Does not consider block size
     pub fn root(&self) -> TreeNode {
-        self.root
+        let shift = 10;
+        let mask = (1 << shift) - 1;
+        let full_blocks = self.size.0 >> shift;
+        let open_block = ((self.size.0 & mask) != 0) as u64;
+        let blocks = (full_blocks + open_block).max(1);
+        let chunks = ChunkNum(blocks);
+        TreeNode::root(chunks)
     }
 
     /// Number of blocks in the tree
     ///
     /// At chunk group size 1, this is the same as the number of chunks
-    /// Even a tree with 0 bytes size has a single block.
+    /// Even a tree with 0 bytes size has a single block
     pub fn blocks(&self) -> BlockNum {
-        let range = self.root.block_range();
-        let min = range.start;
-        let max = range.end.min(self.size.blocks(self.block_size));
         // handle the case of an empty tree having 1 block
-        (max - min).max(BlockNum(1))
+        self.size.blocks(self.block_size).max(BlockNum(1))
     }
 
     /// Number of chunks in the tree
     pub fn chunks(&self) -> ChunkNum {
-        let range = self.chunk_range(self.root);
-        range.end - range.start
+        self.size.chunks()
     }
 
     /// Number of hash pairs in the outboard
@@ -263,21 +250,17 @@ impl BaoTree {
     }
 
     fn filled_size(&self) -> TreeNode {
-        let blocks = self.blocks();
+        let blocks = self.chunks();
         let n = (blocks.0 + 1) / 2;
         TreeNode(n + n.saturating_sub(1))
     }
 
-    /// Given a leaf node of this tree, return its start chunk number
-    pub const fn chunk_num(&self, node: LeafNode) -> ChunkNum {
-        // block number of a leaf node is just the node number
-        // multiply by chunk_group_size to get the chunk number
-        ChunkNum(node.0 << self.block_size.0)
-    }
-
-    /// true if the given node is complete/sealed
-    fn is_sealed(&self, node: TreeNode) -> bool {
-        node.byte_range(self.block_size).end <= self.size
+    /// true if the node is a leaf for this tree
+    ///
+    /// If a tree has a non-zero block size, this is different than the node
+    /// being a leaf (level=0).
+    const fn is_leaf(&self, node: TreeNode) -> bool {
+        node.level() == self.block_size.to_u32()
     }
 
     /// true if the given node is persisted
@@ -286,18 +269,32 @@ impl BaoTree {
     /// less than half full
     #[inline]
     const fn is_persisted(&self, node: TreeNode) -> bool {
-        !node.is_leaf() || self.bytes(node.mid()).0 < self.size.0
+        !self.is_leaf(node) || node.mid().to_bytes().0 < self.size.0
     }
 
+    /// true if this is a node that is relevant for the outboard
     #[inline]
-    const fn bytes(&self, blocks: BlockNum) -> ByteNum {
-        ByteNum(blocks.0 << (10 + self.block_size.0))
+    const fn is_relevant_for_outboard(&self, node: TreeNode) -> bool {
+        let level = node.level();
+        if level < self.block_size.to_u32() {
+            // too small, this outboard does not track it
+            false
+        } else if level > self.block_size.to_u32() {
+            // a parent node, always relevant
+            true
+        } else {
+            node.mid().to_bytes().0 < self.size.0
+        }
     }
 
     /// The offset of the given node in the pre order traversal
     pub fn pre_order_offset(&self, node: TreeNode) -> Option<u64> {
-        if self.is_persisted(node) {
-            Some(pre_order_offset_slow(node.0, self.filled_size().0))
+        // if the node has a level less than block_size, this will return None
+        let shifted = node.add_block_size(self.block_size.0)?;
+        let is_half_leaf = shifted.is_leaf() && node.mid().to_bytes() >= self.size;
+        if !is_half_leaf {
+            let (_, tree_filled_size) = self.shifted();
+            Some(pre_order_offset_loop(shifted.0, tree_filled_size.0))
         } else {
             None
         }
@@ -305,11 +302,15 @@ impl BaoTree {
 
     /// The offset of the given node in the post order traversal
     pub fn post_order_offset(&self, node: TreeNode) -> Option<PostOrderOffset> {
-        if self.is_sealed(node) {
-            Some(PostOrderOffset::Stable(node.post_order_offset()))
+        // if the node has a level less than block_size, this will return None
+        let shifted = node.add_block_size(self.block_size.0)?;
+        if node.byte_range().end <= self.size {
+            // stable node, use post_order_offset
+            Some(PostOrderOffset::Stable(shifted.post_order_offset()))
         } else {
-            // a leaf node that only has data on the left is not persisted
-            if !self.is_persisted(node) {
+            // unstable node
+            if shifted.is_leaf() && node.mid().to_bytes() >= self.size {
+                // half full leaf node, not considered
                 None
             } else {
                 // compute the offset based on the total size and the height of the node
@@ -363,28 +364,6 @@ impl ChunkNum {
     }
 }
 
-/// truncate a range so that it overlaps with the range 0..end if possible, and has no extra boundaries behind end
-fn canonicalize_range(
-    range: &RangeSetRef<ChunkNum>,
-    end: ChunkNum,
-) -> result::Result<&RangeSetRef<ChunkNum>, RangeFrom<ChunkNum>> {
-    let (range, _) = range.split(end);
-    if !range.is_empty() {
-        Ok(range)
-    } else if !end.is_min_value() {
-        Err(end - 1..)
-    } else {
-        Err(end..)
-    }
-}
-
-fn range_ok(range: &RangeSetRef<ChunkNum>, end: ChunkNum) -> bool {
-    match canonicalize_range(range, end) {
-        Ok(_) => true,
-        Err(x) => x.start.is_min_value(),
-    }
-}
-
 /// An u64 that defines a node in a bao tree.
 ///
 /// You typically don't have to use this, but it can be useful for debugging
@@ -393,13 +372,9 @@ fn range_ok(range: &RangeSetRef<ChunkNum>, end: ChunkNum) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TreeNode(u64);
 
-/// A tree node for which we know that it is a leaf node.
-#[derive(Debug, Clone, Copy)]
-pub struct LeafNode(u64);
-
-impl From<LeafNode> for TreeNode {
-    fn from(leaf: LeafNode) -> TreeNode {
-        Self(leaf.0)
+impl fmt::Display for TreeNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -416,14 +391,36 @@ impl fmt::Debug for TreeNode {
 }
 
 impl TreeNode {
-    /// Given a number of chunks, gives root node
-    fn root(blocks: BlockNum) -> TreeNode {
-        Self(((blocks.0 + 1) / 2).next_power_of_two() - 1)
+    /// Create a new tree node from a start chunk and a level
+    ///
+    /// The start chunk must be the start of a subtree with the given level.
+    /// So for level 0, the start chunk must even. For level 1, the start chunk
+    /// must be divisible by 4, etc.
+    ///
+    /// This is a bridge from the recursive reference implementation to the node
+    /// based implementations, and is therefore only used in tests.
+    #[cfg(test)]
+    fn from_start_chunk_and_level(start_chunk: ChunkNum, level: BlockSize) -> Self {
+        let start_chunk = start_chunk.0;
+        let level = level.0;
+        // check that the start chunk a start of a subtree with level `level`
+        // this ensures that there is a 0 at bit `level`.
+        let check_mask = (1 << (level + 1)) - 1;
+        debug_assert_eq!(start_chunk & check_mask, 0);
+        let level_mask = (1 << level) - 1;
+        // set the trailing `level` bits to 1.
+        // The level is the number of trailing ones.
+        Self(start_chunk | level_mask)
+    }
+
+    /// Given a number of blocks, gives root node
+    fn root(chunks: ChunkNum) -> TreeNode {
+        Self(((chunks.0 + 1) / 2).next_power_of_two() - 1)
     }
 
     /// the middle of the tree node, in blocks
-    pub const fn mid(&self) -> BlockNum {
-        BlockNum(self.0 + 1)
+    pub const fn mid(&self) -> ChunkNum {
+        ChunkNum(self.0 + 1)
     }
 
     #[inline]
@@ -434,7 +431,7 @@ impl TreeNode {
     /// The level of the node in the tree, 0 for leafs.
     #[inline]
     pub const fn level(&self) -> u32 {
-        (!self.0).trailing_zeros()
+        self.0.trailing_ones()
     }
 
     /// True if this is a leaf node.
@@ -443,24 +440,45 @@ impl TreeNode {
         (self.0 & 1) == 0
     }
 
+    /// Convert a node to a node in a tree with a smaller block size
+    ///
+    /// E.g. a leaf node in a tree with block size 4 will become a node
+    /// with level 4 in a tree with block size 0.
+    ///
+    /// This works by just adding n trailing 1 bits to the node by shifting
+    /// to the left.
+    #[inline]
+    pub const fn subtract_block_size(&self, n: u8) -> Self {
+        let shifted = !(!self.0 << n);
+        Self(shifted)
+    }
+
+    /// Convert a node to a node in a tree with a larger block size
+    ///
+    /// If the nodes has n trailing 1 bits, they are removed by shifting
+    /// the node to the right by n bits.
+    ///
+    /// If the node has less than n trailing 1 bits, the node is too small
+    /// to be represented in the target tree.
+    #[inline]
+    pub const fn add_block_size(&self, n: u8) -> Option<Self> {
+        let mask = (1 << n) - 1;
+        // check if the node has a high enough level
+        if self.0 & mask == mask {
+            Some(Self(self.0 >> n))
+        } else {
+            None
+        }
+    }
+
     /// Range of blocks that this node covers, given a block size
     ///
     /// Note that this will give the untruncated range, which may be larger than
     /// the actual tree. To get the exact byte range for a tree, use
     /// [BaoTree::byte_range];
-    fn byte_range(&self, block_size: BlockSize) -> Range<ByteNum> {
-        let range = self.block_range();
-        let shift = 10 + block_size.0;
-        ByteNum(range.start.0 << shift)..ByteNum(range.end.0 << shift)
-    }
-
-    /// Convert to a leaf node, if this is a leaf node.
-    pub const fn as_leaf(&self) -> Option<LeafNode> {
-        if self.is_leaf() {
-            Some(LeafNode(self.0))
-        } else {
-            None
-        }
+    fn byte_range(&self) -> Range<ByteNum> {
+        let range = self.chunk_range();
+        range.start.to_bytes()..range.end.to_bytes()
     }
 
     /// Number of nodes below this node, excluding this node.
@@ -481,17 +499,29 @@ impl TreeNode {
 
     /// Get the left child of this node, or None if it is a child node.
     pub fn left_child(&self) -> Option<Self> {
-        self.left_child0().map(Self)
+        let offset = 1 << self.level().checked_sub(1)?;
+        Some(Self(self.0 - offset))
     }
 
     /// Get the right child of this node, or None if it is a child node.
     pub fn right_child(&self) -> Option<Self> {
-        self.right_child0().map(Self)
+        let offset = 1 << self.level().checked_sub(1)?;
+        Some(Self(self.0 + offset))
     }
 
     /// Unrestricted parent, can only be None if we are at the top
     pub fn parent(&self) -> Option<Self> {
-        self.parent0().map(Self)
+        let level = self.level();
+        if level == 63 {
+            return None;
+        }
+        let span = 1u64 << level;
+        let offset = self.0;
+        Some(Self(if (offset & (span * 2)) == 0 {
+            offset + span
+        } else {
+            offset - span
+        }))
     }
 
     /// Restricted parent, will be None if we call parent on the root
@@ -510,34 +540,10 @@ impl TreeNode {
     /// Get a valid right descendant for an offset
     pub(crate) fn right_descendant(&self, len: Self) -> Option<Self> {
         let mut node = self.right_child()?;
-        while node.0 >= len.0 {
+        while node >= len {
             node = node.left_child()?;
         }
         Some(node)
-    }
-
-    fn left_child0(&self) -> Option<u64> {
-        let offset = 1 << self.level().checked_sub(1)?;
-        Some(self.0 - offset)
-    }
-
-    fn right_child0(&self) -> Option<u64> {
-        let offset = 1 << self.level().checked_sub(1)?;
-        Some(self.0 + offset)
-    }
-
-    fn parent0(&self) -> Option<u64> {
-        let level = self.level();
-        if level == 63 {
-            return None;
-        }
-        let span = 1u64 << level;
-        let offset = self.0;
-        Some(if (offset & (span * 2)) == 0 {
-            offset + span
-        } else {
-            offset - span
-        })
     }
 
     /// Get the range of nodes this node covers
@@ -550,24 +556,13 @@ impl TreeNode {
     }
 
     /// Get the range of blocks this node covers
-    pub fn block_range(&self) -> Range<BlockNum> {
-        let Range { start, end } = self.block_range0();
-        BlockNum(start)..BlockNum(end)
-    }
-
-    /// Range of blocks this node covers
-    const fn block_range0(&self) -> Range<u64> {
+    pub fn chunk_range(&self) -> Range<ChunkNum> {
         let level = self.level();
         let span = 1 << level;
         let mid = self.0 + 1;
         // at level 0 (leaf), range will be nn..nn+2
         // at level >0 (branch), range will be centered on nn+1
-        mid - span..mid + span
-    }
-
-    /// Get the post order offset of this node
-    pub fn post_order_offset(&self) -> u64 {
-        self.post_order_offset0()
+        ChunkNum(mid - span)..ChunkNum(mid + span)
     }
 
     /// the number of times you have to go right from the root to get to this node
@@ -577,8 +572,9 @@ impl TreeNode {
         (self.0 + 1).count_ones() - 1
     }
 
+    /// Get the post order offset of this node
     #[inline]
-    const fn post_order_offset0(&self) -> u64 {
+    pub const fn post_order_offset(&self) -> u64 {
         // compute number of nodes below me
         let below_me = self.count_below();
         // compute next ancestor that is to the left
@@ -591,19 +587,16 @@ impl TreeNode {
     }
 
     /// Get the range of post order offsets this node covers
-    pub fn post_order_range(&self) -> Range<u64> {
-        self.post_order_range0()
-    }
-
-    #[inline]
-    const fn post_order_range0(&self) -> Range<u64> {
-        let offset = self.post_order_offset0();
+    pub const fn post_order_range(&self) -> Range<u64> {
+        let offset = self.post_order_offset();
         let end = offset + 1;
         let start = offset - self.count_below();
         start..end
     }
 
     /// Get the next left ancestor, or None if we don't have one
+    ///
+    /// this is a separate fn so it can be const.
     #[inline]
     const fn next_left_ancestor0(&self) -> Option<u64> {
         // add 1 to go to the representation where trailing zeroes = level
@@ -616,10 +609,12 @@ impl TreeNode {
     }
 }
 
-/// Slow iterative way to find the offset of a node in a pre-order traversal.
+/// Iterative way to find the offset of a node in a pre-order traversal.
 ///
 /// I am sure there is a way that does not require a loop, but this will do for now.
-fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
+/// It is slower than the direct formula, but it is still in the nanosecond range,
+/// so at a block size of 16 KiB it should not be the limiting factor for anything.
+fn pre_order_offset_loop(node: u64, len: u64) -> u64 {
     // node level, 0 for leaf nodes
     let level = (!node).trailing_zeros();
     // span of the node, 1 for leaf nodes
@@ -650,4 +645,22 @@ fn pre_order_offset_slow(node: u64, len: u64) -> u64 {
         span = pspan;
     }
     left - (left.count_ones() as u64) + parent_count
+}
+
+/// Split and canonicalize a range set at a given chunk number
+///
+/// Compared to [RangeSetRef::split], this function will canonicalize the second range
+pub(crate) fn split(
+    ranges: &RangeSetRef<ChunkNum>,
+    mid: ChunkNum,
+) -> (&RangeSetRef<ChunkNum>, &RangeSetRef<ChunkNum>) {
+    let (a, mut b) = ranges.split(mid);
+    // check that a does not contain a redundant boundary at or after mid
+    debug_assert!(a.boundaries().last() < Some(&mid));
+    // Replace b with the canonicalized version if it starts at or before mid.
+    // This is necessary to be able to check it with RangeSetRef::is_all()
+    if b.boundaries().len() == 1 && b.boundaries()[0] <= mid {
+        b = RangeSetRef::new(&[ChunkNum(0)]).unwrap();
+    }
+    (a, b)
 }

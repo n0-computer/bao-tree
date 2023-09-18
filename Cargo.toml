@@ -1,6 +1,6 @@
 [package]
 name = "bao-tree"
-version = "0.7.0"
+version = "0.8.0-rc0"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ categories = ["data-structures"]
 
 [dependencies]
 iroh-blake3 = "1.4.3"
-range-collections = "0.4.1"
+range-collections = "0.4.4"
 smallvec = "1"
 
 bytes = { version = "1" }
@@ -39,6 +39,7 @@ criterion = "0.4.0"
 tempfile = "3.6.0"
 warp = "0.3.5"
 proc-macro2 = "1.0.66"
+test-strategy = "0.3.1"
 
 [[bench]]
 name = "tree_bench"

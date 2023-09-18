@@ -9,3 +9,13 @@ cc e200e6c22767b6f57374c80604bf8992c5a8c3b8bc992d852a9d6b297f61a819 # shrinks to
 cc 5ff14d5e2b7437325d271e12752dcd2ace7517710bb8c3827471936544c745a0 # shrinks to (len, start, size) = (16603, 0, 1), level = 5
 cc 9159464c869fd52b888e0de6ae8f138e0e5025e0a7ceb5c8f543a5a251b34997 # shrinks to (len, start, size) = (13497, 0, 1), level = 2
 cc b78aa2a3a1bb7083933ddfe98e50995d114abbff9543766831b56b34f95fe346 # shrinks to (len, start, size) = (0, 0, 0)
+cc cbe7ccc5004f11743e7dcb44c326e0adef37331f0ece24d9631c4d796a4fde14 # shrinks to size = 1025, start = 2
+cc 2dd3a6e486771a28dd33503b455164e7fe2d57e2c3650dadaa369e5597ce3f38 # shrinks to (len, start, size) = (2119, 2, 1)
+cc 38cb282a3a063edca467c9966bda6edc4e9247294f920b8e6b6e718d558eb416 # shrinks to size = 4097, block_size = 1, max_skip_level = 1
+cc 5a31ac5d77dd77abcca740ba5a69a27f556176085f07fabcf1f517426efcde1a # shrinks to len = 0, level = 1
+cc d2bcee892c5aef35792e4850d18e3f02b19caa0369c5561b1d8651adf7b53502 # shrinks to (len, start, size) = (1025, 0, 1)
+cc 19ffd5008f66fc17ed286088f3fd6a2584f40b5bdb58b1fb62be848cce8dd124 # shrinks to (len, start, size) = (9221, 1, 8)
+cc 4c3aa611e7dbd88791c95b1131a420bd1d6dff817ec8626f724b160d622e5a14 # shrinks to size = 7169, block_size = 0
+cc e3944265687379638498bfbcdece422528f71a0ad3d49c9fbc8d4e7149430406 # shrinks to (len, start, size) = (8217, 0, 8), level = 2
+cc 7adf0a618622da069d836a91e24e7ddbf040c588893e422ce0d23ef16c623785 # shrinks to (size, ranges) = (9338, RangeSet{0..8}), block_size = 2
+cc 52a6da6a85bc8da92cffbb24194e705f06fea0d327d8da7a469304f417637738 # shrinks to (size, ranges) = (8265, RangeSet{0..8}), block_size = 2

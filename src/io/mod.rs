@@ -4,6 +4,8 @@ use bytes::Bytes;
 
 mod error;
 pub use error::*;
+
+use self::outboard::PostOrderMemOutboard;
 #[cfg(feature = "tokio_fsm")]
 pub mod fsm;
 pub mod outboard;
@@ -49,7 +51,7 @@ pub fn encoded_size(size: u64, block_size: BlockSize) -> u64 {
 
 /// Computes the pre order outboard of a file in memory.
 pub fn outboard(input: impl AsRef<[u8]>, block_size: BlockSize) -> (Vec<u8>, blake3::Hash) {
-    let outboard = BaoTree::outboard_post_order_mem(input, block_size).flip();
+    let outboard = PostOrderMemOutboard::create(input, block_size).flip();
     let hash = *outboard.hash();
-    (outboard.into_inner(), hash)
+    (outboard.into_inner_with_prefix(), hash)
 }

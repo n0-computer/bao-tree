@@ -1,9 +1,8 @@
-use bao_tree::{blake3, BaoTree, BlockSize, ByteNum};
+use bao_tree::{blake3, BaoTree, BlockSize, ByteNum, ChunkRanges};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use range_collections::RangeSet2;
 
 fn offset_benches(c: &mut Criterion) {
-    let tree = BaoTree::new(ByteNum(1024 * 1024 * 1024), BlockSize::DEFAULT);
+    let tree = BaoTree::new(ByteNum(1024 * 1024 * 1024), BlockSize::ZERO);
     let node = tree.pre_order_nodes_iter().last().unwrap();
     c.bench_function("pre_order_offset", |b| {
         b.iter(|| tree.pre_order_offset(black_box(node)))
@@ -14,7 +13,7 @@ fn offset_benches(c: &mut Criterion) {
 }
 
 fn iter_benches(c: &mut Criterion) {
-    let tree = BaoTree::new(ByteNum(1024 * 1024), BlockSize::DEFAULT);
+    let tree = BaoTree::new(ByteNum(1024 * 1024), BlockSize::ZERO);
     c.bench_function("pre_order_nodes_iter", |b| {
         b.iter(|| {
             for item in tree.pre_order_nodes_iter() {
@@ -38,7 +37,7 @@ fn iter_benches(c: &mut Criterion) {
     });
     c.bench_function("ranges_pre_order_chunks_iter_ref", |b| {
         b.iter(|| {
-            for item in tree.ranges_pre_order_chunks_iter_ref(&RangeSet2::all(), 0) {
+            for item in tree.ranges_pre_order_chunks_iter_ref(&ChunkRanges::all(), 0) {
                 black_box(item);
             }
         })

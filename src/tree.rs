@@ -1,7 +1,10 @@
 //! Define a number of newtypes and operations on these newtypes
 //!
 //! Most operations are concerned with node indexes in an in order traversal of a binary tree.
-use std::ops::{Add, Div, Mul, Sub};
+use std::{
+    fmt,
+    ops::{Add, Div, Mul, Sub},
+};
 
 use range_collections::range_set::RangeSetEntry;
 
@@ -44,19 +47,30 @@ index_newtype! {
 ///
 /// Block sizes are powers of 2, with the smallest being 1024 bytes.
 /// They are encoded as the power of 2, minus 10, so 1 is 1024 bytes, 2 is 2048 bytes, etc.
+///
+/// Since only powers of 2 are valid, the log2 of the size in bytes / 1024 is given in the
+/// constructor. So a block size of 0 is 1024 bytes, 1 is 2048 bytes, etc.
+///
+/// The actual size in bytes can be computed with [BlockSize::bytes].
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockSize(pub u8);
+
+impl fmt::Display for BlockSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self, f)
+    }
+}
 
 impl BlockSize {
     /// The default block size, 1024 bytes
     ///
     /// This means that blocks and blake3 chunks are the same size.
-    pub const DEFAULT: BlockSize = BlockSize(0);
+    pub const ZERO: BlockSize = BlockSize(0);
 
     /// Number of bytes in a block at this level
     pub const fn bytes(self) -> usize {
-        byte_size(self.0)
+        BLAKE3_CHUNK_SIZE << self.0
     }
 
     /// Compute a block size from bytes
@@ -71,8 +85,9 @@ impl BlockSize {
         }
         Some(Self((bytes.trailing_zeros() - 10) as u8))
     }
-}
 
-const fn byte_size(block_level: u8) -> usize {
-    BLAKE3_CHUNK_SIZE << block_level
+    /// Convert to an u32 for comparison with levels
+    pub(crate) const fn to_u32(self) -> u32 {
+        self.0 as u32
+    }
 }
