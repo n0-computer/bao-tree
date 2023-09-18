@@ -419,7 +419,7 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
     }
 
     /// Map the outboard data to a new type.
-    pub fn map_data<F, U>(self, f: F) -> std::result::Result<PostOrderMemOutboard<U>, &'static str>
+    pub fn map_data<F, U>(self, f: F) -> std::result::Result<PreOrderMemOutboard<U>, &'static str>
     where
         F: FnOnce(T) -> U,
         U: AsRef<[u8]>,
@@ -427,7 +427,7 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
         let len = self.data.as_ref().len();
         let data = f(self.data);
         if data.as_ref().len() == len {
-            Ok(PostOrderMemOutboard {
+            Ok(PreOrderMemOutboard {
                 root: self.root,
                 tree: self.tree,
                 data,

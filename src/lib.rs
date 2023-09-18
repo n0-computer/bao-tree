@@ -654,12 +654,11 @@ pub(crate) fn split(
     ranges: &RangeSetRef<ChunkNum>,
     mid: ChunkNum,
 ) -> (&RangeSetRef<ChunkNum>, &RangeSetRef<ChunkNum>) {
-    let (mut a, mut b) = ranges.split(mid);
-    // todo: the canonicalization for a should be done in RangeSetRef::split.
-    // this is just a workaround until that bug is fixed.
-    if a.boundaries().last() == Some(&mid) {
-        a = RangeSetRef::new(&a.boundaries()[..a.boundaries().len() - 1]).unwrap();
-    }
+    let (a, mut b) = ranges.split(mid);
+    // check that a does not contain a redundant boundary at or after mid
+    debug_assert!(a.boundaries().last() < Some(&mid));
+    // Replace b with the canonicalized version if it starts at or before mid.
+    // This is necessary to be able to check it with RangeSetRef::is_all()
     if b.boundaries().len() == 1 && b.boundaries()[0] <= mid {
         b = RangeSetRef::new(&[ChunkNum(0)]).unwrap();
     }
