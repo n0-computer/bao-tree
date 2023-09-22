@@ -13,7 +13,7 @@ use crate::{
         Header, Leaf, Parent,
     },
     iter::BaoChunk,
-    rec::encode_selected_rec,
+    rec::{encode_selected_rec, truncate_ranges},
     BaoTree, BlockSize, ByteNum, ChunkRanges, ChunkRangesRef, TreeNode,
 };
 use blake3::guts::parent_cv;
@@ -436,6 +436,8 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 let size =
                     read_len(&mut self.encoded).map_err(StartDecodeError::maybe_not_found)?;
                 let tree = BaoTree::new(size, *block_size);
+                // now we know the size, so we can canonicalize the ranges
+                let ranges = truncate_ranges(ranges, tree.size());
                 self.inner = Position::Content {
                     iter: ResponseIterRef::new(tree, ranges),
                 };
@@ -560,6 +562,8 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     let tree = outboard.tree();
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
     let mut out_buf = Vec::new();
+    // canonicalize ranges
+    let ranges = truncate_ranges(ranges, tree.size());
     // write header
     encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {

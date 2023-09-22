@@ -167,7 +167,7 @@ impl BaoTree {
         PostOrderChunkIter::new(*self)
     }
 
-    /// Traverse the part of the tree that is relevant for a ranges querys
+    /// Traverse the part of the tree that is relevant for a ranges query
     /// in pre order as [BaoChunk]s
     ///
     /// This iterator is used by both the sync and async io code for encoding

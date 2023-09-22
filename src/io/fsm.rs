@@ -8,7 +8,10 @@
 use std::{io, result};
 
 use crate::{
-    blake3, hash_subtree, iter::ResponseIter, rec::encode_selected_rec, ChunkRanges, ChunkRangesRef,
+    blake3, hash_subtree,
+    iter::ResponseIter,
+    rec::{encode_selected_rec, truncate_ranges, truncate_ranges_owned},
+    ChunkRanges, ChunkRangesRef,
 };
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
@@ -328,6 +331,8 @@ struct ResponseDecoderReadingInner<R> {
 
 impl<R> ResponseDecoderReadingInner<R> {
     fn new(tree: BaoTree, hash: blake3::Hash, ranges: ChunkRanges, encoded: R) -> Self {
+        // now that we know the size, we can canonicalize the ranges
+        let ranges = truncate_ranges_owned(ranges, tree.size());
         let mut res = Self {
             iter: ResponseIter::new(tree, ranges),
             stack: SmallVec::new(),
@@ -535,6 +540,7 @@ where
     stack.push(outboard.root());
     let mut encoded = encoded;
     let tree = outboard.tree();
+    let ranges = truncate_ranges(ranges, tree.size());
     // write header
     encoded
         .write_all(tree.size.0.to_le_bytes().as_slice())

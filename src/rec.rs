@@ -2,10 +2,83 @@
 //!
 //! Encocding is used to compute hashes, decoding is only used in tests as a
 //! reference implementation.
-use crate::{blake3, split, ChunkNum, ChunkRangesRef};
+use crate::{blake3, split, ByteNum, ChunkNum, ChunkRanges, ChunkRangesRef};
 
 #[cfg(test)]
 use crate::{iter::BaoChunk, BaoTree, BlockSize, TreeNode};
+
+/// Given a set of chunk ranges, adapt them for a tree of the given size.
+///
+/// This will consider anything behind the tree size to be a request for the last chunk,
+/// which makes things a bit more complex. This is useful to get a size proof for a
+/// blob of an unknown size.
+///
+/// If you don't need this, you can just split the ranges on the tree size and then
+/// keep the first part.
+///
+/// Examples:
+///
+/// assuming a size of 7 chunks:
+///
+/// 0..6 will remain 0..6
+/// 0..7 will become 0.. (the entire blob)
+/// 0..10, 11.12 will become 0.. (the entire blob)
+/// 0..6, 7..10 will become 0.. (the entire blob). the last chunk will be included and the hole filled
+/// 3..6, 7..10 will become 3.. the last chunk will be included and the hole filled
+/// 0..5, 7..10 will become 0..5, 7.. (the last chunk will be included, but chunkk 5 will not be sent)
+pub fn truncate_ranges(ranges: &ChunkRangesRef, size: ByteNum) -> &ChunkRangesRef {
+    let bs = ranges.boundaries();
+    ChunkRangesRef::new_unchecked(&bs[..truncated_len(ranges, size)])
+}
+
+/// A version of [canonicalize_ranges] that takes and returns an owned [ChunkRanges].
+///
+/// This is needed for the state machines that own their ranges.
+pub fn truncate_ranges_owned(ranges: ChunkRanges, size: ByteNum) -> ChunkRanges {
+    let n = truncated_len(&ranges, size);
+    let mut boundaries = ranges.into_inner();
+    boundaries.truncate(n);
+    ChunkRanges::new_unchecked(boundaries)
+}
+
+fn truncated_len(ranges: &ChunkRangesRef, size: ByteNum) -> usize {
+    let end = size.chunks();
+    let lc = ChunkNum(end.0.saturating_sub(1));
+    let bs = ranges.boundaries();
+    match bs.binary_search(&lc) {
+        Ok(i) if (i & 1) == 0 => {
+            // last chunk is included and is a start boundary.
+            // keep it and remove the rest.
+            i + 1
+        }
+        Ok(i) => {
+            if bs.len() == i + 1 {
+                // last chunk is included and is an end boundary, and there is nothing behind it.
+                // nothing to do.
+                i + 1
+            } else {
+                // last chunk is included and is an end boundary, and there is something behind it.
+                // remove it to turn the range into an open range.
+                i
+            }
+        }
+        Err(ip) if (ip & 1) == 0 => {
+            // insertion point would be a start boundary.
+            if bs.len() == ip {
+                // the insertion point is at the end, nothing to do.
+                ip
+            } else {
+                // include one start boundary > lc to turn the range into an open range.
+                ip + 1
+            }
+        }
+        Err(ip) => {
+            // insertion point is an end boundary
+            // the value at ip must be > lc, so we can just omit it
+            ip
+        }
+    }
+}
 
 /// Encode ranges relevant to a query from a slice and outboard to a buffer.
 ///
@@ -344,6 +417,8 @@ mod test_support {
         let mut res = Vec::new();
         let size = ByteNum(data.len() as u64);
         res.extend_from_slice(&size.0.to_le_bytes());
+        // canonicalize the ranges
+        let ranges = truncate_ranges(ranges, size);
         let hash = encode_selected_rec(
             ChunkNum(0),
             data,

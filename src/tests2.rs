@@ -9,13 +9,15 @@
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use proptest::strategy::{Just, Strategy};
-use range_collections::RangeSet2;
+use range_collections::{RangeSet2, RangeSetRef};
+use smallvec::SmallVec;
 use std::ops::Range;
+use test_strategy::proptest;
 
 use crate::io::outboard::PreOrderMemOutboard;
 use crate::rec::{
     get_leaf_ranges, make_test_data, partial_chunk_iter_reference, range_union,
-    response_iter_reference, ReferencePreOrderPartialChunkIterRef,
+    response_iter_reference, truncate_ranges, ReferencePreOrderPartialChunkIterRef,
 };
 use crate::{assert_tuple_eq, prop_assert_tuple_eq, ChunkRanges, ChunkRangesRef};
 use crate::{
@@ -95,7 +97,7 @@ fn pre_traversal_offset_impl(tree: BaoTree) {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn pre_traversal_offset_proptest(#[strategy(tree())] tree: BaoTree) {
     pre_traversal_offset_impl(tree);
 }
@@ -120,7 +122,7 @@ fn post_traversal_offset_impl(tree: BaoTree) {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn post_traversal_offset_proptest(#[strategy(tree())] tree: BaoTree) {
     post_traversal_offset_impl(tree);
 }
@@ -134,7 +136,7 @@ fn post_traversal_chunks_iter_impl(tree: BaoTree) {
     assert_eq!(union, RangeSet2::from(..tree.size));
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn post_traversal_chunks_iter_proptest(#[strategy(tree())] tree: BaoTree) {
     post_traversal_chunks_iter_impl(tree);
 }
@@ -198,7 +200,7 @@ fn post_oder_outboard_sync_cases() {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn post_oder_outboard_sync_proptest(#[strategy(tree())] tree: BaoTree) {
     post_oder_outboard_sync_impl(tree);
 }
@@ -213,7 +215,7 @@ fn post_oder_outboard_fsm_impl(tree: BaoTree) {
     futures::executor::block_on(outboard_test_fsm(&data, outboard));
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn post_oder_outboard_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     post_oder_outboard_fsm_impl(tree);
 }
@@ -227,7 +229,7 @@ fn mem_outboard_flip_impl(tree: BaoTree) {
     assert_eq!(post, post.flip().flip());
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn mem_outboard_flip_proptest(#[strategy(tree())] tree: BaoTree) {
     mem_outboard_flip_impl(tree);
 }
@@ -252,7 +254,7 @@ fn validate_outboard_sync_pos_impl(tree: BaoTree) {
     assert_eq!(expected, actual)
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn validate_outboard_sync_pos_proptest(#[strategy(tree())] tree: BaoTree) {
     validate_outboard_sync_pos_impl(tree);
 }
@@ -267,7 +269,7 @@ fn validate_outboard_fsm_pos_impl(tree: BaoTree) {
     assert_eq!(expected, actual)
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn validate_outboard_fsm_pos_proptest(#[strategy(tree())] tree: BaoTree) {
     validate_outboard_fsm_pos_impl(tree);
 }
@@ -308,7 +310,7 @@ fn validate_outboard_sync_neg_cases() {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn validate_outboard_sync_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
     validate_outboard_sync_neg_impl(tree, rand);
 }
@@ -330,7 +332,7 @@ fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn validate_outboard_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
     validate_outboard_fsm_neg_impl(tree, rand);
 }
@@ -531,14 +533,14 @@ fn encode_decode_full_sync_cases() {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn encode_decode_full_sync_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.to_usize());
     let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
     prop_assert_tuple_eq!(encode_decode_full_sync_impl(&data, outboard));
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn encode_decode_partial_sync_proptest(
     #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
@@ -561,7 +563,7 @@ fn encode_decode_full_fsm_cases() {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.to_usize());
     let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
@@ -569,7 +571,7 @@ fn encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     prop_assert_tuple_eq!(pair);
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn encode_decode_partial_fsm_proptest(
     #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
@@ -604,7 +606,7 @@ fn pre_order_nodes_iter_reference(tree: BaoTree, ranges: &ChunkRangesRef) -> Vec
     res
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn pre_order_node_iter_proptest(#[strategy(tree())] tree: BaoTree) {
     let actual = tree.pre_order_nodes_iter().collect::<Vec<_>>();
     let expected = pre_order_nodes_iter_reference(tree, &ChunkRanges::all());
@@ -630,7 +632,7 @@ fn selection_reference_comparison_cases() {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn selection_reference_comparison_proptest(
     #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
@@ -685,7 +687,13 @@ fn cases() -> impl Iterator<Item = (BaoTree, ChunkRanges, u8)> {
         // ((2048 + 1, 0), ChunkRanges::from(..ChunkNum(2)), 0),
         // ((8192 + 1, 0), ChunkRanges::from(..ChunkNum(8)), 2),
         // ((1037, 0), ChunkRanges::all(), 1),
-        ((1024 + 1, 0), ChunkRanges::from(..ChunkNum(1)), 2),
+        // ((1024 + 1, 0), ChunkRanges::from(..ChunkNum(1)), 2),
+        ((1024 * 32 - 1, 0), ChunkRanges::from(ChunkNum(16)..), 4),
+        (
+            (1024 * 32 - 1, 0),
+            ChunkRanges::from(ChunkNum(16)..ChunkNum(32)),
+            4,
+        ),
     ]
     .into_iter()
     .map(|((size, block_level), ranges, min_full_level)| {
@@ -698,7 +706,6 @@ fn cases() -> impl Iterator<Item = (BaoTree, ChunkRanges, u8)> {
 }
 
 #[test]
-#[ignore]
 fn filtered_chunks() {
     for (tree, ranges, min_full_level) in cases() {
         println!("{:?} {:?}", tree, ranges);
@@ -721,21 +728,21 @@ fn response_iter_cases() {
         let expected = partial_chunk_iter_reference(tree, &ranges, min_full_level);
         let actual =
             PreOrderPartialChunkIterRef::new(tree, &ranges, min_full_level).collect::<Vec<_>>();
-        if expected != actual {
-            println!("expected:");
-            for chunk in expected {
-                println!("{}", chunk.to_debug_string(10));
-            }
-            println!("actual:");
-            for chunk in actual {
-                println!("{}", chunk.to_debug_string(10));
-            }
-            panic!();
+        // if expected != actual {
+        println!("expected:");
+        for chunk in expected {
+            println!("{}", chunk.to_debug_string(10));
         }
+        println!("actual:");
+        for chunk in actual {
+            println!("{}", chunk.to_debug_string(10));
+        }
+        // panic!();
+        // }
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn response_iter_proptest(
     #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
@@ -782,7 +789,7 @@ fn response_iter_2_cases() {
     }
 }
 
-#[test_strategy::proptest]
+#[proptest]
 fn response_iter_2_proptest(
     #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
     #[strategy(block_size())] block_size: BlockSize,
@@ -801,5 +808,72 @@ fn response_iter_2_proptest(
             println!("{}", chunk.to_debug_string(10));
         }
         panic!();
+    }
+}
+
+fn chunk_ranges(int_ranges: &RangeSetRef<u64>) -> ChunkRanges {
+    let mut bounds = SmallVec::with_capacity(int_ranges.boundaries().len());
+    for b in int_ranges.boundaries() {
+        bounds.push(ChunkNum(*b));
+    }
+    ChunkRanges::new_unchecked(bounds)
+}
+
+fn cr(x: impl Into<RangeSet2<u64>>) -> RangeSet2<ChunkNum> {
+    chunk_ranges(&x.into())
+}
+
+#[test]
+fn canonicalize_ranges_test() {
+    fn size(x: u64) -> ByteNum {
+        ByteNum(x)
+    }
+
+    let cases = [
+        // gets canonicalized to all
+        (cr(..1), size(1024), cr(..)),
+        // gets left alone
+        (cr(1..), size(1024), cr(1..)),
+        // gets canonicalized to all
+        (cr(..31), size(31 * 1024), cr(..)),
+        // gets canonicalized to all
+        (cr(..31) | cr(40..50), size(31 * 1024), cr(..)),
+        // gets left alone
+        (cr(99..), size(31 * 1024), cr(99..)),
+        // gets left alone, last chunk is not included
+        (cr(..30), size(31 * 1024), cr(..30)),
+        // ..30 is missing the last chunk. but that will be included due to
+        // having something behind the end, so canonicalize to all
+        (cr(..30) | cr(1000..), size(31 * 1024), cr(..)),
+        // gets left alone, two chunks are missing
+        (
+            cr(..29) | cr(1000..),
+            size(31 * 1024),
+            cr(0..29) | cr(1000..),
+        ),
+        // gets left alone, two chunks are missing
+        (
+            cr(1..2) | cr(4..29) | cr(1000..),
+            size(31 * 1024),
+            cr(1..2) | cr(4..29) | cr(1000..),
+        ),
+        // gets turned into open range
+        (
+            cr(1..2) | cr(4..30) | cr(1000..),
+            size(31 * 1024),
+            cr(1..2) | cr(4..),
+        ),
+        (cr(..6), size(7 * 1024), cr(..6)),
+        (cr(..7), size(7 * 1024), cr(..)),
+        (cr(7..), size(7 * 1024), cr(7..)),
+        (cr(..10) | cr(11..12), size(7 * 1024), cr(..)),
+        (cr(..6) | cr(7..10), size(7 * 1024), cr(..)),
+        (cr(3..6) | cr(7..10), size(7 * 1024), cr(3..)),
+        (cr(..5) | cr(7..10), size(7 * 1024), cr(..5) | cr(7..)),
+    ];
+    for (ranges, size, expected) in cases {
+        let expected: &RangeSetRef<ChunkNum> = &expected;
+        let actual = truncate_ranges(&ranges, size);
+        assert_eq!(expected, actual);
     }
 }

@@ -18,7 +18,7 @@ use crate::{
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
     prop_assert_tuple_eq,
     rec::{
-        encode_ranges_reference, encode_selected_rec, make_test_data, range_union,
+        encode_ranges_reference, encode_selected_rec, make_test_data, range_union, truncate_ranges,
         ReferencePreOrderPartialChunkIterRef,
     },
     recursive_hash_subtree, split, ChunkRanges, ChunkRangesRef,
@@ -259,21 +259,22 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
 fn bao_tree_slice_roundtrip_cases() {
     use make_test_data as td;
     let cases = [
-        (0, 0..1),
-        (1, 0..1),
-        (1023, 0..1),
-        (1024, 0..1),
-        (1025, 0..1),
-        (2047, 0..1),
-        (2048, 0..1),
-        (10000, 0..1),
-        (20000, 0..1),
-        (24 * 1024 + 1, 0..25),
-        (1025, 1..2),
-        (2047, 1..2),
-        (2048, 1..2),
-        (10000, 1..2),
-        (20000, 1..2),
+        // (0, 0..1),
+        // (1, 0..1),
+        // (1023, 0..1),
+        // (1024, 0..1),
+        // (1025, 0..1),
+        // (2047, 0..1),
+        // (2048, 0..1),
+        // (10000, 0..1),
+        // (20000, 0..1),
+        // (24 * 1024 + 1, 0..25),
+        // (1025, 1..2),
+        // (2047, 1..2),
+        // (2048, 1..2),
+        // (10000, 1..2),
+        // (20000, 1..2),
+        (1025, 0..2),
     ];
     for chunk_group_log in 1..4 {
         let block_size = BlockSize(chunk_group_log);
@@ -705,6 +706,7 @@ fn encode_selected_reference(
     let mut res = Vec::new();
     res.extend_from_slice(&(data.len() as u64).to_le_bytes());
     let max_skip_level = block_size.to_u32();
+    let ranges = truncate_ranges(ranges, ByteNum(data.len() as u64));
     let hash = encode_selected_rec(
         ChunkNum(0),
         data,

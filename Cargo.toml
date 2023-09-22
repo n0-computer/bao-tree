@@ -13,7 +13,7 @@ categories = ["data-structures"]
 
 [dependencies]
 iroh-blake3 = "1.4.3"
-range-collections = "0.4.4"
+range-collections = { version = "0.4.5", features = ["new_unchecked"] }
 smallvec = "1"
 
 bytes = { version = "1" }
