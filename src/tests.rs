@@ -4,7 +4,7 @@ use std::{
     ops::Range,
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use proptest::prelude::*;
 use range_collections::RangeSet2;
 
@@ -523,8 +523,7 @@ pub fn decode_ranges_into_chunks<'a>(
     encoded: impl Read + 'a,
     ranges: &'a ChunkRangesRef,
 ) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
-    let scratch = BytesMut::with_capacity(block_size.bytes());
-    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges, scratch);
+    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges);
     iter.filter_map(|item| match item {
         Ok(item) => {
             if let DecodeResponseItem::Leaf(Leaf { offset, data }) = item {
