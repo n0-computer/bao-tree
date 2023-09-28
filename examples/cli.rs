@@ -39,11 +39,17 @@ use smallvec::SmallVec;
 
 #[derive(Parser, Debug)]
 struct Args {
-    /// Block size log. Actual block size is 1024 * 2^block_size_log
+    /// Block size log. Actual block size is 1024 * 2^block_size_log.
+    ///
+    /// Valid values are 0..8. Default is 4. When setting this to 0, the chunk group size
+    /// is 1 chunk or 1024 bytes, and the generated encoding is compatible with the original
+    /// bao crate.
     #[clap(long, default_value_t = 4)]
     block_size: u8,
+    /// Use async io (not implemented yet)
     #[clap(long)]
     r#async: bool,
+    /// Quiet mode, no progress output to stderr
     #[clap(long, short)]
     quiet: bool,
     #[clap(subcommand)]
@@ -54,7 +60,7 @@ struct Args {
 enum Command {
     /// Encode a part of a file.
     Encode(EncodeArgs),
-    /// Decode a part of a file.
+    /// Decode a previously encoded part of a file.
     Decode(DecodeArgs),
 }
 
@@ -63,6 +69,15 @@ struct EncodeArgs {
     /// The file to encode.
     file: PathBuf,
     /// Byte ranges to encode.
+    ///
+    /// Ranges can be given as full ranges, e.g. 1..10000, or as open ranges, e.g. 1.. or ..10000.
+    /// The range of all bytes is given as .. . Multiple ranges can be given, separated by , or ;.
+    ///
+    /// To produce output compatible with the original bao crate, use a block size of 0 and just a single
+    /// range.
+    ///
+    /// Giving the range of all bytes will just interleave the data with the outboard. Giving a range
+    /// outside the file such as 1000000000.. will encode the last chunk.
     #[clap(long)]
     ranges: Vec<String>,
     /// The file to write the encoded data to.
