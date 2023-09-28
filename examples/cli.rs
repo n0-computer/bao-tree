@@ -22,8 +22,6 @@ use range_collections::RangeSet2;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-const BLOCK_SIZE: BlockSize = BlockSize(4);
-
 #[derive(Parser, Debug)]
 struct Args {
     /// Block size log. Actual block size is 1024 * 2^block_size_log
@@ -156,8 +154,9 @@ fn decode_into_file(
             DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
                 log!(
                     v,
-                    "got parent {:?} with hashes {} and {}",
+                    "got parent {:?} level {} and children {} and {}",
                     node,
+                    node.level(),
                     l.to_hex(),
                     r.to_hex()
                 );
@@ -171,9 +170,9 @@ fn decode_into_file(
     Ok(())
 }
 
-fn decode_to_stdout(msg: &Message, v: bool) -> io::Result<()> {
+fn decode_to_stdout(msg: &Message, block_size: BlockSize, v: bool) -> io::Result<()> {
     let iter =
-        DecodeResponseIter::new(msg.hash, BLOCK_SIZE, Cursor::new(&msg.encoded), &msg.ranges);
+        DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
     for response in iter {
         match response? {
             DecodeResponseItem::Header(Header { size }) => {
@@ -182,8 +181,9 @@ fn decode_to_stdout(msg: &Message, v: bool) -> io::Result<()> {
             DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
                 log!(
                     v,
-                    "got parent {:?} with hashes {} and {}",
+                    "got parent {:?} level {} and children {} and {}",
                     node,
+                    node.level(),
                     l.to_hex(),
                     r.to_hex()
                 );
@@ -261,7 +261,7 @@ fn main_sync(args: Args) -> anyhow::Result<()> {
                     .open(target)?;
                 decode_into_file(&msg, target, block_size, v)?;
             } else {
-                decode_to_stdout(&msg, v)?;
+                decode_to_stdout(&msg, block_size, v)?;
             }
         }
     }
