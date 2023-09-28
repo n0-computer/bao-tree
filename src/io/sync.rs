@@ -22,7 +22,7 @@ pub use positioned_io::{ReadAt, Size, WriteAt};
 use range_collections::{range_set::RangeSetRange, RangeSetRef};
 use smallvec::SmallVec;
 
-use super::{outboard::PreOrderMemOutboard, DecodeError, StartDecodeError};
+use super::{fsm::combine_hash_pair, outboard::PreOrderMemOutboard, DecodeError, StartDecodeError};
 use crate::{hash_subtree, iter::ResponseIterRef};
 
 macro_rules! io_error {
@@ -526,8 +526,8 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
         match item {
             BaoChunk::Parent { node, .. } => {
                 let (l_hash, r_hash) = outboard.load(node)?.unwrap();
-                encoded.write_all(l_hash.as_bytes())?;
-                encoded.write_all(r_hash.as_bytes())?;
+                let pair = combine_hash_pair(&l_hash, &r_hash);
+                encoded.write_all(&pair)?;
             }
             BaoChunk::Leaf {
                 start_chunk, size, ..
@@ -587,9 +587,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 if left {
                     stack.push(l_hash);
                 }
-                let mut pair = [0u8; 64];
-                pair[..32].copy_from_slice(l_hash.as_bytes());
-                pair[32..].copy_from_slice(r_hash.as_bytes());
+                let pair = combine_hash_pair(&l_hash, &r_hash);
                 encoded.write_all(&pair)?;
             }
             BaoChunk::Leaf {

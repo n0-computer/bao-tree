@@ -16,6 +16,7 @@ use crate::{
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};
+use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -259,6 +260,15 @@ pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::H
     Ok((l_hash, r_hash))
 }
 
+pub(crate) fn combine_hash_pair(l: &blake3::Hash, r: &blake3::Hash) -> [u8; 64] {
+    let mut res = [0u8; 64];
+    let lb: &mut [u8; 32] = (&mut res[0..32]).try_into().unwrap();
+    *lb = *l.as_bytes();
+    let rb: &mut [u8; 32] = (&mut res[32..]).try_into().unwrap();
+    *rb = *r.as_bytes();
+    res
+}
+
 /// Response decoder state machine, at the start of a stream
 #[derive(Debug)]
 pub struct ResponseDecoderStart<R> {
@@ -491,12 +501,9 @@ where
         match item {
             BaoChunk::Parent { node, .. } => {
                 let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
+                let pair = combine_hash_pair(&l_hash, &r_hash);
                 encoded
-                    .write_all(l_hash.as_bytes())
-                    .await
-                    .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
-                encoded
-                    .write_all(r_hash.as_bytes())
+                    .write_all(&pair)
                     .await
                     .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
@@ -531,7 +538,7 @@ pub async fn encode_ranges_validated<D, O, W>(
 where
     D: AsyncSliceReader,
     O: Outboard,
-    W: AsyncWrite + Unpin,
+    W: AsyncStreamWriter,
 {
     // buffer for writing incomplete subtrees.
     // for queries that don't have incomplete subtrees, this will never be used.
@@ -542,9 +549,7 @@ where
     let tree = outboard.tree();
     let ranges = truncate_ranges(ranges, tree.size());
     // write header
-    encoded
-        .write_all(tree.size.0.to_le_bytes().as_slice())
-        .await?;
+    encoded.write(tree.size.0.to_le_bytes().as_slice()).await?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent {
@@ -566,12 +571,9 @@ where
                 if left {
                     stack.push(l_hash);
                 }
+                let pair = combine_hash_pair(&l_hash, &r_hash);
                 encoded
-                    .write_all(l_hash.as_bytes())
-                    .await
-                    .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
-                encoded
-                    .write_all(r_hash.as_bytes())
+                    .write(&pair)
                     .await
                     .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
@@ -609,7 +611,7 @@ where
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
                 encoded
-                    .write_all(to_write)
+                    .write(to_write)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }

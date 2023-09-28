@@ -1,6 +1,6 @@
 [package]
 name = "bao-tree"
-version = "0.8.0"
+version = "0.9.0"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
@@ -20,7 +20,7 @@ bytes = { version = "1" }
 tokio = { version = "1", features = ["io-util", "rt"], optional = true }
 futures = { version = "0.3", optional = true }
 self_cell = { version = "1" }
-iroh-io = { version = "0.2.2", features = ["tokio-io"], default_features = false, optional = true }
+iroh-io = { version = "0.3.0", features = ["tokio-io"], default_features = false, optional = true }
 positioned-io = { version = "0.3.1", default_features = false }
 
 [features]
@@ -48,3 +48,5 @@ harness = false
 [workspace]
 members = ["cli"]
 
+[patch.crates-io]
+iroh-io = { path = "../iroh-io" }
