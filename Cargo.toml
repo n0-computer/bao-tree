@@ -51,6 +51,3 @@ harness = false
 
 [workspace]
 members = ["cli"]
-
-[patch.crates-io]
-iroh-io = { path = "../iroh-io" }

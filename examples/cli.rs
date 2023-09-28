@@ -1,6 +1,21 @@
 //! A command line interface to encode and decode parts of files.
 //!
 //! This is a simple example of how to use bao-tree to encode and decode parts of files.
+//!
+//! Examples:
+//!
+//! ```
+//! cargo run --example cli encode somefile --ranges 1..10000 --out somefile.bao
+//! ```
+//!
+//! will encode bytes 1..10000 of somefile and write the encoded data to somefile.bao.
+//!
+//! ```
+//! cargo run --example cli decode somefile.bao > /dev/null
+//! ```
+//!
+//! will decode the encoded data in somefile.bao and write it to /dev/null, printing
+//! information about the decoding process to stderr.
 use std::{
     io::{self, Cursor, Write},
     path::PathBuf,
@@ -21,8 +36,6 @@ use positioned_io::WriteAt;
 use range_collections::RangeSet2;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-
-const BLOCK_SIZE: BlockSize = BlockSize(4);
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -139,9 +152,15 @@ fn encode(data: &[u8], outboard: impl Outboard, ranges: ChunkRanges) -> Message 
     }
 }
 
-fn decode_into_file(msg: &Message, mut target: std::fs::File, v: bool) -> io::Result<()> {
+fn decode_into_file(
+    msg: &Message,
+    mut target: std::fs::File,
+    block_size: BlockSize,
+    v: bool,
+) -> io::Result<()> {
     let iter =
-        DecodeResponseIter::new(msg.hash, BLOCK_SIZE, Cursor::new(&msg.encoded), &msg.ranges);
+        DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
+    let mut indent = 0;
     for response in iter {
         match response? {
             DecodeResponseItem::Header(Header { size }) => {
@@ -149,16 +168,27 @@ fn decode_into_file(msg: &Message, mut target: std::fs::File, v: bool) -> io::Re
                 target.set_len(size.0)?;
             }
             DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
+                indent = indent.max(node.level() + 1);
+                let prefix = " ".repeat((indent - node.level()) as usize);
                 log!(
                     v,
-                    "got parent {:?} with hashes {} and {}",
+                    "{}got parent {:?} level {} and children {} and {}",
+                    prefix,
                     node,
+                    node.level(),
                     l.to_hex(),
                     r.to_hex()
                 );
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                log!(v, "got data at offset {} and len {}", offset, data.len());
+                let prefix = " ".repeat(indent as usize);
+                log!(
+                    v,
+                    "{}got data at offset {} and len {}",
+                    prefix,
+                    offset,
+                    data.len()
+                );
                 target.write_at(offset.0, &data)?;
             }
         }
@@ -166,25 +196,37 @@ fn decode_into_file(msg: &Message, mut target: std::fs::File, v: bool) -> io::Re
     Ok(())
 }
 
-fn decode_to_stdout(msg: &Message, v: bool) -> io::Result<()> {
+fn decode_to_stdout(msg: &Message, block_size: BlockSize, v: bool) -> io::Result<()> {
     let iter =
-        DecodeResponseIter::new(msg.hash, BLOCK_SIZE, Cursor::new(&msg.encoded), &msg.ranges);
+        DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
+    let mut indent = 0;
     for response in iter {
         match response? {
             DecodeResponseItem::Header(Header { size }) => {
                 log!(v, "got header claiming a size of {}", size);
             }
             DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
+                indent = indent.max(node.level() + 1);
+                let prefix = " ".repeat((indent - node.level()) as usize);
                 log!(
                     v,
-                    "got parent {:?} with hashes {} and {}",
+                    "{}got parent {:?} level {} and children {} and {}",
+                    prefix,
                     node,
+                    node.level(),
                     l.to_hex(),
                     r.to_hex()
                 );
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                log!(v, "got data at offset {} and len {}", offset, data.len());
+                let prefix = " ".repeat(indent as usize);
+                log!(
+                    v,
+                    "{}got data at offset {} and len {}",
+                    prefix,
+                    offset,
+                    data.len()
+                );
                 io::stdout().write_all(&data)?;
             }
         }
@@ -210,7 +252,7 @@ fn parse_ranges(ranges: Vec<String>) -> anyhow::Result<RangeSet2<u64>> {
     let ranges = ranges
         .iter()
         .flat_map(|x| x.split(&[',', ';']))
-        .map(|range| parse_range(range))
+        .map(parse_range)
         .collect::<anyhow::Result<Vec<_>>>()?;
     let ranges = ranges
         .into_iter()
@@ -236,10 +278,15 @@ fn main_sync(args: Args) -> anyhow::Result<()> {
             log!(v, "done in {:?}.", t0.elapsed());
             log!(v, "encoding message");
             let t0 = std::time::Instant::now();
-            let msg = encode(&data, &outboard, ranges);
-            log!(v, "done in {:?}.", t0.elapsed());
+            let msg = encode(&data, outboard, ranges);
+            log!(
+                v,
+                "done in {:?}. {} bytes.",
+                t0.elapsed(),
+                msg.encoded.len()
+            );
             let bytes = postcard::to_stdvec(&msg)?;
-            log!(v, "serialized message. {} bytes", bytes.len());
+            log!(v, "serialized message");
             if let Some(out) = out {
                 std::fs::write(out, bytes)?;
             } else {
@@ -254,9 +301,9 @@ fn main_sync(args: Args) -> anyhow::Result<()> {
                     .write(true)
                     .create(true)
                     .open(target)?;
-                decode_into_file(&msg, target, v)?;
+                decode_into_file(&msg, target, block_size, v)?;
             } else {
-                decode_to_stdout(&msg, v)?;
+                decode_to_stdout(&msg, block_size, v)?;
             }
         }
     }
