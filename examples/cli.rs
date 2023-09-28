@@ -1,6 +1,21 @@
 //! A command line interface to encode and decode parts of files.
 //!
 //! This is a simple example of how to use bao-tree to encode and decode parts of files.
+//!
+//! Examples:
+//!
+//! ```
+//! cargo run --example cli encode somefile --ranges 1..10000 --out somefile.bao
+//! ```
+//!
+//! will encode bytes 1..10000 of somefile and write the encoded data to somefile.bao.
+//!
+//! ```
+//! cargo run --example cli decode somefile.bao > /dev/null
+//! ```
+//!
+//! will decode the encoded data in somefile.bao and write it to /dev/null, printing
+//! information about the decoding process to stderr.
 use std::{
     io::{self, Cursor, Write},
     path::PathBuf,
@@ -145,6 +160,7 @@ fn decode_into_file(
 ) -> io::Result<()> {
     let iter =
         DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
+    let mut indent = 0;
     for response in iter {
         match response? {
             DecodeResponseItem::Header(Header { size }) => {
@@ -152,9 +168,12 @@ fn decode_into_file(
                 target.set_len(size.0)?;
             }
             DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
+                indent = indent.max(node.level() + 1);
+                let prefix = " ".repeat((indent - node.level()) as usize);
                 log!(
                     v,
-                    "got parent {:?} level {} and children {} and {}",
+                    "{}got parent {:?} level {} and children {} and {}",
+                    prefix,
                     node,
                     node.level(),
                     l.to_hex(),
@@ -162,7 +181,14 @@ fn decode_into_file(
                 );
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                log!(v, "got data at offset {} and len {}", offset, data.len());
+                let prefix = " ".repeat(indent as usize);
+                log!(
+                    v,
+                    "{}got data at offset {} and len {}",
+                    prefix,
+                    offset,
+                    data.len()
+                );
                 target.write_at(offset.0, &data)?;
             }
         }
@@ -173,15 +199,19 @@ fn decode_into_file(
 fn decode_to_stdout(msg: &Message, block_size: BlockSize, v: bool) -> io::Result<()> {
     let iter =
         DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
+    let mut indent = 0;
     for response in iter {
         match response? {
             DecodeResponseItem::Header(Header { size }) => {
                 log!(v, "got header claiming a size of {}", size);
             }
             DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
+                indent = indent.max(node.level() + 1);
+                let prefix = " ".repeat((indent - node.level()) as usize);
                 log!(
                     v,
-                    "got parent {:?} level {} and children {} and {}",
+                    "{}got parent {:?} level {} and children {} and {}",
+                    prefix,
                     node,
                     node.level(),
                     l.to_hex(),
@@ -189,7 +219,14 @@ fn decode_to_stdout(msg: &Message, block_size: BlockSize, v: bool) -> io::Result
                 );
             }
             DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                log!(v, "got data at offset {} and len {}", offset, data.len());
+                let prefix = " ".repeat(indent as usize);
+                log!(
+                    v,
+                    "{}got data at offset {} and len {}",
+                    prefix,
+                    offset,
+                    data.len()
+                );
                 io::stdout().write_all(&data)?;
             }
         }
@@ -242,9 +279,14 @@ fn main_sync(args: Args) -> anyhow::Result<()> {
             log!(v, "encoding message");
             let t0 = std::time::Instant::now();
             let msg = encode(&data, outboard, ranges);
-            log!(v, "done in {:?}.", t0.elapsed());
+            log!(
+                v,
+                "done in {:?}. {} bytes.",
+                t0.elapsed(),
+                msg.encoded.len()
+            );
             let bytes = postcard::to_stdvec(&msg)?;
-            log!(v, "serialized message. {} bytes", bytes.len());
+            log!(v, "serialized message");
             if let Some(out) = out {
                 std::fs::write(out, bytes)?;
             } else {
