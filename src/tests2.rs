@@ -425,13 +425,11 @@ fn encode_decode_partial_sync_impl(
     crate::io::sync::encode_ranges_validated(data, &outboard, ranges, &mut encoded).unwrap();
     let expected_data = data;
     let encoded_read = std::io::Cursor::new(encoded);
-    let buf = BytesMut::new();
     let iter = crate::io::sync::DecodeResponseIter::new(
         outboard.root,
         outboard.tree.block_size,
         encoded_read,
         ranges,
-        buf,
     );
     for item in iter {
         let item = match item {

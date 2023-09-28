@@ -1,9 +1,10 @@
 //! Implementation of bao streaming for std io and tokio io
-use crate::{blake3, BaoTree, BlockSize, ByteNum, TreeNode};
+use crate::{blake3, BaoTree, BlockSize, ByteNum, ChunkRanges, TreeNode};
 use bytes::Bytes;
 
 mod error;
 pub use error::*;
+use range_collections::{range_set::RangeSetRange, RangeSetRef};
 
 use self::outboard::PostOrderMemOutboard;
 #[cfg(feature = "tokio_fsm")]
@@ -54,4 +55,26 @@ pub fn outboard(input: impl AsRef<[u8]>, block_size: BlockSize) -> (Vec<u8>, bla
     let outboard = PostOrderMemOutboard::create(input, block_size).flip();
     let hash = *outboard.hash();
     (outboard.into_inner_with_prefix(), hash)
+}
+
+/// Given a range set of byte ranges, round it up to full chunks.
+///
+/// E.g. a byte range from 1..3 will be converted into the chunk range 0..1 (0..1024 bytes).
+pub fn round_up_to_chunks(ranges: &RangeSetRef<u64>) -> ChunkRanges {
+    let mut res = ChunkRanges::empty();
+    // we don't know if the ranges are overlapping, so we just compute the union
+    for item in ranges.iter() {
+        // full_chunks() rounds down, chunks() rounds up
+        match item {
+            RangeSetRange::RangeFrom(range) => {
+                res |= ChunkRanges::from(ByteNum(*range.start).full_chunks()..)
+            }
+            RangeSetRange::Range(range) => {
+                res |= ChunkRanges::from(
+                    ByteNum(*range.start).full_chunks()..ByteNum(*range.end).chunks(),
+                )
+            }
+        }
+    }
+    res
 }

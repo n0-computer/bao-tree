@@ -395,9 +395,22 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     /// Create a new iterator to decode a response.
     ///
     /// For decoding you need to know the root hash, block size, and the ranges that were requested.
-    /// Additionally you need to provide a reader that can be used to read the encoded data, and
-    /// a buffer to use for decoding.
+    /// Additionally you need to provide a reader that can be used to read the encoded data.
     pub fn new(
+        root: blake3::Hash,
+        block_size: BlockSize,
+        encoded: R,
+        ranges: &'a ChunkRangesRef,
+    ) -> Self {
+        let buf = BytesMut::with_capacity(block_size.bytes());
+        Self::new_with_buffer(root, block_size, encoded, ranges, buf)
+    }
+
+    /// Create a new iterator to decode a response.
+    ///
+    /// This is the same as [Self::new], but allows you to provide a buffer to use for decoding.
+    /// The buffer will be resized as needed, but it's capacity should be the [BlockSize::bytes].
+    pub fn new_with_buffer(
         root: blake3::Hash,
         block_size: BlockSize,
         encoded: R,
@@ -649,8 +662,7 @@ where
     R: Read,
     W: WriteAt,
 {
-    let buffer = BytesMut::with_capacity(block_size.bytes());
-    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges, buffer);
+    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges);
     let mut outboard = None;
     let mut tree = None;
     let mut create = Some(create);

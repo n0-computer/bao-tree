@@ -1,6 +1,6 @@
 [package]
 name = "bao-tree"
-version = "0.9.0"
+version = "0.9.1"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
@@ -40,6 +40,10 @@ tempfile = "3.6.0"
 warp = "0.3.5"
 proc-macro2 = "1.0.66"
 test-strategy = "0.3.1"
+serde = "1"
+clap = { version = "4", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+anyhow = "1.0.75"
 
 [[bench]]
 name = "tree_bench"
