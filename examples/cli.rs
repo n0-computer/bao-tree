@@ -22,17 +22,13 @@ use std::{
 };
 
 use anyhow::Context;
-use bao_tree::{blake3, io::round_up_to_chunks};
 use bao_tree::{
-    io::{
-        outboard::PreOrderMemOutboard,
-        sync::{encode_ranges_validated, DecodeResponseItem, DecodeResponseIter, Outboard},
-        Header, Leaf, Parent,
-    },
+    blake3,
+    io::{outboard::PreOrderMemOutboard, round_up_to_chunks, Header, Leaf, Parent},
     BlockSize, ChunkNum, ChunkRanges,
 };
+use bytes::Bytes;
 use clap::{Parser, Subcommand};
-use positioned_io::WriteAt;
 use range_collections::RangeSet2;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -156,99 +152,6 @@ macro_rules! log {
     };
 }
 
-/// Encode a part of a file, given the outboard.
-fn encode(data: &[u8], outboard: impl Outboard, ranges: ChunkRanges) -> Message {
-    let mut encoded = Vec::new();
-    encode_ranges_validated(data, &outboard, &ranges, &mut encoded).unwrap();
-    Message {
-        hash: outboard.root(),
-        ranges: ranges.clone(),
-        encoded,
-    }
-}
-
-fn decode_into_file(
-    msg: &Message,
-    mut target: std::fs::File,
-    block_size: BlockSize,
-    v: bool,
-) -> io::Result<()> {
-    let iter =
-        DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
-    let mut indent = 0;
-    for response in iter {
-        match response? {
-            DecodeResponseItem::Header(Header { size }) => {
-                log!(v, "got header claiming a size of {}", size);
-                target.set_len(size.0)?;
-            }
-            DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
-                indent = indent.max(node.level() + 1);
-                let prefix = " ".repeat((indent - node.level()) as usize);
-                log!(
-                    v,
-                    "{}got parent {:?} level {} and children {} and {}",
-                    prefix,
-                    node,
-                    node.level(),
-                    l.to_hex(),
-                    r.to_hex()
-                );
-            }
-            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                let prefix = " ".repeat(indent as usize);
-                log!(
-                    v,
-                    "{}got data at offset {} and len {}",
-                    prefix,
-                    offset,
-                    data.len()
-                );
-                target.write_at(offset.0, &data)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn decode_to_stdout(msg: &Message, block_size: BlockSize, v: bool) -> io::Result<()> {
-    let iter =
-        DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
-    let mut indent = 0;
-    for response in iter {
-        match response? {
-            DecodeResponseItem::Header(Header { size }) => {
-                log!(v, "got header claiming a size of {}", size);
-            }
-            DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
-                indent = indent.max(node.level() + 1);
-                let prefix = " ".repeat((indent - node.level()) as usize);
-                log!(
-                    v,
-                    "{}got parent {:?} level {} and children {} and {}",
-                    prefix,
-                    node,
-                    node.level(),
-                    l.to_hex(),
-                    r.to_hex()
-                );
-            }
-            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
-                let prefix = " ".repeat(indent as usize);
-                log!(
-                    v,
-                    "{}got data at offset {} and len {}",
-                    prefix,
-                    offset,
-                    data.len()
-                );
-                io::stdout().write_all(&data)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Parse a range string into a range set containing a single range
 fn parse_range(range_str: &str) -> anyhow::Result<RangeSet2<u64>> {
     let parts: Vec<&str> = range_str.split("..").collect();
@@ -275,61 +178,346 @@ fn parse_ranges(ranges: Vec<String>) -> anyhow::Result<RangeSet2<u64>> {
     Ok(ranges)
 }
 
-fn main_sync(args: Args) -> anyhow::Result<()> {
-    assert!(args.block_size <= 8);
-    let block_size = BlockSize(args.block_size);
-    let v = !args.quiet;
-    match args.command {
-        Command::Encode(EncodeArgs { file, ranges, out }) => {
-            let ranges = parse_ranges(ranges)?;
-            log!(v, "byte ranges: {:?}", ranges);
-            let ranges = round_up_to_chunks(&ranges);
-            log!(v, "chunk ranges: {:?}", ranges);
-            log!(v, "reading file");
-            let data = std::fs::read(file)?;
-            log!(v, "computing outboard");
-            let t0 = std::time::Instant::now();
-            let outboard = PreOrderMemOutboard::create(&data, block_size);
-            log!(v, "done in {:?}.", t0.elapsed());
-            log!(v, "encoding message");
-            let t0 = std::time::Instant::now();
-            let msg = encode(&data, outboard, ranges);
-            log!(
-                v,
-                "done in {:?}. {} bytes.",
-                t0.elapsed(),
-                msg.encoded.len()
-            );
-            let bytes = postcard::to_stdvec(&msg)?;
-            log!(v, "serialized message");
-            if let Some(out) = out {
-                std::fs::write(out, bytes)?;
-            } else {
-                std::io::stdout().write_all(&bytes)?;
-            }
-        }
-        Command::Decode(DecodeArgs { file, target }) => {
-            let data = std::fs::read(file)?;
-            let msg: Message = postcard::from_bytes(&data)?;
-            if let Some(target) = target {
-                let target = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .open(target)?;
-                decode_into_file(&msg, target, block_size, v)?;
-            } else {
-                decode_to_stdout(&msg, block_size, v)?;
-            }
+mod sync {
+    use bao_tree::io::sync::{DecodeResponseItem, DecodeResponseIter};
+    use positioned_io::WriteAt;
+
+    use super::*;
+
+    /// Encode a part of a file, given the outboard.
+    fn encode(
+        data: &[u8],
+        outboard: impl bao_tree::io::sync::Outboard,
+        ranges: ChunkRanges,
+    ) -> Message {
+        let mut encoded = Vec::new();
+        bao_tree::io::sync::encode_ranges_validated(data, &outboard, &ranges, &mut encoded)
+            .unwrap();
+        Message {
+            hash: outboard.root(),
+            ranges: ranges.clone(),
+            encoded,
         }
     }
-    Ok(())
+
+    fn decode_into_file(
+        msg: &Message,
+        mut target: std::fs::File,
+        block_size: BlockSize,
+        v: bool,
+    ) -> io::Result<()> {
+        let iter =
+            DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
+        let mut indent = 0;
+        for response in iter {
+            match response? {
+                DecodeResponseItem::Header(Header { size }) => {
+                    log!(v, "got header claiming a size of {}", size);
+                    target.set_len(size.0)?;
+                }
+                DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
+                    indent = indent.max(node.level() + 1);
+                    let prefix = " ".repeat((indent - node.level()) as usize);
+                    log!(
+                        v,
+                        "{}got parent {:?} level {} and children {} and {}",
+                        prefix,
+                        node,
+                        node.level(),
+                        l.to_hex(),
+                        r.to_hex()
+                    );
+                }
+                DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+                    let prefix = " ".repeat(indent as usize);
+                    log!(
+                        v,
+                        "{}got data at offset {} and len {}",
+                        prefix,
+                        offset,
+                        data.len()
+                    );
+                    target.write_at(offset.0, &data)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decode_to_stdout(msg: &Message, block_size: BlockSize, v: bool) -> io::Result<()> {
+        let iter =
+            DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
+        let mut indent = 0;
+        for response in iter {
+            match response? {
+                DecodeResponseItem::Header(Header { size }) => {
+                    log!(v, "got header claiming a size of {}", size);
+                }
+                DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
+                    indent = indent.max(node.level() + 1);
+                    let prefix = " ".repeat((indent - node.level()) as usize);
+                    log!(
+                        v,
+                        "{}got parent {:?} level {} and children {} and {}",
+                        prefix,
+                        node,
+                        node.level(),
+                        l.to_hex(),
+                        r.to_hex()
+                    );
+                }
+                DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+                    let prefix = " ".repeat(indent as usize);
+                    log!(
+                        v,
+                        "{}got data at offset {} and len {}",
+                        prefix,
+                        offset,
+                        data.len()
+                    );
+                    io::stdout().write_all(&data)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn main(args: Args) -> anyhow::Result<()> {
+        assert!(args.block_size <= 8);
+        let block_size = BlockSize(args.block_size);
+        let v = !args.quiet;
+        match args.command {
+            Command::Encode(EncodeArgs { file, ranges, out }) => {
+                let ranges = parse_ranges(ranges)?;
+                log!(v, "byte ranges: {:?}", ranges);
+                let ranges = round_up_to_chunks(&ranges);
+                log!(v, "chunk ranges: {:?}", ranges);
+                log!(v, "reading file");
+                let data = std::fs::read(file)?;
+                log!(v, "computing outboard");
+                let t0 = std::time::Instant::now();
+                let outboard = PreOrderMemOutboard::create(&data, block_size);
+                log!(v, "done in {:?}.", t0.elapsed());
+                log!(v, "encoding message");
+                let t0 = std::time::Instant::now();
+                let msg = encode(&data, outboard, ranges);
+                log!(
+                    v,
+                    "done in {:?}. {} bytes.",
+                    t0.elapsed(),
+                    msg.encoded.len()
+                );
+                let bytes = postcard::to_stdvec(&msg)?;
+                log!(v, "serialized message");
+                if let Some(out) = out {
+                    std::fs::write(out, bytes)?;
+                } else {
+                    std::io::stdout().write_all(&bytes)?;
+                }
+            }
+            Command::Decode(DecodeArgs { file, target }) => {
+                let data = std::fs::read(file)?;
+                let msg: Message = postcard::from_bytes(&data)?;
+                if let Some(target) = target {
+                    let target = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .open(target)?;
+                    decode_into_file(&msg, target, block_size, v)?;
+                } else {
+                    decode_to_stdout(&msg, block_size, v)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+mod fsm {
+    use bao_tree::io::fsm::{encode_ranges_validated, BaoContentItem, ResponseDecoderReadingNext};
+    use iroh_io::AsyncSliceWriter;
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+
+    async fn encode(
+        data: Bytes,
+        outboard: impl bao_tree::io::fsm::Outboard,
+        ranges: ChunkRanges,
+    ) -> anyhow::Result<Message> {
+        let mut encoded = Vec::new();
+        let hash = outboard.root();
+        encode_ranges_validated(data, outboard, &ranges, &mut encoded).await?;
+        Ok(Message {
+            hash,
+            ranges: ranges.clone(),
+            encoded,
+        })
+    }
+
+    async fn decode_into_file(
+        msg: Message,
+        mut target: impl AsyncSliceWriter,
+        block_size: BlockSize,
+        v: bool,
+    ) -> io::Result<()> {
+        let fsm = bao_tree::io::fsm::ResponseDecoderStart::new(
+            msg.hash,
+            msg.ranges,
+            block_size,
+            Cursor::new(&msg.encoded),
+        );
+        let (mut reading, size) = fsm.next().await?;
+        log!(v, "got header claiming a size of {}", size);
+        let mut indent = 0;
+        loop {
+            match reading.next().await {
+                ResponseDecoderReadingNext::More((reading1, res)) => {
+                    match res? {
+                        BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
+                            indent = indent.max(node.level() + 1);
+                            let prefix = " ".repeat((indent - node.level()) as usize);
+                            log!(
+                                v,
+                                "{}got parent {:?} level {} and children {} and {}",
+                                prefix,
+                                node,
+                                node.level(),
+                                l.to_hex(),
+                                r.to_hex()
+                            );
+                        }
+                        BaoContentItem::Leaf(Leaf { offset, data }) => {
+                            let prefix = " ".repeat(indent as usize);
+                            log!(
+                                v,
+                                "{}got data at offset {} and len {}",
+                                prefix,
+                                offset,
+                                data.len()
+                            );
+                            target.write_at(offset.0, &data).await?;
+                        }
+                    }
+                    reading = reading1;
+                }
+                ResponseDecoderReadingNext::Done(_inner) => {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn decode_to_stdout(msg: Message, block_size: BlockSize, v: bool) -> io::Result<()> {
+        let fsm = bao_tree::io::fsm::ResponseDecoderStart::new(
+            msg.hash,
+            msg.ranges,
+            block_size,
+            Cursor::new(&msg.encoded),
+        );
+        let (mut reading, size) = fsm.next().await?;
+        log!(v, "got header claiming a size of {}", size);
+        let mut indent = 0;
+        loop {
+            match reading.next().await {
+                ResponseDecoderReadingNext::More((reading1, res)) => {
+                    match res? {
+                        BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
+                            indent = indent.max(node.level() + 1);
+                            let prefix = " ".repeat((indent - node.level()) as usize);
+                            log!(
+                                v,
+                                "{}got parent {:?} level {} and children {} and {}",
+                                prefix,
+                                node,
+                                node.level(),
+                                l.to_hex(),
+                                r.to_hex()
+                            );
+                        }
+                        BaoContentItem::Leaf(Leaf { offset, data }) => {
+                            let prefix = " ".repeat(indent as usize);
+                            log!(
+                                v,
+                                "{}got data at offset {} and len {}",
+                                prefix,
+                                offset,
+                                data.len()
+                            );
+                            tokio::io::stdout().write_all(&data).await?;
+                        }
+                    }
+                    reading = reading1;
+                }
+                ResponseDecoderReadingNext::Done(_inner) => {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn main(args: Args) -> anyhow::Result<()> {
+        assert!(args.block_size <= 8);
+        let block_size = BlockSize(args.block_size);
+        let v = !args.quiet;
+        match args.command {
+            Command::Encode(EncodeArgs { file, ranges, out }) => {
+                let ranges = parse_ranges(ranges)?;
+                log!(v, "byte ranges: {:?}", ranges);
+                let ranges = round_up_to_chunks(&ranges);
+                log!(v, "chunk ranges: {:?}", ranges);
+                log!(v, "reading file");
+                let data = Bytes::from(std::fs::read(file)?);
+                log!(v, "computing outboard");
+                let t0 = std::time::Instant::now();
+                let outboard = PreOrderMemOutboard::create(&data, block_size);
+                log!(v, "done in {:?}.", t0.elapsed());
+                log!(v, "encoding message");
+                let t0 = std::time::Instant::now();
+                let msg = encode(data, outboard, ranges).await?;
+                log!(
+                    v,
+                    "done in {:?}. {} bytes.",
+                    t0.elapsed(),
+                    msg.encoded.len()
+                );
+                let bytes = postcard::to_stdvec(&msg)?;
+                log!(v, "serialized message");
+                if let Some(out) = out {
+                    tokio::fs::write(out, bytes).await?;
+                } else {
+                    tokio::io::stdout().write_all(&bytes).await?;
+                }
+            }
+            Command::Decode(DecodeArgs { file, target }) => {
+                let data = std::fs::read(file)?;
+                let msg: Message = postcard::from_bytes(&data)?;
+                if let Some(target) = target {
+                    let target = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .open(target)?;
+                    let target = iroh_io::File::from_std(target);
+                    decode_into_file(msg, target, block_size, v).await?;
+                } else {
+                    decode_to_stdout(msg, block_size, v).await?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if args.r#async {
-        todo!()
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(fsm::main(args))
     } else {
-        main_sync(args)
+        sync::main(args)
     }
 }

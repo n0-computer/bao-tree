@@ -19,3 +19,13 @@ E.g. you can ask for bytes `[0..1000,5000..6000]` in a single query.
 
 It allows to define both pre- and post order outboard formats. Post order outboard
 formats have advantages for synchronizing append only files.
+
+# Example
+
+Run
+
+```
+cargo run --example cli
+```
+
+to see a cli that supports encoding and decoding
