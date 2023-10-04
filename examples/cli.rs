@@ -366,41 +366,34 @@ mod fsm {
         let (mut reading, size) = fsm.next().await?;
         log!(v, "got header claiming a size of {}", size);
         let mut indent = 0;
-        loop {
-            match reading.next().await {
-                ResponseDecoderReadingNext::More((reading1, res)) => {
-                    match res? {
-                        BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
-                            indent = indent.max(node.level() + 1);
-                            let prefix = " ".repeat((indent - node.level()) as usize);
-                            log!(
-                                v,
-                                "{}got parent {:?} level {} and children {} and {}",
-                                prefix,
-                                node,
-                                node.level(),
-                                l.to_hex(),
-                                r.to_hex()
-                            );
-                        }
-                        BaoContentItem::Leaf(Leaf { offset, data }) => {
-                            let prefix = " ".repeat(indent as usize);
-                            log!(
-                                v,
-                                "{}got data at offset {} and len {}",
-                                prefix,
-                                offset,
-                                data.len()
-                            );
-                            target.write_at(offset.0, &data).await?;
-                        }
-                    }
-                    reading = reading1;
+        while let ResponseDecoderReadingNext::More((reading1, res)) = reading.next().await {
+            match res? {
+                BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
+                    indent = indent.max(node.level() + 1);
+                    let prefix = " ".repeat((indent - node.level()) as usize);
+                    log!(
+                        v,
+                        "{}got parent {:?} level {} and children {} and {}",
+                        prefix,
+                        node,
+                        node.level(),
+                        l.to_hex(),
+                        r.to_hex()
+                    );
                 }
-                ResponseDecoderReadingNext::Done(_inner) => {
-                    break;
+                BaoContentItem::Leaf(Leaf { offset, data }) => {
+                    let prefix = " ".repeat(indent as usize);
+                    log!(
+                        v,
+                        "{}got data at offset {} and len {}",
+                        prefix,
+                        offset,
+                        data.len()
+                    );
+                    target.write_at(offset.0, &data).await?;
                 }
             }
+            reading = reading1;
         }
         Ok(())
     }
@@ -411,41 +404,34 @@ mod fsm {
         let (mut reading, size) = fsm.next().await?;
         log!(v, "got header claiming a size of {}", size);
         let mut indent = 0;
-        loop {
-            match reading.next().await {
-                ResponseDecoderReadingNext::More((reading1, res)) => {
-                    match res? {
-                        BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
-                            indent = indent.max(node.level() + 1);
-                            let prefix = " ".repeat((indent - node.level()) as usize);
-                            log!(
-                                v,
-                                "{}got parent {:?} level {} and children {} and {}",
-                                prefix,
-                                node,
-                                node.level(),
-                                l.to_hex(),
-                                r.to_hex()
-                            );
-                        }
-                        BaoContentItem::Leaf(Leaf { offset, data }) => {
-                            let prefix = " ".repeat(indent as usize);
-                            log!(
-                                v,
-                                "{}got data at offset {} and len {}",
-                                prefix,
-                                offset,
-                                data.len()
-                            );
-                            tokio::io::stdout().write_all(&data).await?;
-                        }
-                    }
-                    reading = reading1;
+        while let ResponseDecoderReadingNext::More((reading1, res)) = reading.next().await {
+            match res? {
+                BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
+                    indent = indent.max(node.level() + 1);
+                    let prefix = " ".repeat((indent - node.level()) as usize);
+                    log!(
+                        v,
+                        "{}got parent {:?} level {} and children {} and {}",
+                        prefix,
+                        node,
+                        node.level(),
+                        l.to_hex(),
+                        r.to_hex()
+                    );
                 }
-                ResponseDecoderReadingNext::Done(_inner) => {
-                    break;
+                BaoContentItem::Leaf(Leaf { offset, data }) => {
+                    let prefix = " ".repeat(indent as usize);
+                    log!(
+                        v,
+                        "{}got data at offset {} and len {}",
+                        prefix,
+                        offset,
+                        data.len()
+                    );
+                    tokio::io::stdout().write_all(&data).await?;
                 }
             }
+            reading = reading1;
         }
         Ok(())
     }
