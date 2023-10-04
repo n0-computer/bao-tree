@@ -179,7 +179,7 @@ fn parse_ranges(ranges: Vec<String>) -> anyhow::Result<RangeSet2<u64>> {
 }
 
 mod sync {
-    use bao_tree::io::sync::{DecodeResponseItem, DecodeResponseIter};
+    use bao_tree::io::sync::{DecodeResponseItem, DecodeResponseIter, Outboard, encode_ranges_validated};
     use positioned_io::WriteAt;
 
     use super::*;
@@ -187,11 +187,11 @@ mod sync {
     /// Encode a part of a file, given the outboard.
     fn encode(
         data: &[u8],
-        outboard: impl bao_tree::io::sync::Outboard,
+        outboard: impl Outboard,
         ranges: ChunkRanges,
     ) -> Message {
         let mut encoded = Vec::new();
-        bao_tree::io::sync::encode_ranges_validated(data, &outboard, &ranges, &mut encoded)
+        encode_ranges_validated(data, &outboard, &ranges, &mut encoded)
             .unwrap();
         Message {
             hash: outboard.root(),
@@ -334,7 +334,7 @@ mod sync {
 }
 
 mod fsm {
-    use bao_tree::io::fsm::{encode_ranges_validated, BaoContentItem, ResponseDecoderReadingNext};
+    use bao_tree::io::fsm::{encode_ranges_validated, BaoContentItem, ResponseDecoderReadingNext, ResponseDecoderStart, Outboard};
     use iroh_io::AsyncSliceWriter;
     use tokio::io::AsyncWriteExt;
 
@@ -342,7 +342,7 @@ mod fsm {
 
     async fn encode(
         data: Bytes,
-        outboard: impl bao_tree::io::fsm::Outboard,
+        outboard: impl Outboard,
         ranges: ChunkRanges,
     ) -> anyhow::Result<Message> {
         let mut encoded = Vec::new();
@@ -361,7 +361,7 @@ mod fsm {
         block_size: BlockSize,
         v: bool,
     ) -> io::Result<()> {
-        let fsm = bao_tree::io::fsm::ResponseDecoderStart::new(
+        let fsm = ResponseDecoderStart::new(
             msg.hash,
             msg.ranges,
             block_size,
@@ -410,7 +410,7 @@ mod fsm {
     }
 
     async fn decode_to_stdout(msg: Message, block_size: BlockSize, v: bool) -> io::Result<()> {
-        let fsm = bao_tree::io::fsm::ResponseDecoderStart::new(
+        let fsm = ResponseDecoderStart::new(
             msg.hash,
             msg.ranges,
             block_size,
