@@ -179,20 +179,17 @@ fn parse_ranges(ranges: Vec<String>) -> anyhow::Result<RangeSet2<u64>> {
 }
 
 mod sync {
-    use bao_tree::io::sync::{DecodeResponseItem, DecodeResponseIter, Outboard, encode_ranges_validated};
+    use bao_tree::io::sync::{
+        encode_ranges_validated, DecodeResponseItem, DecodeResponseIter, Outboard,
+    };
     use positioned_io::WriteAt;
 
     use super::*;
 
     /// Encode a part of a file, given the outboard.
-    fn encode(
-        data: &[u8],
-        outboard: impl Outboard,
-        ranges: ChunkRanges,
-    ) -> Message {
+    fn encode(data: &[u8], outboard: impl Outboard, ranges: ChunkRanges) -> Message {
         let mut encoded = Vec::new();
-        encode_ranges_validated(data, &outboard, &ranges, &mut encoded)
-            .unwrap();
+        encode_ranges_validated(data, &outboard, &ranges, &mut encoded).unwrap();
         Message {
             hash: outboard.root(),
             ranges: ranges.clone(),
@@ -334,7 +331,10 @@ mod sync {
 }
 
 mod fsm {
-    use bao_tree::io::fsm::{encode_ranges_validated, BaoContentItem, ResponseDecoderReadingNext, ResponseDecoderStart, Outboard};
+    use bao_tree::io::fsm::{
+        encode_ranges_validated, BaoContentItem, Outboard, ResponseDecoderReadingNext,
+        ResponseDecoderStart,
+    };
     use iroh_io::AsyncSliceWriter;
     use tokio::io::AsyncWriteExt;
 
@@ -361,12 +361,8 @@ mod fsm {
         block_size: BlockSize,
         v: bool,
     ) -> io::Result<()> {
-        let fsm = ResponseDecoderStart::new(
-            msg.hash,
-            msg.ranges,
-            block_size,
-            Cursor::new(&msg.encoded),
-        );
+        let fsm =
+            ResponseDecoderStart::new(msg.hash, msg.ranges, block_size, Cursor::new(&msg.encoded));
         let (mut reading, size) = fsm.next().await?;
         log!(v, "got header claiming a size of {}", size);
         let mut indent = 0;
@@ -410,12 +406,8 @@ mod fsm {
     }
 
     async fn decode_to_stdout(msg: Message, block_size: BlockSize, v: bool) -> io::Result<()> {
-        let fsm = ResponseDecoderStart::new(
-            msg.hash,
-            msg.ranges,
-            block_size,
-            Cursor::new(&msg.encoded),
-        );
+        let fsm =
+            ResponseDecoderStart::new(msg.hash, msg.ranges, block_size, Cursor::new(&msg.encoded));
         let (mut reading, size) = fsm.next().await?;
         log!(v, "got header claiming a size of {}", size);
         let mut indent = 0;

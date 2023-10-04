@@ -18,7 +18,7 @@ use bytes::{Bytes, BytesMut};
 use futures::{future::LocalBoxFuture, Future, FutureExt};
 use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{
     io::{
@@ -489,21 +489,19 @@ pub async fn encode_ranges<D, O, W>(
 where
     D: AsyncSliceReader,
     O: Outboard,
-    W: AsyncWrite + Unpin,
+    W: AsyncStreamWriter,
 {
     let mut encoded = encoded;
     let tree = outboard.tree();
     // write header
-    encoded
-        .write_all(tree.size.0.to_le_bytes().as_slice())
-        .await?;
+    encoded.write(tree.size.0.to_le_bytes().as_slice()).await?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
                 let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
                 let pair = combine_hash_pair(&l_hash, &r_hash);
                 encoded
-                    .write_all(&pair)
+                    .write(&pair)
                     .await
                     .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
@@ -513,7 +511,7 @@ where
                 let start = start_chunk.to_bytes();
                 let bytes = data.read_at(start.0, size).await?;
                 encoded
-                    .write_all(&bytes)
+                    .write(&bytes)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
