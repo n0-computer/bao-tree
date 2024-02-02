@@ -8,6 +8,7 @@ repository = "https://github.com/n0-computer/bao-tree"
 edition = "2021"
 keywords = ["hashing"]
 categories = ["data-structures"]
+rust-version = "1.75"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
