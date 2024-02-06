@@ -576,7 +576,13 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
             // The node is either not fully within the query range, or it's level is above
             // min_full_level. In this case we need to recurse.
             let (l_ranges, r_ranges) = split(ranges, node.mid());
-            println!("split {:?} {} {:?} {:?}", ranges, node.mid(), l_ranges, r_ranges);
+            println!(
+                "split {:?} {} {:?} {:?}",
+                ranges,
+                node.mid(),
+                l_ranges,
+                r_ranges
+            );
             // emit right child first, so it gets yielded last
             if !r_ranges.is_empty() {
                 let r = shifted.right_descendant(self.shifted_filled_size).unwrap();

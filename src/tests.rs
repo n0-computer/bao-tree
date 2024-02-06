@@ -921,12 +921,12 @@ fn sub_chunk_group_query() {
     let ranges = ChunkRanges::from(ChunkNum(16)..ChunkNum(24));
     let items = ResponseIter::new(tree, ranges)
         .filter_map(|x| match x {
-                BaoChunk::Leaf { .. } => Some(x),
-                _ => None,
-            }
-        )
+            BaoChunk::Leaf { .. } => Some(x),
+            _ => None,
+        })
         .collect::<Vec<_>>();
-    println!("{:?}", items);
+    // this should be just 1 leaf of size 8 chunks, but it gets split into 4
+    assert_eq!(items.len(), 1);
 }
 
 proptest! {
