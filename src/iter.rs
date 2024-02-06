@@ -550,7 +550,10 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
         debug_assert!(!ranges.is_empty());
         let node = shifted.subtract_block_size(tree.block_size.0);
         // we don't want to recurse if the node is full and below the minimum level
-        let query_leaf = ranges.is_all() && node.level() < self.min_full_level as u32;
+        let ranges_is_all = ranges.is_all();
+        println!("{:?} {}", ranges, node.level());
+        let below_min_full_level = node.level() < self.min_full_level as u32;
+        let query_leaf = ranges_is_all && below_min_full_level;
         // check if the node is the root by comparing the shifted node to the shifted root
         let is_root = shifted == self.shifted_root;
         let chunk_range = node.chunk_range();
@@ -573,6 +576,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
             // The node is either not fully within the query range, or it's level is above
             // min_full_level. In this case we need to recurse.
             let (l_ranges, r_ranges) = split(ranges, node.mid());
+            println!("split {:?} {} {:?} {:?}", ranges, node.mid(), l_ranges, r_ranges);
             // emit right child first, so it gets yielded last
             if !r_ranges.is_empty() {
                 let r = shifted.right_descendant(self.shifted_filled_size).unwrap();
