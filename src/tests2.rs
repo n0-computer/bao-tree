@@ -7,6 +7,7 @@
 //! There is a test called <testname>_cases that calls the test with a few hardcoded values, either
 //! handcrafted or from a previous failure of a proptest.
 use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
 use proptest::prelude::*;
 use proptest::strategy::{Just, Strategy};
 use range_collections::{RangeSet2, RangeSetRef};
@@ -252,6 +253,25 @@ fn validate_outboard_sync_pos_impl(tree: BaoTree) {
     let expected = ChunkRanges::from(..outboard.tree().chunks());
     let actual = valid_ranges_sync(&outboard);
     assert_eq!(expected, actual)
+}
+
+async fn valid_file_ranges_test_impl() {
+    let mut data = make_test_data(1000000);
+    let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
+    let ranges = ChunkRanges::from(ChunkNum(0)..ChunkNum(120));
+    data[32768] = 0;
+    let data = Bytes::from(data);
+    let mut stream = crate::io::fsm::valid_file_ranges(outboard, data, &ranges);
+    while let Some(item) = stream.next().await {
+        let item = item.unwrap();
+        println!("{:?}", item);
+    }
+}
+
+/// range is a range of chunks. Just using u64 for convenience in tests
+#[test]
+fn valid_file_ranges_fsm() {
+    futures::executor::block_on(valid_file_ranges_test_impl())
 }
 
 #[proptest]
