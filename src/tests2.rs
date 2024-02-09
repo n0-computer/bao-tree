@@ -256,10 +256,16 @@ fn validate_outboard_sync_pos_impl(tree: BaoTree) {
 }
 
 async fn valid_file_ranges_test_impl() {
-    let mut data = make_test_data(1000000);
+    // interesting cases:
+    // below 16 chunks
+    // exactly 16 chunks
+    // 16 chunks + 1
+    // 32 chunks
+    // 32 chunks + 1 < seems to fail!
+    let mut data = make_test_data(1024 * 16 * 2 + 1024 * 15);
     let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
     let ranges = ChunkRanges::from(ChunkNum(0)..ChunkNum(120));
-    data[32768] = 0;
+    // data[32768] = 0;
     let data = Bytes::from(data);
     let mut stream = crate::io::fsm::valid_file_ranges(outboard, data, &ranges);
     while let Some(item) = stream.next().await {

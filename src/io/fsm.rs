@@ -769,21 +769,7 @@ mod validate {
         D: AsyncSliceReader + 'static,
     {
         Gen::new(move |co| async move {
-            let tree = outboard.tree();
-            let ranges = truncate_ranges(ranges, tree.size());
-            let root_hash = outboard.root();
-            let (shifted_root, shifted_filled_size) = tree.shifted();
-            let mut validator = RecursiveDataValidator {
-                tree,
-                shifted_filled_size,
-                outboard,
-                data,
-                co: &co,
-            };
-
-            if let Err(cause) = validator
-                .validate_rec(&root_hash, shifted_root, true, ranges)
-                .await
+            if let Err(cause) = RecursiveDataValidator::validate(outboard, data, ranges, &co).await
             {
                 co.yield_(Err(cause)).await;
             }
@@ -799,6 +785,38 @@ mod validate {
     }
 
     impl<'a, O: Outboard, D: AsyncSliceReader> RecursiveDataValidator<'a, O, D> {
+        async fn validate(
+            outboard: O,
+            data: D,
+            ranges: &ChunkRangesRef,
+            co: &Co<io::Result<Range<ChunkNum>>>,
+        ) -> io::Result<()> {
+            let tree = outboard.tree();
+            if tree.blocks().0 == 1 {
+                // special case for a tree that fits in one block / chunk group
+                let mut data = data;
+                let data = data.read_at(0, tree.size().to_usize()).await?;
+                let actual = hash_subtree(0, &data, true);
+                if actual == outboard.root() {
+                    co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
+                }
+                return Ok(());
+            }
+            let ranges = truncate_ranges(ranges, tree.size());
+            let root_hash = outboard.root();
+            let (shifted_root, shifted_filled_size) = tree.shifted();
+            let mut validator = RecursiveDataValidator {
+                tree,
+                shifted_filled_size,
+                outboard,
+                data,
+                co: &co,
+            };
+            validator
+                .validate_rec(&root_hash, shifted_root, true, ranges)
+                .await
+        }
+
         fn validate_rec<'b>(
             &'b mut self,
             parent_hash: &'b blake3::Hash,
@@ -828,7 +846,8 @@ mod validate {
                         let l_range = self.tree.byte_range(l);
                         let l_len = (l_range.end - l_range.start).to_usize();
                         let data = self.data.read_at(l_range.start.0, l_len).await?;
-                        let actual = hash_subtree(l_range.start.full_chunks().0, &data, is_root);
+                        // is_root is always false because the case of a single chunk group is handled before calling this function
+                        let actual = hash_subtree(l_range.start.full_chunks().0, &data, false);
                         if actual == l_hash {
                             // yield the left range
                             self.co
@@ -841,7 +860,7 @@ mod validate {
                         let r_range = self.tree.byte_range(r);
                         let r_len = (r_range.end - r_range.start).to_usize();
                         let data = self.data.read_at(r_range.start.0, r_len).await?;
-                        let actual = hash_subtree(r_range.start.full_chunks().0, &data, is_root);
+                        let actual = hash_subtree(r_range.start.full_chunks().0, &data, false);
                         if actual == r_hash {
                             // yield the right range
                             self.co
