@@ -90,10 +90,8 @@ impl<'a> Iterator for PreOrderPartialIterRef<'a> {
             let node = shifted.subtract_block_size(tree.block_size.0);
             let is_half_leaf = !tree.is_persisted(node);
             let (l_ranges, r_ranges) = if !is_half_leaf {
-                // the middle chunk of the node
-                let mid = node.mid();
                 // split the ranges into left and right
-                split(ranges, mid)
+                split(ranges, node)
             } else {
                 (ranges, ranges)
             };
@@ -551,7 +549,6 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
         let node = shifted.subtract_block_size(tree.block_size.0);
         // we don't want to recurse if the node is full and below the minimum level
         let ranges_is_all = ranges.is_all();
-        println!("{:?} {}", ranges, node.level());
         let below_min_full_level = node.level() < self.min_full_level as u32;
         let query_leaf = ranges_is_all && below_min_full_level;
         // check if the node is the root by comparing the shifted node to the shifted root
@@ -575,14 +572,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
         } else if !shifted.is_leaf() {
             // The node is either not fully within the query range, or it's level is above
             // min_full_level. In this case we need to recurse.
-            let (l_ranges, r_ranges) = split(ranges, node.mid());
-            println!(
-                "split {:?} {} {:?} {:?}",
-                ranges,
-                node.mid(),
-                l_ranges,
-                r_ranges
-            );
+            let (l_ranges, r_ranges) = split(ranges, node);
             // emit right child first, so it gets yielded last
             if !r_ranges.is_empty() {
                 let r = shifted.right_descendant(self.shifted_filled_size).unwrap();
@@ -622,7 +612,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
                     ranges,
                 })
             } else {
-                let (l_ranges, r_ranges) = split(ranges, node.mid());
+                let (l_ranges, r_ranges) = split(ranges, node);
                 // emit right range first, so it gets yielded last
                 if !r_ranges.is_empty() {
                     self.buffer.push(BaoChunk::Leaf {

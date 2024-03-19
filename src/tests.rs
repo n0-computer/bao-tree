@@ -557,13 +557,11 @@ fn iterate_part_preorder_reference<'a>(
             return;
         }
         let is_half_leaf = !tree.is_relevant_for_outboard(node);
-        // the middle chunk of the node
-        let mid = node.mid();
         // check if the node is fully included
         let full = ranges.is_all();
         // split the ranges into left and right
         let (l_ranges, r_ranges) = if !is_half_leaf {
-            split(ranges, mid)
+            split(ranges, node)
         } else {
             (ranges, ranges)
         };
@@ -925,7 +923,6 @@ fn sub_chunk_group_query() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    // this should be just 1 leaf of size 8 chunks, but it gets split into 4
     assert_eq!(items.len(), 1);
 }
 

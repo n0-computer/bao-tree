@@ -652,18 +652,43 @@ fn pre_order_offset_loop(node: u64, len: u64) -> u64 {
     left - (left.count_ones() as u64) + parent_count
 }
 
-/// Split and canonicalize a range set at a given chunk number
+/// Split a range set into range sets for the left and right half of a node
 ///
-/// Compared to [RangeSetRef::split], this function will canonicalize the second range
+/// Requires that the range set is minimal, it should not contain any redundant
+/// boundaries outside of the range of the node.
+///
+/// Produces two range sets that are also minimal. A range set for left or right
+/// that covers the entire range of the node will be replaced with the set of
+/// all chunks, so an is_all() check can be used to check if further recursion
+/// is necessary.
 pub(crate) fn split(
     ranges: &RangeSetRef<ChunkNum>,
+    node: TreeNode,
+) -> (&RangeSetRef<ChunkNum>, &RangeSetRef<ChunkNum>) {
+    let mid = node.mid();
+    let start = node.chunk_range().start;
+    split_inner(ranges, start, mid)
+}
+
+/// The actual implementation of split. This is used from split and from the
+/// recursive reference implementation.
+pub(crate) fn split_inner(
+    ranges: &RangeSetRef<ChunkNum>,
+    start: ChunkNum,
     mid: ChunkNum,
 ) -> (&RangeSetRef<ChunkNum>, &RangeSetRef<ChunkNum>) {
-    let (a, mut b) = ranges.split(mid);
+    let (mut a, mut b) = ranges.split(mid);
     // check that a does not contain a redundant boundary at or after mid
     debug_assert!(a.boundaries().last() < Some(&mid));
-    // Replace b with the canonicalized version if it starts at or before mid.
-    // This is necessary to be able to check it with RangeSetRef::is_all()
+    // Replace a with the canonicalized version if it is a single interval that
+    // starts at or before start. This is necessary to be able to check it with
+    // RangeSetRef::is_all()
+    if a.boundaries().len() == 1 && a.boundaries()[0] <= start {
+        a = RangeSetRef::new(&[ChunkNum(0)]).unwrap();
+    }
+    // Replace b with the canonicalized version if it is a single interval that
+    // starts at or before mid. This is necessary to be able to check it with
+    // RangeSetRef::is_all()
     if b.boundaries().len() == 1 && b.boundaries()[0] <= mid {
         b = RangeSetRef::new(&[ChunkNum(0)]).unwrap();
     }
