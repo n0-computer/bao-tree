@@ -918,10 +918,7 @@ fn sub_chunk_group_query() {
     let tree = BaoTree::new(ByteNum(1024 * 32), BlockSize(4));
     let ranges = ChunkRanges::from(ChunkNum(16)..ChunkNum(24));
     let items = ResponseIter::new(tree, ranges)
-        .filter_map(|x| match x {
-            BaoChunk::Leaf { .. } => Some(x),
-            _ => None,
-        })
+        .filter(|x| matches!(x, BaoChunk::Leaf { .. }))
         .collect::<Vec<_>>();
     assert_eq!(items.len(), 1);
 }

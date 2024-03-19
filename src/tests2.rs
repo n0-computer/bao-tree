@@ -8,7 +8,6 @@
 //! handcrafted or from a previous failure of a proptest.
 use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
-use proptest::strategy::{Just, Strategy};
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::ops::Range;

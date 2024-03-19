@@ -655,7 +655,8 @@ fn pre_order_offset_loop(node: u64, len: u64) -> u64 {
 /// Split a range set into range sets for the left and right half of a node
 ///
 /// Requires that the range set is minimal, it should not contain any redundant
-/// boundaries outside of the range of the node.
+/// boundaries outside of the range of the node. The values outside of the node
+/// range don't matter, so any change outside the range must be omitted.
 ///
 /// Produces two range sets that are also minimal. A range set for left or right
 /// that covers the entire range of the node will be replaced with the set of

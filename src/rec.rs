@@ -459,10 +459,13 @@ mod tests {
         ops::Range,
     };
 
-    use crate::{BlockSize, ByteNum, ChunkRanges};
+    use crate::{
+        rec::{
+            bao_encode_reference, bao_outboard_reference, encode_ranges_reference, make_test_data,
+        },
+        BlockSize, ByteNum, ChunkRanges,
+    };
     use proptest::prelude::*;
-
-    use super::*;
 
     fn size_and_slice() -> impl Strategy<Value = (usize, Range<usize>)> {
         (1..100000usize)
