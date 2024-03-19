@@ -119,6 +119,11 @@ impl BaoTree {
         self.size
     }
 
+    /// The block size of the tree
+    pub fn block_size(&self) -> BlockSize {
+        self.block_size
+    }
+
     /// Given a tree of size `size` and block size `block_size`,
     /// compute the root node and the number of nodes for a shifted tree.
     pub(crate) fn shifted(&self) -> (TreeNode, TreeNode) {
