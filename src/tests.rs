@@ -11,6 +11,7 @@ use range_collections::RangeSet2;
 use crate::{
     assert_tuple_eq, blake3,
     io::{
+        full_chunk_groups,
         outboard::PreOrderMemOutboard,
         sync::{DecodeResponseItem, Outboard},
         Leaf,
@@ -910,6 +911,32 @@ fn encode_last_chunk_cases() {
     ];
     for (size, block_size) in cases {
         assert_tuple_eq!(encode_last_chunk_impl(size, block_size));
+    }
+}
+
+#[test]
+fn test_full_chunk_groups() {
+    let cases = vec![
+        (
+            ChunkRanges::from(ChunkNum(8)..),
+            ChunkRanges::from(ChunkNum(16)..),
+        ),
+        (
+            ChunkRanges::from(ChunkNum(8)..ChunkNum(16)),
+            ChunkRanges::empty(),
+        ),
+        (
+            ChunkRanges::from(ChunkNum(11)..ChunkNum(34)),
+            ChunkRanges::from(ChunkNum(16)..ChunkNum(32)),
+        ),
+        (
+            ChunkRanges::from(..ChunkNum(35)),
+            ChunkRanges::from(..ChunkNum(32)),
+        ),
+    ];
+    for (case, expected) in cases {
+        let res = full_chunk_groups(&case, BlockSize(4));
+        assert_eq!(res, expected);
     }
 }
 

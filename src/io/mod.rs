@@ -1,5 +1,5 @@
 //! Implementation of bao streaming for std io and tokio io
-use crate::{blake3, BaoTree, BlockSize, ByteNum, ChunkRanges, TreeNode};
+use crate::{blake3, BaoTree, BlockSize, ByteNum, ChunkNum, ChunkRanges, TreeNode};
 use bytes::Bytes;
 
 mod error;
@@ -73,6 +73,38 @@ pub fn round_up_to_chunks(ranges: &RangeSetRef<u64>) -> ChunkRanges {
                 res |= ChunkRanges::from(
                     ByteNum(*range.start).full_chunks()..ByteNum(*range.end).chunks(),
                 )
+            }
+        }
+    }
+    res
+}
+
+/// Given a range set of byte ranges, round it up to chunk groups
+/// Given a range set of chunk ranges, return the full chunk groups.
+///
+/// If we store outboard data at a level of granularity of `block_size`, we can only
+/// share full chunk groups because we don't have proofs for anything below a chunk group.
+pub fn full_chunk_groups(ranges: &ChunkRanges, block_size: BlockSize) -> ChunkRanges {
+    fn floor(value: u64, shift: u8) -> u64 {
+        value >> shift << shift
+    }
+
+    fn ceil(value: u64, shift: u8) -> u64 {
+        (value + (1 << shift) - 1) >> shift << shift
+    }
+    let mut res = ChunkRanges::empty();
+    for item in ranges.iter() {
+        match item {
+            RangeSetRange::RangeFrom(range) => {
+                let start = ceil(range.start.0, block_size.0);
+                res |= ChunkRanges::from(ChunkNum(start)..)
+            }
+            RangeSetRange::Range(range) => {
+                let start = ceil(range.start.0, block_size.0);
+                let end = floor(range.end.0, block_size.0);
+                if start < end {
+                    res |= ChunkRanges::from(ChunkNum(start)..ChunkNum(end))
+                }
             }
         }
     }
