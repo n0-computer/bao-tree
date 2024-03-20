@@ -23,10 +23,12 @@ futures = { version = "0.3", optional = true }
 self_cell = { version = "1" }
 iroh-io = { version = "0.4.0", features = ["tokio-io"], default_features = false, optional = true }
 positioned-io = { version = "0.3.1", default_features = false }
+genawaiter = { version = "0.99.1", features = ["futures03"], optional = true }
 
 [features]
 tokio_fsm = ["tokio", "futures", "iroh-io"]
-default = ["tokio_fsm"]
+validate = ["genawaiter"]
+default = ["tokio_fsm", "validate"]
 
 [dev-dependencies]
 hex = "0.4.3"
