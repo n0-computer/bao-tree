@@ -2,10 +2,7 @@
 //!
 //! Encocding is used to compute hashes, decoding is only used in tests as a
 //! reference implementation.
-use crate::{blake3, split, ByteNum, ChunkNum, ChunkRanges, ChunkRangesRef};
-
-#[cfg(test)]
-use crate::{iter::BaoChunk, BaoTree, BlockSize, TreeNode};
+use crate::{blake3, split_inner, ByteNum, ChunkNum, ChunkRanges, ChunkRangesRef};
 
 /// Given a set of chunk ranges, adapt them for a tree of the given size.
 ///
@@ -122,7 +119,7 @@ pub(crate) fn encode_selected_rec(
         let mid = chunks / 2;
         let mid_bytes = mid * CHUNK_LEN;
         let mid_chunk = start_chunk + (mid as u64);
-        let (l_ranges, r_ranges) = split(query, mid_chunk);
+        let (l_ranges, r_ranges) = split_inner(query, start_chunk, mid_chunk);
         // for empty ranges, we don't want to emit anything.
         // for full ranges where the level is below min_level, we want to emit
         // just the data.
@@ -167,13 +164,17 @@ pub(crate) fn encode_selected_rec(
 
 #[cfg(test)]
 mod test_support {
+    use crate::blake3;
     use std::ops::Range;
 
     use range_collections::{range_set::RangeSetEntry, RangeSet2};
 
-    use crate::{ByteNum, ChunkRanges};
+    use crate::{
+        split_inner, BaoChunk, BaoTree, BlockSize, ByteNum, ChunkNum, ChunkRanges, ChunkRangesRef,
+        TreeNode,
+    };
 
-    use super::*;
+    use super::{encode_selected_rec, truncate_ranges};
 
     /// Select nodes relevant to a query
     ///
@@ -232,7 +233,7 @@ mod test_support {
                 let mid = chunks / 2;
                 let mid_bytes = mid * CHUNK_LEN;
                 let mid_chunk = start_chunk + (mid as u64);
-                let (l_ranges, r_ranges) = split(ranges, mid_chunk);
+                let (l_ranges, r_ranges) = split_inner(ranges, start_chunk, mid_chunk);
                 let node =
                     TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(level as u8));
                 emit(BaoChunk::Parent {
@@ -458,10 +459,13 @@ mod tests {
         ops::Range,
     };
 
-    use crate::{ByteNum, ChunkRanges};
+    use crate::{
+        rec::{
+            bao_encode_reference, bao_outboard_reference, encode_ranges_reference, make_test_data,
+        },
+        BlockSize, ByteNum, ChunkRanges,
+    };
     use proptest::prelude::*;
-
-    use super::*;
 
     fn size_and_slice() -> impl Strategy<Value = (usize, Range<usize>)> {
         (1..100000usize)

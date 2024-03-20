@@ -17,14 +17,14 @@
 //! will decode the encoded data in somefile.bao and write it to /dev/null, printing
 //! information about the decoding process to stderr.
 use std::{
-    io::{self, Cursor, Write},
+    io::{self, Cursor},
     path::PathBuf,
 };
 
 use anyhow::Context;
 use bao_tree::{
     blake3,
-    io::{outboard::PreOrderMemOutboard, round_up_to_chunks, Header, Leaf, Parent},
+    io::{outboard::PreOrderMemOutboard, round_up_to_chunks, Leaf, Parent},
     BlockSize, ChunkNum, ChunkRanges,
 };
 use bytes::Bytes;
@@ -179,12 +179,20 @@ fn parse_ranges(ranges: Vec<String>) -> anyhow::Result<RangeSet2<u64>> {
 }
 
 mod sync {
-    use bao_tree::io::sync::{
-        encode_ranges_validated, DecodeResponseItem, DecodeResponseIter, Outboard,
+    use std::io::{self, Cursor, Write};
+
+    use bao_tree::{
+        io::{
+            outboard::PreOrderMemOutboard,
+            round_up_to_chunks,
+            sync::{encode_ranges_validated, DecodeResponseItem, DecodeResponseIter, Outboard},
+            Header, Leaf, Parent,
+        },
+        BlockSize, ChunkRanges,
     };
     use positioned_io::WriteAt;
 
-    use super::*;
+    use crate::{parse_ranges, Args, Command, DecodeArgs, EncodeArgs, Message};
 
     /// Encode a part of a file, given the outboard.
     fn encode(data: &[u8], outboard: impl Outboard, ranges: ChunkRanges) -> Message {

@@ -9,7 +9,6 @@
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use proptest::prelude::*;
-use proptest::strategy::{Just, Strategy};
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::ops::Range;
@@ -262,7 +261,7 @@ async fn valid_file_ranges_test_impl() {
     // 16 chunks + 1
     // 32 chunks
     // 32 chunks + 1 < seems to fail!
-    let mut data = make_test_data(1024 * 16 * 2 + 1024 * 15);
+    let data = make_test_data(1024 * 16 * 2 + 1024 * 15);
     let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
     let ranges = ChunkRanges::from(ChunkNum(0)..ChunkNum(120));
     // data[32768] = 0;

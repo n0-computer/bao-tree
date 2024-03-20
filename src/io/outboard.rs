@@ -48,9 +48,8 @@ impl crate::io::fsm::Outboard for EmptyOutboard {
     fn tree(&self) -> BaoTree {
         self.tree
     }
-    type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        futures::future::ok(if self.tree.is_relevant_for_outboard(node) {
+    async fn load(&mut self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        Ok(if self.tree.is_relevant_for_outboard(node) {
             // behave as if it was an outboard file filled with 0s
             Some((blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32])))
         } else {
@@ -73,29 +72,24 @@ impl crate::io::sync::OutboardMut for EmptyOutboard {
 }
 
 impl crate::io::fsm::OutboardMut for EmptyOutboard {
-    fn save(
+    async fn save(
         &mut self,
         node: TreeNode,
         _pair: &(blake3::Hash, blake3::Hash),
-    ) -> Self::SaveFuture<'_> {
-        let res = if self.tree.is_relevant_for_outboard(node) {
+    ) -> io::Result<()> {
+        if self.tree.is_relevant_for_outboard(node) {
             Ok(())
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid node for this outboard",
             ))
-        };
-        futures::future::ready(res)
+        }
     }
 
-    type SaveFuture<'a> = futures::future::Ready<io::Result<()>>;
-
-    fn sync(&mut self) -> Self::SyncFuture<'_> {
-        futures::future::ready(Ok(()))
+    async fn sync(&mut self) -> io::Result<()> {
+        Ok(())
     }
-
-    type SyncFuture<'a> = futures::future::Ready<io::Result<()>>;
 }
 
 /// A generic outboard in pre order
@@ -260,10 +254,8 @@ impl<T: AsRef<[u8]>> crate::io::fsm::Outboard for PostOrderMemOutboard<T> {
     fn tree(&self) -> BaoTree {
         self.tree
     }
-    type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>
-        where T: 'a;
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        futures::future::ok(load_post(&self.tree, self.data.as_ref(), node))
+    async fn load(&mut self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        Ok(load_post(&self.tree, self.data.as_ref(), node))
     }
 }
 
@@ -286,14 +278,12 @@ impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PostOrderMemOutboard<T> {
 }
 
 impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PostOrderMemOutboard<T> {
-    type SaveFuture<'a> = futures::future::Ready<io::Result<()>> where T: 'a;
-
-    fn save(
+    async fn save(
         &mut self,
         node: TreeNode,
         pair: &(blake3::Hash, blake3::Hash),
-    ) -> Self::SaveFuture<'_> {
-        let res = match self.tree.post_order_offset(node) {
+    ) -> io::Result<()> {
+        match self.tree.post_order_offset(node) {
             Some(offset) => {
                 let offset = usize::try_from(offset.value() * 64).unwrap();
                 let data = self.data.as_mut();
@@ -305,14 +295,11 @@ impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PostOrderMemOutboard<T> {
                 io::ErrorKind::InvalidInput,
                 "invalid node for this outboard",
             )),
-        };
-        futures::future::ready(res)
+        }
     }
 
-    type SyncFuture<'a> = futures::future::Ready<io::Result<()>> where T: 'a;
-
-    fn sync(&mut self) -> Self::SyncFuture<'_> {
-        futures::future::ready(Ok(()))
+    async fn sync(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -496,22 +483,18 @@ impl<T: AsRef<[u8]> + 'static> crate::io::fsm::Outboard for PreOrderMemOutboard<
     fn tree(&self) -> BaoTree {
         self.tree
     }
-    type LoadFuture<'a> = futures::future::Ready<io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        let res = load_raw_pre_mem(&self.tree, self.data.as_ref(), node).map(parse_hash_pair);
-        futures::future::ok(res)
+    async fn load(&mut self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        Ok(load_raw_pre_mem(&self.tree, self.data.as_ref(), node).map(parse_hash_pair))
     }
 }
 
 impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PreOrderMemOutboard<T> {
-    type SaveFuture<'a> = futures::future::Ready<io::Result<()>> where T: 'a;
-
-    fn save(
+    async fn save(
         &mut self,
         node: TreeNode,
         pair: &(blake3::Hash, blake3::Hash),
-    ) -> Self::SaveFuture<'_> {
-        let res = match self.tree.pre_order_offset(node) {
+    ) -> io::Result<()> {
+        match self.tree.pre_order_offset(node) {
             Some(offset) => {
                 let offset_u64 = offset * 64;
                 let offset = usize::try_from(offset_u64).unwrap();
@@ -524,14 +507,11 @@ impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PreOrderMemOutboard<T> {
                 io::ErrorKind::InvalidInput,
                 "invalid node for this outboard",
             )),
-        };
-        futures::future::ready(res)
+        }
     }
 
-    type SyncFuture<'a> = futures::future::Ready<io::Result<()>> where T: 'a;
-
-    fn sync(&mut self) -> Self::SyncFuture<'_> {
-        futures::future::ready(Ok(()))
+    async fn sync(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

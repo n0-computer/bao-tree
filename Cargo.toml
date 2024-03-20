@@ -1,6 +1,6 @@
 [package]
 name = "bao-tree"
-version = "0.9.1"
+version = "0.10.1"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
@@ -8,6 +8,7 @@ repository = "https://github.com/n0-computer/bao-tree"
 edition = "2021"
 keywords = ["hashing"]
 categories = ["data-structures"]
+rust-version = "1.75"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -20,7 +21,7 @@ bytes = { version = "1" }
 tokio = { version = "1", features = ["io-util", "rt"], optional = true }
 futures = { version = "0.3", optional = true }
 self_cell = { version = "1" }
-iroh-io = { version = "0.3.0", features = ["tokio-io"], default_features = false, optional = true }
+iroh-io = { version = "0.4.0", features = ["tokio-io"], default_features = false, optional = true }
 positioned-io = { version = "0.3.1", default_features = false }
 genawaiter = { version = "0.99.1", features = ["futures03"], optional = true }
 
