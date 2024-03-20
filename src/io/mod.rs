@@ -79,6 +79,7 @@ pub fn round_up_to_chunks(ranges: &RangeSetRef<u64>) -> ChunkRanges {
     res
 }
 
+/// Given a range set of byte ranges, round it up to chunk groups
 /// Given a range set of chunk ranges, return the full chunk groups.
 ///
 /// If we store outboard data at a level of granularity of `block_size`, we can only
@@ -92,9 +93,7 @@ pub fn full_chunk_groups(ranges: &ChunkRanges, block_size: BlockSize) -> ChunkRa
         (value + (1 << shift) - 1) >> shift << shift
     }
     let mut res = ChunkRanges::empty();
-    // we don't know if the ranges are overlapping, so we just compute the union
     for item in ranges.iter() {
-        // full_chunks() rounds down, chunks() rounds up
         match item {
             RangeSetRange::RangeFrom(range) => {
                 let start = ceil(range.start.0, block_size.0);
