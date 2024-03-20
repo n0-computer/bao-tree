@@ -19,7 +19,7 @@ use crate::{
         encode_ranges_reference, encode_selected_rec, make_test_data, range_union, truncate_ranges,
         ReferencePreOrderPartialChunkIterRef,
     },
-    recursive_hash_subtree, split, ChunkRanges, ChunkRangesRef,
+    recursive_hash_subtree, split, ChunkRanges, ChunkRangesRef, ResponseIter,
 };
 
 use super::{
@@ -555,13 +555,11 @@ fn iterate_part_preorder_reference<'a>(
             return;
         }
         let is_half_leaf = !tree.is_relevant_for_outboard(node);
-        // the middle chunk of the node
-        let mid = node.mid();
         // check if the node is fully included
         let full = ranges.is_all();
         // split the ranges into left and right
         let (l_ranges, r_ranges) = if !is_half_leaf {
-            split(ranges, mid)
+            split(ranges, node)
         } else {
             (ranges, ranges)
         };
@@ -925,6 +923,16 @@ fn test_full_chunk_groups() {
         let res = full_chunk_groups(&case, BlockSize(4));
         assert_eq!(res, expected);
     }
+}
+
+#[test]
+fn sub_chunk_group_query() {
+    let tree = BaoTree::new(ByteNum(1024 * 32), BlockSize(4));
+    let ranges = ChunkRanges::from(ChunkNum(16)..ChunkNum(24));
+    let items = ResponseIter::new(tree, ranges)
+        .filter(|x| matches!(x, BaoChunk::Leaf { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(items.len(), 1);
 }
 
 proptest! {

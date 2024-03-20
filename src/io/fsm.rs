@@ -85,15 +85,14 @@ pub trait Outboard {
     fn root(&self) -> blake3::Hash;
     /// The tree. This contains the information about the size of the file and the block size.
     fn tree(&self) -> BaoTree;
-    /// Future returned by `load`
-    type LoadFuture<'a>: Future<Output = io::Result<Option<(blake3::Hash, blake3::Hash)>>>
-    where
-        Self: 'a;
     /// load the hash pair for a node
     ///
     /// This takes a &mut self not because it mutates the outboard (it doesn't),
     /// but to ensure that there is only one outstanding load at a time.
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_>;
+    fn load(
+        &mut self,
+        node: TreeNode,
+    ) -> impl Future<Output = io::Result<Option<(blake3::Hash, blake3::Hash)>>>;
 }
 
 /// A mutable outboard.
@@ -105,30 +104,18 @@ pub trait Outboard {
 /// If you want to just ignore outboard data, there is a special placeholder outboard
 /// implementation [super::outboard::EmptyOutboard].
 pub trait OutboardMut: Sized {
-    /// Future returned by `save`
-    type SaveFuture<'a>: Future<Output = io::Result<()>>
-    where
-        Self: 'a;
-
     /// Save a hash pair for a node
-    fn save<'a>(
-        &'a mut self,
+    fn save(
+        &mut self,
         node: TreeNode,
-        hash_pair: &'a (blake3::Hash, blake3::Hash),
-    ) -> Self::SaveFuture<'a>;
-
-    /// Future returned by `sync`
-    type SyncFuture<'a>: Future<Output = io::Result<()>>
-    where
-        Self: 'a;
+        hash_pair: &(blake3::Hash, blake3::Hash),
+    ) -> impl Future<Output = io::Result<()>>;
 
     /// sync to disk
-    fn sync(&mut self) -> Self::SyncFuture<'_>;
+    fn sync(&mut self) -> impl Future<Output = io::Result<()>>;
 }
 
 impl<'b, O: Outboard> Outboard for &'b mut O {
-    type LoadFuture<'a> = <O as Outboard>::LoadFuture<'a> where O: 'a, 'b: 'a;
-
     fn root(&self) -> blake3::Hash {
         (**self).root()
     }
@@ -137,15 +124,12 @@ impl<'b, O: Outboard> Outboard for &'b mut O {
         (**self).tree()
     }
 
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        (**self).load(node)
+    async fn load(&mut self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        (**self).load(node).await
     }
 }
 
 impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
-    type LoadFuture<'a> = LocalBoxFuture<'a, io::Result<Option<(blake3::Hash, blake3::Hash)>>>
-        where R: 'a;
-
     fn root(&self) -> blake3::Hash {
         self.root
     }
@@ -154,75 +138,57 @@ impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
         self.tree
     }
 
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        async move {
-            let Some(offset) = self.tree.pre_order_offset(node) else {
-                return Ok(None);
-            };
-            let offset = offset * 64 + 8;
-            let content = self.data.read_at(offset, 64).await?;
-            Ok(Some(if content.len() != 64 {
-                (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
-            } else {
-                parse_hash_pair(content)?
-            }))
-        }
-        .boxed_local()
+    async fn load(&mut self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        let Some(offset) = self.tree.pre_order_offset(node) else {
+            return Ok(None);
+        };
+        let offset = offset * 64 + 8;
+        let content = self.data.read_at(offset, 64).await?;
+        Ok(Some(if content.len() != 64 {
+            (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
+        } else {
+            parse_hash_pair(content)?
+        }))
     }
 }
 
 impl<'b, O: OutboardMut> OutboardMut for &'b mut O {
-    type SaveFuture<'a> = O::SaveFuture<'a> where 'b: 'a;
-
-    fn save<'a>(
-        &'a mut self,
+    async fn save(
+        &mut self,
         node: TreeNode,
-        hash_pair: &'a (blake3::Hash, blake3::Hash),
-    ) -> Self::SaveFuture<'a> {
-        (**self).save(node, hash_pair)
+        hash_pair: &(blake3::Hash, blake3::Hash),
+    ) -> io::Result<()> {
+        (**self).save(node, hash_pair).await
     }
 
-    type SyncFuture<'a> = O::SyncFuture<'a> where 'b: 'a;
-
-    fn sync(&mut self) -> Self::SyncFuture<'_> {
-        (**self).sync()
+    async fn sync(&mut self) -> io::Result<()> {
+        (**self).sync().await
     }
 }
 
 impl<W: AsyncSliceWriter> OutboardMut for PreOrderOutboard<W> {
-    type SaveFuture<'a> = LocalBoxFuture<'a, io::Result<()>>
-        where W: 'a;
-
-    fn save<'a>(
-        &'a mut self,
+    async fn save(
+        &mut self,
         node: TreeNode,
-        hash_pair: &'a (blake3::Hash, blake3::Hash),
-    ) -> Self::SaveFuture<'_> {
-        async move {
-            let Some(offset) = self.tree.pre_order_offset(node) else {
-                return Ok(());
-            };
-            let offset = offset * 64 + 8;
-            let mut buf = [0u8; 64];
-            buf[..32].copy_from_slice(hash_pair.0.as_bytes());
-            buf[32..].copy_from_slice(hash_pair.1.as_bytes());
-            self.data.write_at(offset, &buf).await?;
-            Ok(())
-        }
-        .boxed_local()
+        hash_pair: &(blake3::Hash, blake3::Hash),
+    ) -> io::Result<()> {
+        let Some(offset) = self.tree.pre_order_offset(node) else {
+            return Ok(());
+        };
+        let offset = offset * 64 + 8;
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(hash_pair.0.as_bytes());
+        buf[32..].copy_from_slice(hash_pair.1.as_bytes());
+        self.data.write_at(offset, &buf).await?;
+        Ok(())
     }
 
-    type SyncFuture<'a> = W::SyncFuture<'a> where W: 'a;
-
-    fn sync(&mut self) -> Self::SyncFuture<'_> {
-        self.data.sync()
+    async fn sync(&mut self) -> io::Result<()> {
+        self.data.sync().await
     }
 }
 
 impl<R: AsyncSliceReader> Outboard for PostOrderOutboard<R> {
-    type LoadFuture<'a> = LocalBoxFuture<'a, io::Result<Option<(blake3::Hash, blake3::Hash)>>>
-        where R: 'a;
-
     fn root(&self) -> blake3::Hash {
         self.root
     }
@@ -231,20 +197,17 @@ impl<R: AsyncSliceReader> Outboard for PostOrderOutboard<R> {
         self.tree
     }
 
-    fn load(&mut self, node: TreeNode) -> Self::LoadFuture<'_> {
-        async move {
-            let Some(offset) = self.tree.post_order_offset(node) else {
-                return Ok(None);
-            };
-            let offset = offset.value() * 64;
-            let content = self.data.read_at(offset, 64).await?;
-            Ok(Some(if content.len() != 64 {
-                (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
-            } else {
-                parse_hash_pair(content)?
-            }))
-        }
-        .boxed_local()
+    async fn load(&mut self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        let Some(offset) = self.tree.post_order_offset(node) else {
+            return Ok(None);
+        };
+        let offset = offset.value() * 64;
+        let content = self.data.read_at(offset, 64).await?;
+        Ok(Some(if content.len() != 64 {
+            (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
+        } else {
+            parse_hash_pair(content)?
+        }))
     }
 }
 
@@ -738,3 +701,148 @@ where
         .await?;
     Ok(validator.res)
 }
+
+#[cfg(feature = "validate")]
+mod validate {
+    use std::{io, ops::Range};
+
+    use futures::{future::LocalBoxFuture, FutureExt, Stream};
+    use genawaiter::sync::{Co, Gen};
+    use iroh_io::AsyncSliceReader;
+
+    use crate::{
+        blake3, hash_subtree, rec::truncate_ranges, split, BaoTree, ChunkNum, ChunkRangesRef,
+        TreeNode,
+    };
+
+    use super::Outboard;
+
+    /// Given a data file and an outboard, compute all valid ranges.
+    ///
+    /// This is not cheap since it recomputes the hashes for all chunks.
+    ///
+    /// To reduce the amount of work, you can specify a range you are interested in.
+    pub fn valid_file_ranges<O, D>(
+        outboard: O,
+        data: D,
+        ranges: &ChunkRangesRef,
+    ) -> impl Stream<Item = io::Result<Range<ChunkNum>>> + '_
+    where
+        O: Outboard + 'static,
+        D: AsyncSliceReader + 'static,
+    {
+        Gen::new(move |co| async move {
+            if let Err(cause) = RecursiveDataValidator::validate(outboard, data, ranges, &co).await
+            {
+                co.yield_(Err(cause)).await;
+            }
+        })
+    }
+
+    struct RecursiveDataValidator<'a, O: Outboard, D: AsyncSliceReader> {
+        tree: BaoTree,
+        shifted_filled_size: TreeNode,
+        outboard: O,
+        data: D,
+        co: &'a Co<io::Result<Range<ChunkNum>>>,
+    }
+
+    impl<'a, O: Outboard, D: AsyncSliceReader> RecursiveDataValidator<'a, O, D> {
+        async fn validate(
+            outboard: O,
+            data: D,
+            ranges: &ChunkRangesRef,
+            co: &Co<io::Result<Range<ChunkNum>>>,
+        ) -> io::Result<()> {
+            let tree = outboard.tree();
+            if tree.blocks().0 == 1 {
+                // special case for a tree that fits in one block / chunk group
+                let mut data = data;
+                let data = data.read_at(0, tree.size().to_usize()).await?;
+                let actual = hash_subtree(0, &data, true);
+                if actual == outboard.root() {
+                    co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
+                }
+                return Ok(());
+            }
+            let ranges = truncate_ranges(ranges, tree.size());
+            let root_hash = outboard.root();
+            let (shifted_root, shifted_filled_size) = tree.shifted();
+            let mut validator = RecursiveDataValidator {
+                tree,
+                shifted_filled_size,
+                outboard,
+                data,
+                co,
+            };
+            validator
+                .validate_rec(&root_hash, shifted_root, true, ranges)
+                .await
+        }
+
+        fn validate_rec<'b>(
+            &'b mut self,
+            parent_hash: &'b blake3::Hash,
+            shifted: TreeNode,
+            is_root: bool,
+            ranges: &'b ChunkRangesRef,
+        ) -> LocalBoxFuture<'b, io::Result<()>> {
+            async move {
+                if ranges.is_empty() {
+                    // this part of the tree is not of interest, so we can skip it
+                    return Ok(());
+                }
+                let node = shifted.subtract_block_size(self.tree.block_size.0);
+                let Some((l_hash, r_hash)) = self.outboard.load(node).await? else {
+                    // outboard is incomplete, we can't validate
+                    return Ok(());
+                };
+                let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+                if &actual != parent_hash {
+                    // hash mismatch, we can't validate
+                    return Ok(());
+                };
+                let (l_ranges, r_ranges) = split(ranges, node);
+                if shifted.is_leaf() {
+                    if !l_ranges.is_empty() {
+                        let l = node.left_child().unwrap();
+                        let l_range = self.tree.byte_range(l);
+                        let l_len = (l_range.end - l_range.start).to_usize();
+                        let data = self.data.read_at(l_range.start.0, l_len).await?;
+                        // is_root is always false because the case of a single chunk group is handled before calling this function
+                        let actual = hash_subtree(l_range.start.full_chunks().0, &data, false);
+                        if actual == l_hash {
+                            // yield the left range
+                            self.co
+                                .yield_(Ok(l_range.start.full_chunks()..l_range.end.full_chunks()))
+                                .await;
+                        }
+                    }
+                    if !r_ranges.is_empty() {
+                        let r = node.right_descendant(self.tree.filled_size()).unwrap();
+                        let r_range = self.tree.byte_range(r);
+                        let r_len = (r_range.end - r_range.start).to_usize();
+                        let data = self.data.read_at(r_range.start.0, r_len).await?;
+                        let actual = hash_subtree(r_range.start.full_chunks().0, &data, false);
+                        if actual == r_hash {
+                            // yield the right range
+                            self.co
+                                .yield_(Ok(r_range.start.full_chunks()..r_range.end.chunks()))
+                                .await;
+                        }
+                    }
+                } else {
+                    // recurse (we are in the domain of the shifted tree)
+                    let left = shifted.left_child().unwrap();
+                    self.validate_rec(&l_hash, left, false, l_ranges).await?;
+                    let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
+                    self.validate_rec(&r_hash, right, false, r_ranges).await?;
+                }
+                Ok(())
+            }
+            .boxed_local()
+        }
+    }
+}
+#[cfg(feature = "validate")]
+pub use validate::valid_file_ranges;
