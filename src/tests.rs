@@ -11,7 +11,10 @@ use range_collections::RangeSet2;
 use crate::{
     assert_tuple_eq, blake3,
     io::{
-        full_chunk_groups, outboard::PreOrderMemOutboard, sync::{DecodeResponseItem, Outboard}, Leaf
+        full_chunk_groups,
+        outboard::PreOrderMemOutboard,
+        sync::{DecodeResponseItem, Outboard},
+        Leaf,
     },
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
     prop_assert_tuple_eq,
@@ -914,10 +917,22 @@ fn encode_last_chunk_cases() {
 #[test]
 fn test_full_chunk_groups() {
     let cases = vec![
-        (ChunkRanges::from(ChunkNum(8)..), ChunkRanges::from(ChunkNum(16)..)),
-        (ChunkRanges::from(ChunkNum(8)..ChunkNum(16)), ChunkRanges::empty()),
-        (ChunkRanges::from(ChunkNum(11)..ChunkNum(34)), ChunkRanges::from(ChunkNum(16)..ChunkNum(32))),
-        (ChunkRanges::from(..ChunkNum(35)), ChunkRanges::from(..ChunkNum(32))),
+        (
+            ChunkRanges::from(ChunkNum(8)..),
+            ChunkRanges::from(ChunkNum(16)..),
+        ),
+        (
+            ChunkRanges::from(ChunkNum(8)..ChunkNum(16)),
+            ChunkRanges::empty(),
+        ),
+        (
+            ChunkRanges::from(ChunkNum(11)..ChunkNum(34)),
+            ChunkRanges::from(ChunkNum(16)..ChunkNum(32)),
+        ),
+        (
+            ChunkRanges::from(..ChunkNum(35)),
+            ChunkRanges::from(..ChunkNum(32)),
+        ),
     ];
     for (case, expected) in cases {
         let res = full_chunk_groups(&case, BlockSize(4));
