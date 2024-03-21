@@ -54,3 +54,7 @@ harness = false
 
 [workspace]
 members = ["cli"]
+
+[[example]]
+name = "cli"
+required-features = ["tokio_fsm"]

@@ -7,11 +7,9 @@
 //! There is a test called <testname>_cases that calls the test with a few hardcoded values, either
 //! handcrafted or from a previous failure of a proptest.
 use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
 use proptest::prelude::*;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
-use std::io;
 use std::ops::Range;
 use test_strategy::proptest;
 
@@ -33,6 +31,9 @@ use crate::{
     rec::{encode_selected_rec, select_nodes_rec},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
+
+#[cfg(feature = "validate")]
+use futures::StreamExt;
 
 fn tree() -> impl Strategy<Value = BaoTree> {
     (0u64..100000, 0u8..5).prop_map(|(size, block_size)| {
@@ -237,10 +238,11 @@ fn mem_outboard_flip_proptest(#[strategy(tree())] tree: BaoTree) {
 
 /// range is a range of chunks. Just using u64 for convenience in tests
 fn valid_ranges_sync(outboard: &PostOrderMemOutboard) -> ChunkRanges {
-    crate::io::sync::valid_ranges(outboard).unwrap()
+    crate::io::sync::valid_outboard_ranges(outboard).unwrap()
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
+#[cfg(feature = "validate")]
 fn valid_ranges_fsm(outboard: &mut PostOrderMemOutboard, data: Bytes) -> ChunkRanges {
     futures::executor::block_on(async move {
         let ranges = ChunkRanges::all();
@@ -250,12 +252,13 @@ fn valid_ranges_fsm(outboard: &mut PostOrderMemOutboard, data: Bytes) -> ChunkRa
             let item = item?;
             res |= ChunkRanges::from(item);
         }
-        io::Result::Ok(res)
+        std::io::Result::Ok(res)
     })
     .unwrap()
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
+#[cfg(feature = "validate")]
 fn valid_outboard_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> ChunkRanges {
     futures::executor::block_on(async move {
         let ranges = ChunkRanges::all();
@@ -265,11 +268,12 @@ fn valid_outboard_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> ChunkRanges
             let item = item?;
             res |= ChunkRanges::from(item);
         }
-        io::Result::Ok(res)
+        std::io::Result::Ok(res)
     })
     .unwrap()
 }
 
+#[cfg(feature = "validate")]
 fn validate_outboard_sync_pos_impl(tree: BaoTree) {
     let size = tree.size.to_usize();
     let block_size = tree.block_size;
@@ -280,6 +284,7 @@ fn validate_outboard_sync_pos_impl(tree: BaoTree) {
     assert_eq!(expected, actual)
 }
 
+#[cfg(feature = "validate")]
 async fn valid_file_ranges_test_impl() {
     // interesting cases:
     // below 16 chunks
@@ -300,16 +305,19 @@ async fn valid_file_ranges_test_impl() {
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
+#[cfg(feature = "validate")]
 #[test]
 fn valid_file_ranges_fsm() {
     futures::executor::block_on(valid_file_ranges_test_impl())
 }
 
+#[cfg(feature = "validate")]
 #[proptest]
 fn validate_outboard_sync_pos_proptest(#[strategy(tree())] tree: BaoTree) {
     validate_outboard_sync_pos_impl(tree);
 }
 
+#[cfg(feature = "validate")]
 fn validate_outboard_fsm_pos_impl(tree: BaoTree) {
     let size = tree.size.to_usize();
     let block_size = tree.block_size;
@@ -320,11 +328,13 @@ fn validate_outboard_fsm_pos_impl(tree: BaoTree) {
     assert_eq!(expected, actual)
 }
 
+#[cfg(feature = "validate")]
 #[proptest]
 fn validate_outboard_fsm_pos_proptest(#[strategy(tree())] tree: BaoTree) {
     validate_outboard_fsm_pos_impl(tree);
 }
 
+#[cfg(feature = "validate")]
 #[test]
 fn validate_outboard_fsm_pos_cases() {
     let cases = [(0x10001, 0)];
@@ -334,6 +344,7 @@ fn validate_outboard_fsm_pos_cases() {
     }
 }
 
+#[cfg(feature = "validate")]
 fn validate_fsm_pos_impl(tree: BaoTree) {
     let size = tree.size.to_usize();
     let block_size = tree.block_size;
@@ -344,9 +355,23 @@ fn validate_fsm_pos_impl(tree: BaoTree) {
     assert_eq!(expected, actual)
 }
 
+#[cfg(feature = "validate")]
 #[proptest]
 fn validate_fsm_pos_proptest(#[strategy(tree())] tree: BaoTree) {
     validate_fsm_pos_impl(tree);
+}
+
+#[cfg(feature = "validate")]
+#[test]
+fn validate_fsm_pos_cases() {
+    let cases = [
+        // (0x10001, 0),
+        (0x401, 0),
+    ];
+    for (size, block_level) in cases {
+        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+        validate_fsm_pos_impl(tree);
+    }
 }
 
 fn flip_bit(data: &mut [u8], rand: usize) {
@@ -391,6 +416,7 @@ fn validate_outboard_sync_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: 
 }
 
 /// Check that flipping a random bit in the outboard makes at least one range invalid
+#[cfg(feature = "validate")]
 fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
     let rand = rand as usize;
     let size = tree.size.to_usize();
@@ -407,17 +433,53 @@ fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
     }
 }
 
+#[cfg(feature = "validate")]
 #[proptest]
 fn validate_outboard_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
     validate_outboard_fsm_neg_impl(tree, rand);
 }
 
+#[cfg(feature = "validate")]
 #[test]
 fn validate_outboard_fsm_neg_cases() {
     let cases = [(((0x2001, 0), 2738363904))];
     for ((size, block_level), rand) in cases {
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         validate_outboard_fsm_neg_impl(tree, rand);
+    }
+}
+
+/// Check that flipping a random bit in the outboard makes at least one range invalid
+#[cfg(feature = "validate")]
+fn validate_fsm_neg_impl(tree: BaoTree, rand: u32) {
+    let rand = rand as usize;
+    let size = tree.size.to_usize();
+    let block_size = tree.block_size;
+    let data = make_test_data(size);
+    let mut outboard = PostOrderMemOutboard::create(&data, block_size);
+    let expected = ChunkRanges::from(..outboard.tree().chunks());
+    if !outboard.data.is_empty() {
+        // flip a random bit in the outboard
+        flip_bit(&mut outboard.data, rand);
+        // Check that at least one range is invalid
+        let actual = valid_ranges_fsm(&mut outboard, data.into());
+        assert_ne!(expected, actual);
+    }
+}
+
+#[proptest]
+#[cfg(feature = "validate")]
+fn validate_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
+    validate_fsm_neg_impl(tree, rand);
+}
+
+#[test]
+#[cfg(feature = "validate")]
+fn validate_fsm_neg_cases() {
+    let cases = [(((0x2001, 0), 2738363904))];
+    for ((size, block_level), rand) in cases {
+        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+        validate_fsm_neg_impl(tree, rand);
     }
 }
 

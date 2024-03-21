@@ -110,3 +110,12 @@ pub fn full_chunk_groups(ranges: &ChunkRanges, block_size: BlockSize) -> ChunkRa
     }
     res
 }
+
+pub(crate) fn combine_hash_pair(l: &blake3::Hash, r: &blake3::Hash) -> [u8; 64] {
+    let mut res = [0u8; 64];
+    let lb: &mut [u8; 32] = (&mut res[0..32]).try_into().unwrap();
+    *lb = *l.as_bytes();
+    let rb: &mut [u8; 32] = (&mut res[32..]).try_into().unwrap();
+    *rb = *r.as_bytes();
+    res
+}

@@ -2,7 +2,7 @@
 //!
 //! Encocding is used to compute hashes, decoding is only used in tests as a
 //! reference implementation.
-use crate::{blake3, split_inner, ByteNum, ChunkNum, ChunkRanges, ChunkRangesRef};
+use crate::{blake3, split_inner, ByteNum, ChunkNum, ChunkRangesRef};
 
 /// Given a set of chunk ranges, adapt them for a tree of the given size.
 ///
@@ -31,11 +31,12 @@ pub fn truncate_ranges(ranges: &ChunkRangesRef, size: ByteNum) -> &ChunkRangesRe
 /// A version of [canonicalize_ranges] that takes and returns an owned [ChunkRanges].
 ///
 /// This is needed for the state machines that own their ranges.
-pub fn truncate_ranges_owned(ranges: ChunkRanges, size: ByteNum) -> ChunkRanges {
+#[cfg(feature = "tokio_fsm")]
+pub fn truncate_ranges_owned(ranges: crate::ChunkRanges, size: ByteNum) -> crate::ChunkRanges {
     let n = truncated_len(&ranges, size);
     let mut boundaries = ranges.into_inner();
     boundaries.truncate(n);
-    ChunkRanges::new_unchecked(boundaries)
+    crate::ChunkRanges::new_unchecked(boundaries)
 }
 
 fn truncated_len(ranges: &ChunkRangesRef, size: ByteNum) -> usize {
@@ -165,14 +166,15 @@ pub(crate) fn encode_selected_rec(
 #[cfg(test)]
 mod test_support {
     use crate::blake3;
-    use std::ops::Range;
 
-    use range_collections::{range_set::RangeSetEntry, RangeSet2};
-
-    use crate::{
-        split_inner, BaoChunk, BaoTree, BlockSize, ByteNum, ChunkNum, ChunkRanges, ChunkRangesRef,
-        TreeNode,
+    #[cfg(feature = "tokio_fsm")]
+    use {
+        crate::{split_inner, TreeNode},
+        range_collections::{range_set::RangeSetEntry, RangeSet2},
+        std::ops::Range,
     };
+
+    use crate::{BaoChunk, BaoTree, BlockSize, ByteNum, ChunkNum, ChunkRanges, ChunkRangesRef};
 
     use super::{encode_selected_rec, truncate_ranges};
 
@@ -191,6 +193,7 @@ mod test_support {
     /// within the query range.
     ///
     /// To disable chunk groups entirely, just set both `tree_level` and `min_full_level` to 0.
+    #[cfg(feature = "tokio_fsm")]
     pub(crate) fn select_nodes_rec<'a>(
         start_chunk: ChunkNum,
         size: usize,
@@ -298,6 +301,7 @@ mod test_support {
 
     /// Reference implementation of the response iterator, using just the simple recursive
     /// implementation [select_nodes_rec].
+    #[cfg(feature = "tokio_fsm")]
     pub(crate) fn partial_chunk_iter_reference(
         tree: BaoTree,
         ranges: &ChunkRangesRef,
@@ -318,6 +322,7 @@ mod test_support {
 
     /// Reference implementation of the response iterator, using just the simple recursive
     /// implementation [select_nodes_rec].
+    #[cfg(feature = "tokio_fsm")]
     pub(crate) fn response_iter_reference(tree: BaoTree, ranges: &ChunkRangesRef) -> Vec<BaoChunk> {
         let mut res = Vec::new();
         select_nodes_rec(
@@ -345,6 +350,7 @@ mod test_support {
 
     impl<'a> ReferencePreOrderPartialChunkIterRef<'a> {
         /// Create a new iterator over the tree.
+        #[cfg(feature = "tokio_fsm")]
         pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef, min_full_level: u8) -> Self {
             let iter = partial_chunk_iter_reference(tree, ranges, min_full_level).into_iter();
             Self { iter, tree }
@@ -379,6 +385,7 @@ mod test_support {
 
     /// Compute the union of an iterator of ranges. The ranges should be non-overlapping, otherwise
     /// the result is None
+    #[cfg(feature = "tokio_fsm")]
     pub fn range_union<K: RangeSetEntry>(
         ranges: impl IntoIterator<Item = Range<K>>,
     ) -> Option<RangeSet2<K>> {
@@ -393,6 +400,7 @@ mod test_support {
         Some(res)
     }
 
+    #[cfg(feature = "tokio_fsm")]
     pub fn get_leaf_ranges<R>(
         iter: impl IntoIterator<Item = BaoChunk<R>>,
     ) -> impl Iterator<Item = Range<ByteNum>> {

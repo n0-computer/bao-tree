@@ -31,7 +31,7 @@ use crate::{
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::{DecodeError, StartDecodeError};
+use super::{combine_hash_pair, DecodeError, StartDecodeError};
 
 /// An item of bao content
 ///
@@ -221,15 +221,6 @@ pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::H
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
     Ok((l_hash, r_hash))
-}
-
-pub(crate) fn combine_hash_pair(l: &blake3::Hash, r: &blake3::Hash) -> [u8; 64] {
-    let mut res = [0u8; 64];
-    let lb: &mut [u8; 32] = (&mut res[0..32]).try_into().unwrap();
-    *lb = *l.as_bytes();
-    let rb: &mut [u8; 32] = (&mut res[32..]).try_into().unwrap();
-    *rb = *r.as_bytes();
-    res
 }
 
 /// Response decoder state machine, at the start of a stream
@@ -716,6 +707,26 @@ mod validate {
                 .await
         }
 
+        async fn yield_if_valid(
+            &mut self,
+            node: TreeNode,
+            hash: &blake3::Hash,
+            is_root: bool,
+        ) -> io::Result<()> {
+            let range = self.tree.byte_range(node);
+            let len = (range.end - range.start).to_usize();
+            let data = self.data.read_at(range.start.0, len).await?;
+            // is_root is always false because the case of a single chunk group is handled before calling this function
+            let actual = hash_subtree(range.start.full_chunks().0, &data, is_root);
+            if &actual == hash {
+                // yield the left range
+                self.co
+                    .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                    .await;
+            }
+            io::Result::Ok(())
+        }
+
         fn validate_rec<'b>(
             &'b mut self,
             parent_hash: &'b blake3::Hash,
@@ -729,6 +740,10 @@ mod validate {
                     return Ok(());
                 }
                 let node = shifted.subtract_block_size(self.tree.block_size.0);
+                if !self.tree.is_relevant_for_outboard(node) {
+                    self.yield_if_valid(node, parent_hash, is_root).await?;
+                    return Ok(());
+                }
                 let Some((l_hash, r_hash)) = self.outboard.load(node).await? else {
                     // outboard is incomplete, we can't validate
                     return Ok(());
@@ -738,41 +753,26 @@ mod validate {
                     // hash mismatch, we can't validate
                     return Ok(());
                 };
-                let (l_ranges, r_ranges) = split(ranges, node);
-                if shifted.is_leaf() {
-                    if !l_ranges.is_empty() {
-                        let l = node.left_child().unwrap();
-                        let l_range = self.tree.byte_range(l);
-                        let l_len = (l_range.end - l_range.start).to_usize();
-                        let data = self.data.read_at(l_range.start.0, l_len).await?;
-                        // is_root is always false because the case of a single chunk group is handled before calling this function
-                        let actual = hash_subtree(l_range.start.full_chunks().0, &data, false);
-                        if actual == l_hash {
-                            // yield the left range
-                            self.co
-                                .yield_(Ok(l_range.start.full_chunks()..l_range.end.full_chunks()))
-                                .await;
-                        }
-                    }
-                    if !r_ranges.is_empty() {
-                        let r = node.right_descendant(self.tree.filled_size()).unwrap();
-                        let r_range = self.tree.byte_range(r);
-                        let r_len = (r_range.end - r_range.start).to_usize();
-                        let data = self.data.read_at(r_range.start.0, r_len).await?;
-                        let actual = hash_subtree(r_range.start.full_chunks().0, &data, false);
-                        if actual == r_hash {
-                            // yield the right range
-                            self.co
-                                .yield_(Ok(r_range.start.full_chunks()..r_range.end.chunks()))
-                                .await;
-                        }
-                    }
+                if node.is_leaf() {
+                    self.yield_if_valid(node, parent_hash, is_root).await?;
                 } else {
-                    // recurse (we are in the domain of the shifted tree)
-                    let left = shifted.left_child().unwrap();
-                    self.validate_rec(&l_hash, left, false, l_ranges).await?;
-                    let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
-                    self.validate_rec(&r_hash, right, false, r_ranges).await?;
+                    let (l_ranges, r_ranges) = split(ranges, node);
+                    if shifted.is_leaf() {
+                        if !l_ranges.is_empty() {
+                            let l: TreeNode = node.left_child().unwrap();
+                            self.yield_if_valid(l, &l_hash, false).await?;
+                        }
+                        if !r_ranges.is_empty() {
+                            let r = node.right_descendant(self.tree.filled_size()).unwrap();
+                            self.yield_if_valid(r, &r_hash, false).await?;
+                        }
+                    } else {
+                        // recurse (we are in the domain of the shifted tree)
+                        let left = shifted.left_child().unwrap();
+                        self.validate_rec(&l_hash, left, false, l_ranges).await?;
+                        let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
+                        self.validate_rec(&r_hash, right, false, r_ranges).await?;
+                    }
                 }
                 Ok(())
             }
@@ -838,19 +838,21 @@ mod validate {
             ranges: &'b ChunkRangesRef,
         ) -> LocalBoxFuture<'b, io::Result<()>> {
             async move {
+                let yield_node_range = |node| {
+                    let range = self.tree.byte_range(node);
+                    self.co
+                        .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                };
                 if ranges.is_empty() {
                     // this part of the tree is not of interest, so we can skip it
                     return Ok(());
                 }
                 let node = shifted.subtract_block_size(self.tree.block_size.0);
+                if !self.tree.is_relevant_for_outboard(node) {
+                    yield_node_range(node).await;
+                    return Ok(());
+                }
                 let Some((l_hash, r_hash)) = self.outboard.load(node).await? else {
-                    if !self.tree.is_persisted(node) {
-                        let range = self.tree.byte_range(node);
-                        // yield the entire range
-                        self.co
-                            .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
-                            .await;
-                    }
                     // outboard is incomplete, we can't validate
                     return Ok(());
                 };
@@ -860,37 +862,22 @@ mod validate {
                     return Ok(());
                 };
                 if node.is_leaf() {
-                    let range = self.tree.byte_range(node);
-                    // yield the entire range
-                    self.co
-                        .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
-                        .await;
+                    yield_node_range(node).await;
                 } else {
                     let (l_ranges, r_ranges) = split(ranges, node);
                     if shifted.is_leaf() {
                         if !l_ranges.is_empty() {
                             let l = node.left_child().unwrap();
-                            let l_range = self.tree.byte_range(l);
-                            // yield the left range
-                            self.co
-                                .yield_(Ok(l_range.start.full_chunks()..l_range.end.full_chunks()))
-                                .await;
+                            yield_node_range(l).await;
                         }
                         if !r_ranges.is_empty() {
                             let r = node.right_descendant(self.tree.filled_size()).unwrap();
-                            let r_range = self.tree.byte_range(r);
-                            // yield the right range
-                            self.co
-                                .yield_(Ok(r_range.start.full_chunks()..r_range.end.chunks()))
-                                .await;
+                            yield_node_range(r).await;
                         }
                     } else {
                         // recurse (we are in the domain of the shifted tree)
                         let left = shifted.left_child().unwrap();
                         self.validate_rec(&l_hash, left, false, l_ranges).await?;
-                        if shifted.0 == 63 {
-                            println!("going down");
-                        }
                         let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
                         self.validate_rec(&r_hash, right, false, r_ranges).await?;
                     }
