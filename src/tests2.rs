@@ -442,7 +442,7 @@ fn validate_outboard_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u
 #[cfg(feature = "validate")]
 #[test]
 fn validate_outboard_fsm_neg_cases() {
-    let cases = [(((0x2001, 0), 2738363904))];
+    let cases = [((0x2001, 0), 2738363904)];
     for ((size, block_level), rand) in cases {
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         validate_outboard_fsm_neg_impl(tree, rand);
@@ -476,7 +476,7 @@ fn validate_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
 #[test]
 #[cfg(feature = "validate")]
 fn validate_fsm_neg_cases() {
-    let cases = [(((0x2001, 0), 2738363904))];
+    let cases = [((0x2001, 0), 2738363904)];
     for ((size, block_level), rand) in cases {
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         validate_fsm_neg_impl(tree, rand);
