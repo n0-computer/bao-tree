@@ -22,7 +22,7 @@ pub use positioned_io::{ReadAt, Size, WriteAt};
 use range_collections::{range_set::RangeSetRange, RangeSetRef};
 use smallvec::SmallVec;
 
-use super::{fsm::combine_hash_pair, outboard::PreOrderMemOutboard, DecodeError, StartDecodeError};
+use super::{combine_hash_pair, outboard::PreOrderMemOutboard, DecodeError, StartDecodeError};
 use crate::{hash_subtree, iter::ResponseIterRef};
 
 macro_rules! io_error {
@@ -310,7 +310,7 @@ impl PostOrderMemOutboard {
 }
 
 /// Given an outboard, return a range set of all valid ranges
-pub fn valid_ranges<O>(outboard: &O) -> io::Result<ChunkRanges>
+pub fn valid_outboard_ranges<O>(outboard: &O) -> io::Result<ChunkRanges>
 where
     O: Outboard,
 {

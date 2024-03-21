@@ -327,6 +327,7 @@ mod sync {
                     let target = std::fs::OpenOptions::new()
                         .write(true)
                         .create(true)
+                        .truncate(true)
                         .open(target)?;
                     decode_into_file(&msg, target, block_size, v)?;
                 } else {
@@ -484,6 +485,7 @@ mod fsm {
                     let target = std::fs::OpenOptions::new()
                         .write(true)
                         .create(true)
+                        .truncate(true)
                         .open(target)?;
                     let target = iroh_io::File::from_std(target);
                     decode_into_file(msg, target, block_size, v).await?;

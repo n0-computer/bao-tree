@@ -15,7 +15,7 @@ use crate::{
 };
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
-use futures::{future::LocalBoxFuture, Future, FutureExt};
+use futures::Future;
 use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -31,7 +31,7 @@ use crate::{
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::{DecodeError, StartDecodeError};
+use super::{combine_hash_pair, DecodeError, StartDecodeError};
 
 /// An item of bao content
 ///
@@ -221,15 +221,6 @@ pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::H
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
     Ok((l_hash, r_hash))
-}
-
-pub(crate) fn combine_hash_pair(l: &blake3::Hash, r: &blake3::Hash) -> [u8; 64] {
-    let mut res = [0u8; 64];
-    let lb: &mut [u8; 32] = (&mut res[0..32]).try_into().unwrap();
-    *lb = *l.as_bytes();
-    let rb: &mut [u8; 32] = (&mut res[32..]).try_into().unwrap();
-    *rb = *r.as_bytes();
-    res
 }
 
 /// Response decoder state machine, at the start of a stream
@@ -638,70 +629,6 @@ fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     (l_hash, r_hash)
 }
 
-/// Given an outboard, return a range set of all valid ranges
-pub async fn valid_ranges<O>(outboard: &mut O) -> io::Result<ChunkRanges>
-where
-    O: Outboard,
-{
-    struct RecursiveValidator<'a, O: Outboard> {
-        tree: BaoTree,
-        shifted_filled_size: TreeNode,
-        res: ChunkRanges,
-        outboard: &'a mut O,
-    }
-
-    impl<'a, O: Outboard> RecursiveValidator<'a, O> {
-        fn validate_rec<'b>(
-            &'b mut self,
-            parent_hash: &'b blake3::Hash,
-            shifted: TreeNode,
-            is_root: bool,
-        ) -> LocalBoxFuture<'b, io::Result<()>> {
-            async move {
-                let node = shifted.subtract_block_size(self.tree.block_size.0);
-                // if there is an IO error reading the hash, we simply continue without adding the range
-                let (l_hash, r_hash) =
-                    if let Some((l_hash, r_hash)) = self.outboard.load(node).await? {
-                        let actual = parent_cv(&l_hash, &r_hash, is_root);
-                        if &actual != parent_hash {
-                            // we got a validation error. Simply continue without adding the range
-                            return Ok(());
-                        }
-                        (l_hash, r_hash)
-                    } else {
-                        (*parent_hash, blake3::Hash::from([0; 32]))
-                    };
-                if shifted.is_leaf() {
-                    let start = node.chunk_range().start;
-                    let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
-                    self.res |= ChunkRanges::from(start..end);
-                } else {
-                    // recurse
-                    let left = shifted.left_child().unwrap();
-                    self.validate_rec(&l_hash, left, false).await?;
-                    let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
-                    self.validate_rec(&r_hash, right, false).await?;
-                }
-                Ok(())
-            }
-            .boxed_local()
-        }
-    }
-    let tree = outboard.tree();
-    let root_hash = outboard.root();
-    let (shifted_root, shifted_filled_size) = tree.shifted();
-    let mut validator = RecursiveValidator {
-        tree,
-        shifted_filled_size,
-        res: ChunkRanges::empty(),
-        outboard,
-    };
-    validator
-        .validate_rec(&root_hash, shifted_root, true)
-        .await?;
-    Ok(validator.res)
-}
-
 #[cfg(feature = "validate")]
 mod validate {
     use std::{io, ops::Range};
@@ -722,14 +649,14 @@ mod validate {
     /// This is not cheap since it recomputes the hashes for all chunks.
     ///
     /// To reduce the amount of work, you can specify a range you are interested in.
-    pub fn valid_file_ranges<O, D>(
+    pub fn valid_ranges<'a, O, D>(
         outboard: O,
         data: D,
-        ranges: &ChunkRangesRef,
-    ) -> impl Stream<Item = io::Result<Range<ChunkNum>>> + '_
+        ranges: &'a ChunkRangesRef,
+    ) -> impl Stream<Item = io::Result<Range<ChunkNum>>> + 'a
     where
-        O: Outboard + 'static,
-        D: AsyncSliceReader + 'static,
+        O: Outboard + 'a,
+        D: AsyncSliceReader + 'a,
     {
         Gen::new(move |co| async move {
             if let Err(cause) = RecursiveDataValidator::validate(outboard, data, ranges, &co).await
@@ -780,6 +707,26 @@ mod validate {
                 .await
         }
 
+        async fn yield_if_valid(
+            &mut self,
+            node: TreeNode,
+            hash: &blake3::Hash,
+            is_root: bool,
+        ) -> io::Result<()> {
+            let range = self.tree.byte_range(node);
+            let len = (range.end - range.start).to_usize();
+            let data = self.data.read_at(range.start.0, len).await?;
+            // is_root is always false because the case of a single chunk group is handled before calling this function
+            let actual = hash_subtree(range.start.full_chunks().0, &data, is_root);
+            if &actual == hash {
+                // yield the left range
+                self.co
+                    .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                    .await;
+            }
+            io::Result::Ok(())
+        }
+
         fn validate_rec<'b>(
             &'b mut self,
             parent_hash: &'b blake3::Hash,
@@ -793,6 +740,10 @@ mod validate {
                     return Ok(());
                 }
                 let node = shifted.subtract_block_size(self.tree.block_size.0);
+                if !self.tree.is_relevant_for_outboard(node) {
+                    self.yield_if_valid(node, parent_hash, is_root).await?;
+                    return Ok(());
+                }
                 let Some((l_hash, r_hash)) = self.outboard.load(node).await? else {
                     // outboard is incomplete, we can't validate
                     return Ok(());
@@ -802,41 +753,134 @@ mod validate {
                     // hash mismatch, we can't validate
                     return Ok(());
                 };
-                let (l_ranges, r_ranges) = split(ranges, node);
-                if shifted.is_leaf() {
-                    if !l_ranges.is_empty() {
-                        let l = node.left_child().unwrap();
-                        let l_range = self.tree.byte_range(l);
-                        let l_len = (l_range.end - l_range.start).to_usize();
-                        let data = self.data.read_at(l_range.start.0, l_len).await?;
-                        // is_root is always false because the case of a single chunk group is handled before calling this function
-                        let actual = hash_subtree(l_range.start.full_chunks().0, &data, false);
-                        if actual == l_hash {
-                            // yield the left range
-                            self.co
-                                .yield_(Ok(l_range.start.full_chunks()..l_range.end.full_chunks()))
-                                .await;
-                        }
-                    }
-                    if !r_ranges.is_empty() {
-                        let r = node.right_descendant(self.tree.filled_size()).unwrap();
-                        let r_range = self.tree.byte_range(r);
-                        let r_len = (r_range.end - r_range.start).to_usize();
-                        let data = self.data.read_at(r_range.start.0, r_len).await?;
-                        let actual = hash_subtree(r_range.start.full_chunks().0, &data, false);
-                        if actual == r_hash {
-                            // yield the right range
-                            self.co
-                                .yield_(Ok(r_range.start.full_chunks()..r_range.end.chunks()))
-                                .await;
-                        }
-                    }
+                if node.is_leaf() {
+                    self.yield_if_valid(node, parent_hash, is_root).await?;
                 } else {
-                    // recurse (we are in the domain of the shifted tree)
-                    let left = shifted.left_child().unwrap();
-                    self.validate_rec(&l_hash, left, false, l_ranges).await?;
-                    let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
-                    self.validate_rec(&r_hash, right, false, r_ranges).await?;
+                    let (l_ranges, r_ranges) = split(ranges, node);
+                    if shifted.is_leaf() {
+                        if !l_ranges.is_empty() {
+                            let l: TreeNode = node.left_child().unwrap();
+                            self.yield_if_valid(l, &l_hash, false).await?;
+                        }
+                        if !r_ranges.is_empty() {
+                            let r = node.right_descendant(self.tree.filled_size()).unwrap();
+                            self.yield_if_valid(r, &r_hash, false).await?;
+                        }
+                    } else {
+                        // recurse (we are in the domain of the shifted tree)
+                        let left = shifted.left_child().unwrap();
+                        self.validate_rec(&l_hash, left, false, l_ranges).await?;
+                        let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
+                        self.validate_rec(&r_hash, right, false, r_ranges).await?;
+                    }
+                }
+                Ok(())
+            }
+            .boxed_local()
+        }
+    }
+
+    /// Given just an outboard, compute all valid ranges.
+    ///
+    /// This is not cheap since it recomputes the hashes for all chunks.
+    pub fn valid_outboard_ranges<'a, O>(
+        outboard: O,
+        ranges: &'a ChunkRangesRef,
+    ) -> impl Stream<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+    {
+        Gen::new(move |co| async move {
+            if let Err(cause) = RecursiveOutboardValidator::validate(outboard, ranges, &co).await {
+                co.yield_(Err(cause)).await;
+            }
+        })
+    }
+
+    struct RecursiveOutboardValidator<'a, O: Outboard> {
+        tree: BaoTree,
+        shifted_filled_size: TreeNode,
+        outboard: O,
+        co: &'a Co<io::Result<Range<ChunkNum>>>,
+    }
+
+    impl<'a, O: Outboard> RecursiveOutboardValidator<'a, O> {
+        async fn validate(
+            outboard: O,
+            ranges: &ChunkRangesRef,
+            co: &Co<io::Result<Range<ChunkNum>>>,
+        ) -> io::Result<()> {
+            let tree = outboard.tree();
+            if tree.blocks().0 == 1 {
+                // special case for a tree that fits in one block / chunk group
+                co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
+                return Ok(());
+            }
+            let ranges = truncate_ranges(ranges, tree.size());
+            let root_hash = outboard.root();
+            let (shifted_root, shifted_filled_size) = tree.shifted();
+            let mut validator = RecursiveOutboardValidator {
+                tree,
+                shifted_filled_size,
+                outboard,
+                co,
+            };
+            validator
+                .validate_rec(&root_hash, shifted_root, true, ranges)
+                .await
+        }
+
+        fn validate_rec<'b>(
+            &'b mut self,
+            parent_hash: &'b blake3::Hash,
+            shifted: TreeNode,
+            is_root: bool,
+            ranges: &'b ChunkRangesRef,
+        ) -> LocalBoxFuture<'b, io::Result<()>> {
+            async move {
+                let yield_node_range = |node| {
+                    let range = self.tree.byte_range(node);
+                    self.co
+                        .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                };
+                if ranges.is_empty() {
+                    // this part of the tree is not of interest, so we can skip it
+                    return Ok(());
+                }
+                let node = shifted.subtract_block_size(self.tree.block_size.0);
+                if !self.tree.is_relevant_for_outboard(node) {
+                    yield_node_range(node).await;
+                    return Ok(());
+                }
+                let Some((l_hash, r_hash)) = self.outboard.load(node).await? else {
+                    // outboard is incomplete, we can't validate
+                    return Ok(());
+                };
+                let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+                if &actual != parent_hash {
+                    // hash mismatch, we can't validate
+                    return Ok(());
+                };
+                if node.is_leaf() {
+                    yield_node_range(node).await;
+                } else {
+                    let (l_ranges, r_ranges) = split(ranges, node);
+                    if shifted.is_leaf() {
+                        if !l_ranges.is_empty() {
+                            let l = node.left_child().unwrap();
+                            yield_node_range(l).await;
+                        }
+                        if !r_ranges.is_empty() {
+                            let r = node.right_descendant(self.tree.filled_size()).unwrap();
+                            yield_node_range(r).await;
+                        }
+                    } else {
+                        // recurse (we are in the domain of the shifted tree)
+                        let left = shifted.left_child().unwrap();
+                        self.validate_rec(&l_hash, left, false, l_ranges).await?;
+                        let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
+                        self.validate_rec(&r_hash, right, false, r_ranges).await?;
+                    }
                 }
                 Ok(())
             }
@@ -845,4 +889,4 @@ mod validate {
     }
 }
 #[cfg(feature = "validate")]
-pub use validate::valid_file_ranges;
+pub use validate::{valid_outboard_ranges, valid_ranges};
