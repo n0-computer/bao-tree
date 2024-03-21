@@ -241,7 +241,7 @@ fn valid_ranges_sync(outboard: &PostOrderMemOutboard) -> ChunkRanges {
 
 /// range is a range of chunks. Just using u64 for convenience in tests
 fn valid_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> ChunkRanges {
-    futures::executor::block_on(crate::io::fsm::valid_ranges(outboard)).unwrap()
+    futures::executor::block_on(crate::io::fsm::valid_outboard_ranges(outboard)).unwrap()
 }
 
 fn validate_outboard_sync_pos_impl(tree: BaoTree) {
@@ -266,7 +266,7 @@ async fn valid_file_ranges_test_impl() {
     let ranges = ChunkRanges::from(ChunkNum(0)..ChunkNum(120));
     // data[32768] = 0;
     let data = Bytes::from(data);
-    let mut stream = crate::io::fsm::valid_file_ranges(outboard, data, &ranges);
+    let mut stream = crate::io::fsm::valid_ranges(outboard, data, &ranges);
     while let Some(item) = stream.next().await {
         let item = item.unwrap();
         println!("{:?}", item);

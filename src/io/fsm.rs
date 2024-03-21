@@ -639,7 +639,7 @@ fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
 }
 
 /// Given an outboard, return a range set of all valid ranges
-pub async fn valid_ranges<O>(outboard: &mut O) -> io::Result<ChunkRanges>
+pub async fn valid_outboard_ranges<O>(outboard: &mut O) -> io::Result<ChunkRanges>
 where
     O: Outboard,
 {
@@ -722,14 +722,14 @@ mod validate {
     /// This is not cheap since it recomputes the hashes for all chunks.
     ///
     /// To reduce the amount of work, you can specify a range you are interested in.
-    pub fn valid_file_ranges<O, D>(
+    pub fn valid_ranges<'a, O, D>(
         outboard: O,
         data: D,
-        ranges: &ChunkRangesRef,
-    ) -> impl Stream<Item = io::Result<Range<ChunkNum>>> + '_
+        ranges: &'a ChunkRangesRef,
+    ) -> impl Stream<Item = io::Result<Range<ChunkNum>>> + 'a
     where
-        O: Outboard + 'static,
-        D: AsyncSliceReader + 'static,
+        O: Outboard + 'a,
+        D: AsyncSliceReader + 'a,
     {
         Gen::new(move |co| async move {
             if let Err(cause) = RecursiveDataValidator::validate(outboard, data, ranges, &co).await
@@ -845,4 +845,4 @@ mod validate {
     }
 }
 #[cfg(feature = "validate")]
-pub use validate::valid_file_ranges;
+pub use validate::valid_ranges;
