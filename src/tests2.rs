@@ -243,7 +243,7 @@ fn valid_ranges_sync(outboard: &PostOrderMemOutboard) -> ChunkRanges {
 
 /// range is a range of chunks. Just using u64 for convenience in tests
 #[cfg(feature = "validate")]
-fn valid_ranges_fsm(outboard: &mut PostOrderMemOutboard, data: Bytes) -> ChunkRanges {
+fn valid_ranges_fsm(outboard: impl crate::io::fsm::Outboard, data: Bytes) -> ChunkRanges {
     futures::executor::block_on(async move {
         let ranges = ChunkRanges::all();
         let mut stream = crate::io::fsm::valid_ranges(outboard, data, &ranges);
@@ -481,6 +481,15 @@ fn validate_fsm_neg_cases() {
         let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
         validate_fsm_neg_impl(tree, rand);
     }
+}
+
+#[test]
+fn validate_bug() {
+    let data = Bytes::from(make_test_data(19308432));
+    let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
+    let expected = ChunkRanges::from(..ByteNum(data.len() as u64).chunks());
+    let actual = valid_ranges_fsm(outboard, data.clone());
+    assert_eq!(expected, actual);
 }
 
 /// Encode data fully, decode it again, and check that both data and outboard are the same
