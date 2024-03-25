@@ -5,7 +5,7 @@
 //!
 //! This makes them occasionally a bit verbose to use, but allows being generic
 //! without having to box the futures.
-use std::{io, result};
+use std::{future::Future, io, result};
 
 use crate::{
     blake3, hash_subtree,
@@ -15,7 +15,6 @@ use crate::{
 };
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
-use futures::Future;
 use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -631,12 +630,13 @@ fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
 
 #[cfg(feature = "validate")]
 mod validate {
-    use std::{io, ops::Range};
+    use std::{future::Future, io, ops::Range, pin::Pin};
 
-    use futures::{future::LocalBoxFuture, FutureExt, Stream};
+    use futures_lite::{FutureExt, Stream};
     use genawaiter::sync::{Co, Gen};
     use iroh_io::AsyncSliceReader;
 
+    type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
     use crate::{
         blake3, hash_subtree, rec::truncate_ranges, split, BaoTree, ChunkNum, ChunkRangesRef,
         TreeNode,
@@ -837,7 +837,7 @@ mod validate {
             is_root: bool,
             ranges: &'b ChunkRangesRef,
         ) -> LocalBoxFuture<'b, io::Result<()>> {
-            async move {
+            Box::pin(async move {
                 let yield_node_range = |node| {
                     let range = self.tree.byte_range(node);
                     self.co
@@ -883,8 +883,7 @@ mod validate {
                     }
                 }
                 Ok(())
-            }
-            .boxed_local()
+            })
         }
     }
 }
