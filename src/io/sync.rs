@@ -19,7 +19,6 @@ use crate::{
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
-use range_collections::{range_set::RangeSetRange, RangeSetRef};
 use smallvec::SmallVec;
 
 use super::{combine_hash_pair, outboard::PreOrderMemOutboard, DecodeError, StartDecodeError};
@@ -656,47 +655,74 @@ where
     Ok(outboard)
 }
 
-/// Write ranges from memory to disk
-///
-/// This is useful for writing changes to outboards.
-/// Note that it is up to you to call flush.
-pub fn write_ranges(
-    from: impl AsRef<[u8]>,
-    mut to: impl WriteAt,
-    ranges: &RangeSetRef<u64>,
-) -> io::Result<()> {
-    let from = from.as_ref();
-    let end = from.len() as u64;
-    for range in ranges.iter() {
-        let range = match range {
-            RangeSetRange::RangeFrom(x) => *x.start..end,
-            RangeSetRange::Range(x) => *x.start..*x.end,
-        };
-        let start = usize::try_from(range.start).unwrap();
-        let end = usize::try_from(range.end).unwrap();
-        to.write_all_at(range.start, &from[start..end])?;
-    }
-    Ok(())
-}
-
-/// Compute the post order outboard for the given data, writing into a io::Write
-pub fn outboard_post_order(
+/// Compute the outboard for the given data. Unlike [outboard_post_order], this will
+/// work with any outboard implementation, but it is not guaranteed that writes
+/// are sequential.
+pub fn outboard(
     data: impl Read,
-    size: u64,
-    block_size: BlockSize,
-    mut outboard: impl Write,
+    tree: BaoTree,
+    mut outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
-    let tree = BaoTree::new(ByteNum(size), block_size);
-    let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-    let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
-    outboard.write_all(&size.to_le_bytes())?;
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let hash = outboard_impl(tree, data, &mut outboard, &mut buffer)?;
     Ok(hash)
 }
 
-/// Compute the post order outboard for the given data
+/// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
+fn outboard_impl(
+    tree: BaoTree,
+    mut data: impl Read,
+    mut outboard: impl OutboardMut,
+    buffer: &mut [u8],
+) -> io::Result<blake3::Hash> {
+    // do not allocate for small trees
+    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+    debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
+    for item in tree.post_order_chunks_iter() {
+        match item {
+            BaoChunk::Parent { is_root, node, .. } => {
+                let right_hash = stack.pop().unwrap();
+                let left_hash = stack.pop().unwrap();
+                outboard.save(node, &(left_hash, right_hash))?;
+                let parent = parent_cv(&left_hash, &right_hash, is_root);
+                stack.push(parent);
+            }
+            BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ..
+            } => {
+                let buf = &mut buffer[..size];
+                data.read_exact(buf)?;
+                let hash = hash_subtree(start_chunk.0, buf, is_root);
+                stack.push(hash);
+            }
+        }
+    }
+    debug_assert_eq!(stack.len(), 1);
+    let hash = stack.pop().unwrap();
+    Ok(hash)
+}
+
+/// Compute the post order outboard for the given data, writing into a io::Write
 ///
-/// This is the internal version that takes a start chunk and does not append the size!
-pub(crate) fn outboard_post_order_impl(
+/// For the post order outboard, writes to the target are sequential.
+///
+/// This will not add the size to the output. You need to store it somewhere else
+/// or append it yourself.
+pub fn outboard_post_order(
+    data: impl Read,
+    tree: BaoTree,
+    mut outboard: impl Write,
+) -> io::Result<blake3::Hash> {
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
+    Ok(hash)
+}
+
+/// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
+fn outboard_post_order_impl(
     tree: BaoTree,
     mut data: impl Read,
     mut outboard: impl Write,

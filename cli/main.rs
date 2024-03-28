@@ -1,7 +1,7 @@
 use anyhow::Context;
-use bao_tree::BlockSize;
+use bao_tree::{BaoTree, BlockSize, ByteNum};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(version)]
@@ -47,9 +47,11 @@ fn main() -> anyhow::Result<()> {
             let source = std::fs::File::open(&path)?;
             let target = std::fs::File::create(out)?;
             let source = std::io::BufReader::with_capacity(1024 * 1024 * 16, source);
-            let target = std::io::BufWriter::with_capacity(1024 * 1024 * 16, target);
+            let mut target = std::io::BufWriter::with_capacity(1024 * 1024 * 16, target);
             let t0 = std::time::Instant::now();
-            let hash = bao_tree::io::sync::outboard_post_order(source, size, bs, target)?;
+            let tree = BaoTree::new(ByteNum(size), bs);
+            let hash = bao_tree::io::sync::outboard_post_order(source, tree, &mut target)?;
+            target.write_all(size.to_le_bytes().as_ref())?;
             let dt = t0.elapsed();
             let rate = size as f64 / dt.as_secs_f64();
             println!("{}", hash);

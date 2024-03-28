@@ -55,6 +55,9 @@ harness = false
 [workspace]
 members = ["cli"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [[example]]
 name = "cli"
 required-features = ["tokio_fsm"]

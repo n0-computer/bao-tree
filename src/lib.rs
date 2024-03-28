@@ -42,7 +42,7 @@ pub type ChunkRanges = range_collections::RangeSet2<ChunkNum>;
 
 /// A referenceable set of chunk ranges
 ///
-/// [ChunkRanges] implements [AsRef<ChunkRangesRef>].
+/// [ChunkRanges] implements [`AsRef<ChunkRangesRef>`].
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
 fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
@@ -204,7 +204,7 @@ impl BaoTree {
     /// Traverse the part of the tree that is relevant for a ranges querys
     /// in pre order as [NodeInfo]s
     ///
-    /// This is mostly used internally by the [PreOrderChunkIterRef]
+    /// This is mostly used internally.
     ///
     /// When `min_level` is set to a value greater than 0, the iterator will
     /// skip all branch nodes that are at a level < min_level if they are fully
