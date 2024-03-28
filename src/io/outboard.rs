@@ -95,6 +95,9 @@ impl crate::io::fsm::OutboardMut for EmptyOutboard {
 }
 
 /// A generic outboard in pre order
+///
+/// Caution: unlike the outboard implementation in the bao crate, this
+/// implementation does not assume an 8 byte size prefix.
 #[derive(Debug, Clone)]
 pub struct PreOrderOutboard<R> {
     /// root hash
@@ -116,11 +119,11 @@ impl<R> PreOrderOutboard<R> {
 #[derive(Debug, Clone)]
 pub struct PostOrderOutboard<R> {
     /// root hash
-    pub(crate) root: blake3::Hash,
+    pub root: blake3::Hash,
     /// tree defining the data
-    pub(crate) tree: BaoTree,
+    pub tree: BaoTree,
     /// hashes with length prefix
-    pub(crate) data: R,
+    pub data: R,
 }
 
 impl<R> PostOrderOutboard<R> {

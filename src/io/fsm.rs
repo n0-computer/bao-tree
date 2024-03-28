@@ -142,7 +142,7 @@ impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(None);
         };
-        let offset = offset * 64 + 8;
+        let offset = offset * 64;
         let content = self.data.read_at(offset, 64).await?;
         Ok(Some(if content.len() != 64 {
             (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
@@ -175,7 +175,7 @@ impl<W: AsyncSliceWriter> OutboardMut for PreOrderOutboard<W> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(());
         };
-        let offset = offset * 64 + 8;
+        let offset = offset * 64;
         let mut buf = [0u8; 64];
         buf[..32].copy_from_slice(hash_pair.0.as_bytes());
         buf[32..].copy_from_slice(hash_pair.1.as_bytes());

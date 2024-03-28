@@ -134,22 +134,8 @@ impl<O: Outboard> Outboard for &mut O {
 
 impl<R: ReadAt + Size> PreOrderOutboard<R> {
     /// Create a new outboard from a reader, root hash, and block size.
-    pub fn new(root: blake3::Hash, block_size: BlockSize, data: R) -> io::Result<Self> {
-        let mut content = [0u8; 8];
-        data.read_exact_at(0, &mut content)?;
-        let len = ByteNum(u64::from_le_bytes(content[0..8].try_into().unwrap()));
-        let tree = BaoTree::new(len, block_size);
-        let expected_outboard_size = super::outboard_size(len.0, block_size);
-        let size = data.size()?;
-        if size != Some(expected_outboard_size) {
-            io_error!(
-                "Expected outboard size of {} bytes, but got {} bytes",
-                expected_outboard_size,
-                size.map(|s| s.to_string()).unwrap_or("unknown".to_string())
-            );
-        }
-        // zero pad the rest, if needed.
-        Ok(Self { root, tree, data })
+    pub fn new(root: blake3::Hash, tree: BaoTree, data: R) -> Self {
+        Self { root, tree, data }
     }
 }
 
@@ -166,7 +152,7 @@ impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(None);
         };
-        let offset = offset * 64 + 8;
+        let offset = offset * 64;
         let mut content = [0u8; 64];
         self.data.read_exact_at(offset, &mut content)?;
         Ok(Some(parse_hash_pair(content)))
@@ -178,7 +164,7 @@ impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(());
         };
-        let offset = offset * 64 + 8;
+        let offset = offset * 64;
         let mut content = [0u8; 64];
         content[0..32].copy_from_slice(hash_pair.0.as_bytes());
         content[32..64].copy_from_slice(hash_pair.1.as_bytes());
@@ -189,27 +175,8 @@ impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
 
 impl<R: ReadAt + Size> PostOrderOutboard<R> {
     /// Create a new outboard from a reader, root hash, and block size.
-    pub fn new(root: blake3::Hash, block_size: BlockSize, data: R) -> io::Result<Self> {
-        // validate roughly that the outboard is correct
-        let Some(outboard_size) = data.size()? else {
-            io_error!("outboard must have a known size");
-        };
-        if outboard_size < 8 {
-            io_error!("outboard is too short");
-        };
-        let mut suffix = [0u8; 8];
-        data.read_exact_at(outboard_size - 8, &mut suffix)?;
-        let len = u64::from_le_bytes(suffix);
-        let expected_outboard_size = super::outboard_size(len, block_size);
-        if outboard_size != expected_outboard_size {
-            io_error!(
-                "Expected outboard size of {} bytes, but got {} bytes",
-                expected_outboard_size,
-                outboard_size
-            );
-        }
-        let tree = BaoTree::new(ByteNum(len), block_size);
-        Ok(Self { root, tree, data })
+    pub fn new(root: blake3::Hash, tree: BaoTree, data: R) -> Self {
+        Self { root, tree, data }
     }
 }
 
@@ -226,7 +193,7 @@ impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
         let Some(offset) = self.tree.post_order_offset(node) else {
             return Ok(None);
         };
-        let offset = offset.value() * 64 + 8;
+        let offset = offset.value() * 64;
         let mut content = [0u8; 64];
         self.data.read_exact_at(offset, &mut content)?;
         Ok(Some(parse_hash_pair(content)))
