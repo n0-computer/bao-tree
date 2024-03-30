@@ -9,7 +9,7 @@ use crate::{
     blake3,
     io::error::{AnyDecodeError, EncodeError},
     io::{
-        outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
+        outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
         Header, Leaf, Parent,
     },
     iter::BaoChunk,
@@ -21,14 +21,8 @@ use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
 use smallvec::SmallVec;
 
-use super::{combine_hash_pair, outboard::PreOrderMemOutboard, DecodeError, StartDecodeError};
+use super::{combine_hash_pair, DecodeError, StartDecodeError};
 use crate::{hash_subtree, iter::ResponseIterRef};
-
-macro_rules! io_error {
-    ($($arg:tt)*) => {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
-    };
-}
 
 /// An item of a decode response
 #[derive(Debug)]
@@ -196,82 +190,6 @@ impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
         let mut content = [0u8; 64];
         self.data.read_exact_at(offset, &mut content)?;
         Ok(Some(parse_hash_pair(content)))
-    }
-}
-
-impl PreOrderMemOutboard {
-    /// Load a pre-order outboard from a reader, root hash, and block size.
-    pub fn load(
-        root: blake3::Hash,
-        outboard_reader: impl ReadAt + Size,
-        block_size: BlockSize,
-    ) -> io::Result<Self> {
-        // validate roughly that the outboard is correct
-        let Some(size) = outboard_reader.size()? else {
-            io_error!("outboard must have a known size");
-        };
-        let Ok(size) = usize::try_from(size) else {
-            io_error!("outboard size must be less than usize::MAX");
-        };
-        let mut outboard = vec![0; size];
-        outboard_reader.read_exact_at(0, &mut outboard)?;
-        if outboard.len() < 8 {
-            io_error!("outboard must be at least 8 bytes");
-        };
-        let prefix = &outboard[..8];
-        let len = u64::from_le_bytes(prefix.try_into().unwrap());
-        let expected_outboard_size = super::outboard_size(len, block_size);
-        let outboard_size = outboard.len() as u64;
-        if outboard_size != expected_outboard_size {
-            io_error!(
-                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"
-            );
-        }
-        let tree = BaoTree::new(ByteNum(len), block_size);
-        outboard.splice(..8, []);
-        Ok(Self {
-            root,
-            tree,
-            data: outboard,
-        })
-    }
-}
-
-impl PostOrderMemOutboard {
-    /// Load a post-order outboard from a reader, root hash, and block size.
-    pub fn load(
-        root: blake3::Hash,
-        outboard_reader: impl ReadAt + Size,
-        block_size: BlockSize,
-    ) -> io::Result<Self> {
-        // validate roughly that the outboard is correct
-        let Some(size) = outboard_reader.size()? else {
-            io_error!("outboard must have a known size");
-        };
-        let Ok(size) = usize::try_from(size) else {
-            io_error!("outboard size must be less than usize::MAX");
-        };
-        let mut outboard = vec![0; size];
-        outboard_reader.read_exact_at(0, &mut outboard)?;
-        if outboard.len() < 8 {
-            io_error!("outboard must be at least 8 bytes");
-        };
-        let suffix = &outboard[outboard.len() - 8..];
-        let len = u64::from_le_bytes(suffix.try_into().unwrap());
-        let expected_outboard_size = super::outboard_size(len, block_size);
-        let outboard_size = outboard.len() as u64;
-        if outboard_size != expected_outboard_size {
-            io_error!(
-                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"
-            );
-        }
-        let tree = BaoTree::new(ByteNum(len), block_size);
-        outboard.truncate(outboard.len() - 8);
-        Ok(Self {
-            root,
-            tree,
-            data: outboard,
-        })
     }
 }
 
@@ -749,50 +667,6 @@ fn outboard_post_order_impl(
             } => {
                 let buf = &mut buffer[..size];
                 data.read_exact(buf)?;
-                let hash = hash_subtree(start_chunk.0, buf, is_root);
-                stack.push(hash);
-            }
-        }
-    }
-    debug_assert_eq!(stack.len(), 1);
-    let hash = stack.pop().unwrap();
-    Ok(hash)
-}
-
-/// Fill a mutable outboard from the given in memory data
-pub(crate) fn write_outboard_from_mem<O: Outboard + OutboardMut>(
-    data: &[u8],
-    mut outboard: O,
-) -> io::Result<blake3::Hash> {
-    let tree = outboard.tree();
-    if tree.size != ByteNum(data.len() as u64) {
-        io_error!(
-            "data size does not match outboard size: {} != {}",
-            data.len(),
-            tree.size
-        );
-    }
-    // do not allocate for small trees
-    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    for item in tree.post_order_chunks_iter() {
-        match item {
-            BaoChunk::Parent { is_root, node, .. } => {
-                let right_hash = stack.pop().unwrap();
-                let left_hash = stack.pop().unwrap();
-                let pair = (left_hash, right_hash);
-                outboard.save(node, &pair)?;
-                let parent = parent_cv(&left_hash, &right_hash, is_root);
-                stack.push(parent);
-            }
-            BaoChunk::Leaf {
-                size,
-                is_root,
-                start_chunk,
-                ..
-            } => {
-                let start = start_chunk.to_bytes().to_usize();
-                let end = start + size;
-                let buf = &data[start..end];
                 let hash = hash_subtree(start_chunk.0, buf, is_root);
                 stack.push(hash);
             }

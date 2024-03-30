@@ -63,7 +63,6 @@ fn post_order_outboard_reference_2(data: &[u8]) -> PostOrderMemOutboard {
         BaoTree::new(ByteNum(data.len() as u64), BlockSize::ZERO),
         outboard,
     )
-    .unwrap()
 }
 
 /// Computes a reference pre order outboard using the bao crate (chunk_group_log = 0) and then flips it to a post-order outboard.
@@ -77,7 +76,7 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let tree = BaoTree::new(ByteNum(data.len() as u64), BlockSize::ZERO);
     outboard.splice(..8, []);
     let pre = PreOrderMemOutboard::new(hash, tree, outboard);
-    pre.unwrap().flip()
+    pre.flip()
 }
 
 fn encode_slice_reference(data: &[u8], chunk_range: Range<ChunkNum>) -> (Vec<u8>, blake3::Hash) {
@@ -103,8 +102,6 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     };
     let expected = encode_slice_reference(&data, range.clone()).0;
     let ob = PostOrderMemOutboard::create(&data, BlockSize::ZERO);
-    let hash = ob.root();
-    let outboard = ob.into_inner_with_suffix();
     let ranges = ChunkRanges::from(range);
     let actual = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
     assert_eq!(expected.len(), actual.len());
@@ -120,7 +117,6 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
         return;
     }
     let mut actual2 = Vec::new();
-    let ob = PostOrderMemOutboard::load(hash, outboard, BlockSize::ZERO).unwrap();
     encode_ranges(&data, &ob, &ranges, Cursor::new(&mut actual2)).unwrap();
     assert_eq!(expected.len(), actual2.len());
     assert_eq!(expected, actual2);
@@ -230,7 +226,7 @@ fn bao_tree_outboard_levels() {
         assert_eq!(expected, hash);
         assert_eq!(
             ByteNum(outboard.len() as u64),
-            BaoTree::outboard_size(ByteNum(td.len() as u64), block_size)
+            BaoTree::new(ByteNum(td.len() as u64), block_size).outboard_size() + 8
         );
     }
 }

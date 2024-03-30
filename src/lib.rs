@@ -249,13 +249,8 @@ impl BaoTree {
         self.blocks().0 - 1
     }
 
-    pub(crate) fn outboard_size(size: ByteNum, block_size: BlockSize) -> ByteNum {
-        Self::raw_outboard_size(size, block_size) + 8
-    }
-
-    pub(crate) fn raw_outboard_size(size: ByteNum, block_size: BlockSize) -> ByteNum {
-        let tree = Self::new(size, block_size);
-        ByteNum(tree.outboard_hash_pairs() * 64)
+    pub(crate) fn outboard_size(&self) -> ByteNum {
+        ByteNum(self.outboard_hash_pairs() * 64)
     }
 
     fn filled_size(&self) -> TreeNode {

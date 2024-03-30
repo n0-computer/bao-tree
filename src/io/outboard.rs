@@ -3,10 +3,8 @@
 //! A number of implementations for the sync and async outboard traits are provided.
 //! Implementations for in-memory outboards, for outboards where the data resides on disk,
 //! and a special implementation [EmptyOutboard] that just ignores all writes.
-
-use super::{sync::write_outboard_from_mem, TreeNode};
-use crate::{blake3, BaoTree, BlockSize, ByteNum};
-use std::{fmt, io};
+use crate::{blake3, BaoTree, BlockSize, ByteNum, TreeNode};
+use std::io;
 
 /// An empty outboard, that just returns 0 hashes for all nodes.
 ///
@@ -134,46 +132,33 @@ impl<R> PostOrderOutboard<R> {
 }
 
 /// A post order outboard that is optimized for memory storage.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostOrderMemOutboard<T = Vec<u8>> {
     /// root hash
-    pub(crate) root: blake3::Hash,
+    pub root: blake3::Hash,
     /// tree defining the data
-    pub(crate) tree: BaoTree,
+    pub tree: BaoTree,
     /// hashes without length suffix
     pub data: T,
-}
-
-impl<T: AsRef<[u8]>> fmt::Debug for PostOrderMemOutboard<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let pairs = self
-            .data
-            .as_ref()
-            .chunks_exact(64)
-            .map(|chunk| parse_hash_pair(chunk.try_into().unwrap()))
-            .collect::<Vec<_>>();
-        f.debug_struct("PostOrderMemOutboard")
-            .field("root", &self.root)
-            .field("tree", &self.tree)
-            .field("data", &pairs)
-            .finish()
-    }
 }
 
 impl PostOrderMemOutboard {
     /// Create a new outboard from `data` and a `block_size`.
     ///
-    /// This will hash the data and create an outboard
+    /// This will hash the data and create an outboard.
+    ///
+    /// It is just a shortcut that calls [crate::io::sync::outboard_post_order].
     pub fn create(data: impl AsRef<[u8]>, block_size: BlockSize) -> Self {
         let data = data.as_ref();
-        let tree = BaoTree::new(ByteNum(data.len() as u64), block_size);
-        let outboard_len: usize = (tree.outboard_hash_pairs() * 64).try_into().unwrap();
-        let outboard_data = vec![0; outboard_len];
-        let root = blake3::Hash::from_bytes([0; 32]);
-        let mut outboard = Self::new(root, tree, outboard_data).unwrap();
-        let root = write_outboard_from_mem(data, &mut outboard).unwrap();
-        outboard.root = root;
-        outboard
+        let size = data.len() as u64;
+        let tree = BaoTree::new(ByteNum(size), block_size);
+        let mut outboard = Vec::with_capacity(tree.outboard_size().to_usize());
+        let root = crate::io::sync::outboard_post_order(data, tree, &mut outboard).unwrap();
+        Self {
+            root,
+            tree,
+            data: outboard,
+        }
     }
 
     /// returns the outboard data, with the length suffix.
@@ -189,19 +174,11 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
     ///
     /// This will just do a check that the data is the right size, but not check
     /// the actual hashes.
-    pub fn new(
-        root: blake3::Hash,
-        tree: BaoTree,
-        outboard_data: T,
-    ) -> std::result::Result<Self, &'static str> {
-        if outboard_data.as_ref().len() as u64 == tree.outboard_hash_pairs() * 64 {
-            Ok(Self {
-                root,
-                tree,
-                data: outboard_data,
-            })
-        } else {
-            Err("invalid outboard data size")
+    pub fn new(root: blake3::Hash, tree: BaoTree, outboard_data: T) -> Self {
+        Self {
+            root,
+            tree,
+            data: outboard_data,
         }
     }
 
@@ -211,21 +188,15 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
     }
 
     /// Map the outboard data to a new type.
-    pub fn map_data<F, U>(self, f: F) -> std::result::Result<PostOrderMemOutboard<U>, &'static str>
+    pub fn map_data<F, U>(self, f: F) -> PostOrderMemOutboard<U>
     where
         F: FnOnce(T) -> U,
         U: AsRef<[u8]>,
     {
-        let len = self.data.as_ref().len();
-        let data = f(self.data);
-        if data.as_ref().len() == len {
-            Ok(PostOrderMemOutboard {
-                root: self.root,
-                tree: self.tree,
-                data,
-            })
-        } else {
-            Err("invalid outboard data size")
+        PostOrderMemOutboard {
+            root: self.root,
+            tree: self.tree,
+            data: f(self.data),
         }
     }
 
@@ -339,30 +310,14 @@ fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutbo
 }
 
 /// A pre order outboard that is optimized for memory storage.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreOrderMemOutboard<T = Vec<u8>> {
     /// root hash
-    pub(crate) root: blake3::Hash,
+    pub root: blake3::Hash,
     /// tree defining the data
-    pub(crate) tree: BaoTree,
+    pub tree: BaoTree,
     /// hashes with length prefix
     pub data: T,
-}
-
-impl<T: AsRef<[u8]>> fmt::Debug for PreOrderMemOutboard<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let pairs = self
-            .data
-            .as_ref()
-            .chunks_exact(64)
-            .map(|chunk| parse_hash_pair(chunk.try_into().unwrap()))
-            .collect::<Vec<_>>();
-        f.debug_struct("PreOrderMemOutboard")
-            .field("root", &self.root)
-            .field("tree", &self.tree)
-            .field("data", &pairs)
-            .finish()
-    }
 }
 
 impl PreOrderMemOutboard {
@@ -378,14 +333,15 @@ impl PreOrderMemOutboard {
     /// This will hash the data and create an outboard
     pub fn create(data: impl AsRef<[u8]>, block_size: BlockSize) -> Self {
         let data = data.as_ref();
-        let tree = BaoTree::new(ByteNum(data.len() as u64), block_size);
-        let outboard_len: usize = (tree.outboard_hash_pairs() * 64).try_into().unwrap();
-        let outboard_data = vec![0u8; outboard_len];
-        let root = blake3::Hash::from_bytes([0; 32]);
-        let mut outboard = Self::new(root, tree, outboard_data).unwrap();
-        let root = write_outboard_from_mem(data, &mut outboard).unwrap();
-        outboard.root = root;
-        outboard
+        let size = data.len() as u64;
+        let tree = BaoTree::new(ByteNum(size), block_size);
+        // the outboard impl for PreOrderMemOutboard requires just AsMut<[u8]>,
+        // so the data must already be the right size.
+        let outboard = vec![0u8; tree.outboard_size().to_usize()];
+        let mut res = Self::new(blake3::Hash::from([0; 32]), tree, outboard);
+        let root = crate::io::sync::outboard(data, tree, &mut res).unwrap();
+        res.root = root;
+        res
     }
 }
 
@@ -396,19 +352,11 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
     /// the actual hashes.
     ///
     /// Note that if you have data with a length prefix, you have to remove the prefix first.
-    pub fn new(
-        root: blake3::Hash,
-        tree: BaoTree,
-        outboard_data: T,
-    ) -> std::result::Result<Self, &'static str> {
-        if outboard_data.as_ref().len() as u64 == tree.outboard_hash_pairs() * 64 {
-            Ok(Self {
-                root,
-                tree,
-                data: outboard_data,
-            })
-        } else {
-            Err("invalid outboard data size")
+    pub fn new(root: blake3::Hash, tree: BaoTree, outboard_data: T) -> Self {
+        Self {
+            root,
+            tree,
+            data: outboard_data,
         }
     }
 

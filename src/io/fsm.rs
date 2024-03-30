@@ -576,25 +576,19 @@ where
 ///
 /// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
 /// the outboard.
-pub async fn decode_response_into<R, O, W, F, Fut>(
-    root: blake3::Hash,
-    block_size: BlockSize,
-    ranges: ChunkRanges,
+pub async fn decode_response<R, O, W>(
     encoded: R,
-    create: F,
+    ranges: ChunkRanges,
     mut target: W,
-) -> io::Result<Option<O>>
+    mut outboard: O,
+) -> io::Result<()>
 where
-    O: OutboardMut,
+    O: OutboardMut + Outboard,
     R: AsyncRead + Unpin,
     W: AsyncSliceWriter,
-    F: FnOnce(blake3::Hash, BaoTree) -> Fut,
-    Fut: Future<Output = io::Result<O>>,
 {
-    let start = ResponseDecoderStart::new(root, ranges, block_size, encoded);
-    let (mut reading, _size) = start.next().await?;
-    let mut outboard = None;
-    let mut create = Some(create);
+    let mut reading =
+        ResponseDecoderReading::new(outboard.root(), ranges, outboard.tree(), encoded);
     loop {
         let item = match reading.next().await {
             ResponseDecoderReadingNext::Done(_reader) => break,
@@ -605,15 +599,6 @@ where
         };
         match item {
             BaoContentItem::Parent(Parent { node, pair }) => {
-                let outboard = if let Some(outboard) = outboard.as_mut() {
-                    outboard
-                } else {
-                    let tree = reading.tree();
-                    let create = create.take().unwrap();
-                    let new = create(root, tree).await?;
-                    outboard = Some(new);
-                    outboard.as_mut().unwrap()
-                };
                 outboard.save(node, &pair).await?;
             }
             BaoContentItem::Leaf(Leaf { offset, data }) => {
@@ -621,7 +606,7 @@ where
             }
         }
     }
-    Ok(outboard)
+    Ok(())
 }
 fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());

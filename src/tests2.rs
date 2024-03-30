@@ -12,6 +12,7 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::ops::Range;
 use test_strategy::proptest;
+use tokio::io::AsyncReadExt;
 
 use crate::io::outboard::PreOrderMemOutboard;
 use crate::rec::{
@@ -516,14 +517,13 @@ fn encode_decode_full_sync_impl(
         |tree, root: blake3::Hash| {
             let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
             let outboard_data = vec![0; outboard_size];
-            Ok(PostOrderMemOutboard::new(root, tree, outboard_data).unwrap())
+            Ok(PostOrderMemOutboard::new(root, tree, outboard_data))
         },
         &mut decoded,
     )
     .unwrap();
-    let ob_res = ob_res_opt.unwrap_or_else(|| {
-        PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]).unwrap()
-    });
+    let ob_res = ob_res_opt
+        .unwrap_or_else(|| PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]));
     ((decoded, ob_res), (data.to_vec(), outboard))
 }
 
@@ -543,31 +543,25 @@ async fn encode_decode_full_fsm_impl(
     crate::io::fsm::encode_ranges_validated(
         Bytes::from(data.clone()),
         &mut outboard,
-        &ChunkRanges::all(),
+        &ranges,
         &mut encoded,
     )
     .await
     .unwrap();
 
     let mut read_encoded = std::io::Cursor::new(encoded);
+    let size = read_encoded.read_u64_le().await.unwrap();
+    let mut ob_res = {
+        let tree = BaoTree::new(ByteNum(size), outboard.tree().block_size());
+        let root = outboard.root();
+        let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
+        let outboard_data = vec![0u8; outboard_size];
+        PostOrderMemOutboard::new(root, tree, outboard_data)
+    };
     let mut decoded = BytesMut::new();
-    let ob_res_opt = crate::io::fsm::decode_response_into(
-        outboard.root(),
-        outboard.tree().block_size,
-        ranges,
-        &mut read_encoded,
-        |root, tree| async move {
-            let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
-            let outboard_data = vec![0u8; outboard_size];
-            Ok(PostOrderMemOutboard::new(root, tree, outboard_data).unwrap())
-        },
-        &mut decoded,
-    )
-    .await
-    .unwrap();
-    let ob_res = ob_res_opt.unwrap_or_else(|| {
-        PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]).unwrap()
-    });
+    crate::io::fsm::decode_response(read_encoded, ranges, &mut decoded, &mut ob_res)
+        .await
+        .unwrap();
     ((data, outboard), (decoded.to_vec(), ob_res))
 }
 

@@ -41,18 +41,21 @@ pub struct Leaf {
 }
 
 /// The outboard size of a file of size `size` with a block size of `block_size`
-pub fn raw_outboard_size(size: u64, block_size: BlockSize) -> u64 {
-    BaoTree::raw_outboard_size(ByteNum(size), block_size).0
+pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
+    BaoTree::new(ByteNum(size), block_size).outboard_size().0
 }
 
 /// The outboard size including the 8 byte size header
-pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
-    BaoTree::outboard_size(ByteNum(size), block_size).0
+///
+/// This exists mostly as a homage to the original bao implementation.
+pub fn outboard_size_with_prefix(size: u64, block_size: BlockSize) -> u64 {
+    outboard_size(size, block_size) + 8
 }
 
-/// The encoded size of a file of size `size` with a block size of `block_size`
+/// The encoded size of a file of size `size` with a block size of `block_size`,
+/// including a size prefix.
 pub fn encoded_size(size: u64, block_size: BlockSize) -> u64 {
-    outboard_size(size, block_size) + size
+    outboard_size_with_prefix(size, block_size) + size
 }
 
 /// Computes the pre order outboard of a file in memory.
