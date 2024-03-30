@@ -18,7 +18,7 @@ use bytes::{Bytes, BytesMut};
 use futures::Future;
 use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     io::{
@@ -627,6 +627,110 @@ fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
     (l_hash, r_hash)
+}
+
+/// Compute the outboard for the given data. Unlike [outboard_post_order], this will
+/// work with any outboard implementation, but it is not guaranteed that writes
+/// are sequential.
+pub async fn outboard(
+    data: impl AsyncRead + Unpin,
+    tree: BaoTree,
+    mut outboard: impl OutboardMut,
+) -> io::Result<blake3::Hash> {
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let hash = outboard_impl(tree, data, &mut outboard, &mut buffer).await?;
+    Ok(hash)
+}
+
+/// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
+async fn outboard_impl(
+    tree: BaoTree,
+    mut data: impl AsyncRead + Unpin,
+    mut outboard: impl OutboardMut,
+    buffer: &mut [u8],
+) -> io::Result<blake3::Hash> {
+    // do not allocate for small trees
+    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+    debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
+    for item in tree.post_order_chunks_iter() {
+        match item {
+            BaoChunk::Parent { is_root, node, .. } => {
+                let right_hash = stack.pop().unwrap();
+                let left_hash = stack.pop().unwrap();
+                outboard.save(node, &(left_hash, right_hash)).await?;
+                let parent = parent_cv(&left_hash, &right_hash, is_root);
+                stack.push(parent);
+            }
+            BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ..
+            } => {
+                let buf = &mut buffer[..size];
+                data.read_exact(buf).await?;
+                let hash = hash_subtree(start_chunk.0, buf, is_root);
+                stack.push(hash);
+            }
+        }
+    }
+    debug_assert_eq!(stack.len(), 1);
+    let hash = stack.pop().unwrap();
+    Ok(hash)
+}
+
+/// Compute the post order outboard for the given data, writing into a io::Write
+///
+/// For the post order outboard, writes to the target are sequential.
+///
+/// This will not add the size to the output. You need to store it somewhere else
+/// or append it yourself.
+pub async fn outboard_post_order(
+    data: impl AsyncRead + Unpin,
+    tree: BaoTree,
+    mut outboard: impl AsyncWrite + Unpin,
+) -> io::Result<blake3::Hash> {
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer).await?;
+    Ok(hash)
+}
+
+/// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
+async fn outboard_post_order_impl(
+    tree: BaoTree,
+    mut data: impl AsyncRead + Unpin,
+    mut outboard: impl AsyncWrite + Unpin,
+    buffer: &mut [u8],
+) -> io::Result<blake3::Hash> {
+    // do not allocate for small trees
+    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+    debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
+    for item in tree.post_order_chunks_iter() {
+        match item {
+            BaoChunk::Parent { is_root, .. } => {
+                let right_hash = stack.pop().unwrap();
+                let left_hash = stack.pop().unwrap();
+                outboard.write_all(left_hash.as_bytes()).await?;
+                outboard.write_all(right_hash.as_bytes()).await?;
+                let parent = parent_cv(&left_hash, &right_hash, is_root);
+                stack.push(parent);
+            }
+            BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ..
+            } => {
+                let buf = &mut buffer[..size];
+                data.read_exact(buf).await?;
+                let hash = hash_subtree(start_chunk.0, buf, is_root);
+                stack.push(hash);
+            }
+        }
+    }
+    debug_assert_eq!(stack.len(), 1);
+    let hash = stack.pop().unwrap();
+    Ok(hash)
 }
 
 #[cfg(feature = "validate")]
