@@ -244,8 +244,15 @@ fn mem_outboard_flip_proptest(#[strategy(tree())] tree: BaoTree) {
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
-fn valid_ranges_sync(outboard: &PostOrderMemOutboard) -> ChunkRanges {
-    crate::io::sync::valid_outboard_ranges(outboard).unwrap()
+#[cfg(feature = "validate")]
+fn valid_outboard_ranges_sync(outboard: impl crate::io::sync::Outboard) -> ChunkRanges {
+    let ranges = ChunkRanges::all();
+    let iter = crate::io::sync::valid_outboard_ranges(outboard, &ranges);
+    let mut res = ChunkRanges::empty();
+    for item in iter {
+        res |= ChunkRanges::from(item.unwrap());
+    }
+    res
 }
 
 /// range is a range of chunks. Just using u64 for convenience in tests
@@ -287,7 +294,7 @@ fn validate_outboard_sync_pos_impl(tree: BaoTree) {
     let data = make_test_data(size);
     let outboard = PostOrderMemOutboard::create(data, block_size);
     let expected = ChunkRanges::from(..outboard.tree().chunks());
-    let actual = valid_ranges_sync(&outboard);
+    let actual = valid_outboard_ranges_sync(&outboard);
     assert_eq!(expected, actual)
 }
 
@@ -403,7 +410,7 @@ fn validate_outboard_sync_neg_impl(tree: BaoTree, rand: u32) {
         // flip a random bit in the outboard
         flip_bit(&mut outboard.data, rand);
         // Check that at least one range is invalid
-        let actual = valid_ranges_sync(&outboard);
+        let actual = valid_outboard_ranges_sync(&outboard);
         assert_ne!(expected, actual);
     }
 }
