@@ -39,6 +39,9 @@ fn read_len(mut from: impl std::io::Read) -> std::io::Result<ByteNum> {
     Ok(len)
 }
 
+#[cfg(feature = "validate")]
+use futures_lite::StreamExt;
+
 fn tree() -> impl Strategy<Value = BaoTree> {
     (0u64..100000, 0u8..5).prop_map(|(size, block_size)| {
         let block_size = BlockSize(block_size);
@@ -218,7 +221,9 @@ fn post_oder_outboard_fsm_impl(tree: BaoTree) {
         outboard.data.len() as u64,
         outboard.tree().outboard_hash_pairs() * 64
     );
-    futures::executor::block_on(outboard_test_fsm(&data, outboard));
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(outboard_test_fsm(&data, outboard));
 }
 
 #[proptest]
@@ -243,7 +248,6 @@ fn mem_outboard_flip_proptest(#[strategy(tree())] tree: BaoTree) {
 #[cfg(feature = "validate")]
 mod validate {
     use super::*;
-    use futures::StreamExt;
 
     /// range is a range of chunks. Just using u64 for convenience in tests
     fn valid_outboard_ranges_sync(outboard: impl crate::io::sync::Outboard) -> ChunkRanges {
@@ -258,7 +262,7 @@ mod validate {
 
     /// range is a range of chunks. Just using u64 for convenience in tests
     fn valid_ranges_fsm(outboard: impl crate::io::fsm::Outboard, data: Bytes) -> ChunkRanges {
-        futures::executor::block_on(async move {
+        run_blocking(async move {
             let ranges = ChunkRanges::all();
             let mut stream = crate::io::fsm::valid_ranges(outboard, data, &ranges);
             let mut res = ChunkRanges::empty();
@@ -285,7 +289,7 @@ mod validate {
 
     /// range is a range of chunks. Just using u64 for convenience in tests
     fn valid_outboard_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> ChunkRanges {
-        futures::executor::block_on(async move {
+        run_blocking(async move {
             let ranges = ChunkRanges::all();
             let mut stream = crate::io::fsm::valid_outboard_ranges(outboard, &ranges);
             let mut res = ChunkRanges::empty();
@@ -666,7 +670,9 @@ fn encode_decode_full_fsm_cases() {
     for tree in cases {
         let data = make_test_data(tree.size.to_usize());
         let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
-        let pair = futures::executor::block_on(encode_decode_full_fsm_impl(data, outboard));
+        let pair = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(encode_decode_full_fsm_impl(data, outboard));
         assert_tuple_eq!(pair);
     }
 }
@@ -675,7 +681,9 @@ fn encode_decode_full_fsm_cases() {
 fn encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.to_usize());
     let outboard = PostOrderMemOutboard::create(&data, tree.block_size);
-    let pair = futures::executor::block_on(encode_decode_full_fsm_impl(data, outboard));
+    let pair = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(encode_decode_full_fsm_impl(data, outboard));
     prop_assert_tuple_eq!(pair);
 }
 
@@ -687,8 +695,9 @@ fn encode_decode_partial_fsm_proptest(
     let (size, selection) = size_and_selection;
     let data = make_test_data(size);
     let outboard = PostOrderMemOutboard::create(&data, block_size);
-    let ok =
-        futures::executor::block_on(encode_decode_partial_fsm_impl(&data, outboard, selection));
+    let ok = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(encode_decode_partial_fsm_impl(&data, outboard, selection));
     prop_assert!(ok);
 }
 
@@ -984,4 +993,8 @@ fn canonicalize_ranges_test() {
         let actual = truncate_ranges(&ranges, size);
         assert_eq!(expected, actual);
     }
+}
+
+fn run_blocking<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Runtime::new().unwrap().block_on(f)
 }

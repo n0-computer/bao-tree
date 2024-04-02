@@ -565,13 +565,12 @@ pub fn copy(from: impl Outboard, mut to: impl OutboardMut) -> io::Result<()> {
 mod validate {
     use std::{io, ops::Range};
 
-    use futures::{future::LocalBoxFuture, FutureExt};
     use genawaiter::sync::{Co, Gen};
     use positioned_io::ReadAt;
 
     use crate::{
-        blake3, hash_subtree, rec::truncate_ranges, split, BaoTree, ByteNum, ChunkNum,
-        ChunkRangesRef, TreeNode,
+        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ByteNum,
+        ChunkNum, ChunkRangesRef, TreeNode,
     };
 
     use super::Outboard;
@@ -669,7 +668,7 @@ mod validate {
             is_root: bool,
             ranges: &'b ChunkRangesRef,
         ) -> LocalBoxFuture<'b, io::Result<()>> {
-            async move {
+            Box::pin(async move {
                 if ranges.is_empty() {
                     // this part of the tree is not of interest, so we can skip it
                     return Ok(());
@@ -705,8 +704,7 @@ mod validate {
                     self.validate_rec(&r_hash, right, false, r_ranges).await?;
                 }
                 Ok(())
-            }
-            .boxed_local()
+            })
         }
     }
 
@@ -767,7 +765,7 @@ mod validate {
             is_root: bool,
             ranges: &'b ChunkRangesRef,
         ) -> LocalBoxFuture<'b, io::Result<()>> {
-            async move {
+            Box::pin(async move {
                 let yield_node_range = |range: Range<ByteNum>| {
                     self.co
                         .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
@@ -807,8 +805,7 @@ mod validate {
                     self.validate_rec(&r_hash, right, false, r_ranges).await?;
                 }
                 Ok(())
-            }
-            .boxed_local()
+            })
         }
     }
 }

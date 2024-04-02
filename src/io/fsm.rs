@@ -8,7 +8,7 @@
 //!
 //! The traits to perform async positioned io are re-exported from
 //! [iroh-io](https://crates.io/crates/iroh-io).
-use std::{io, result};
+use std::{future::Future, io, result};
 
 use crate::{
     blake3, hash_subtree,
@@ -18,7 +18,6 @@ use crate::{
 };
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
-use futures::Future;
 use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -717,13 +716,13 @@ pub async fn copy(mut from: impl Outboard, mut to: impl OutboardMut) -> io::Resu
 mod validate {
     use std::{io, ops::Range};
 
-    use futures::{future::LocalBoxFuture, FutureExt, Stream};
+    use futures_lite::{FutureExt, Stream};
     use genawaiter::sync::{Co, Gen};
     use iroh_io::AsyncSliceReader;
 
     use crate::{
-        blake3, hash_subtree, rec::truncate_ranges, split, BaoTree, ByteNum, ChunkNum,
-        ChunkRangesRef, TreeNode,
+        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ByteNum,
+        ChunkNum, ChunkRangesRef, TreeNode,
     };
 
     use super::Outboard;
@@ -915,7 +914,7 @@ mod validate {
             is_root: bool,
             ranges: &'b ChunkRangesRef,
         ) -> LocalBoxFuture<'b, io::Result<()>> {
-            async move {
+            Box::pin(async move {
                 let yield_node_range = |range: Range<ByteNum>| {
                     self.co
                         .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
@@ -955,8 +954,7 @@ mod validate {
                     self.validate_rec(&r_hash, right, false, r_ranges).await?;
                 }
                 Ok(())
-            }
-            .boxed_local()
+            })
         }
     }
 }

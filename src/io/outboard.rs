@@ -187,7 +187,11 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
 
     /// Flip the outboard to pre order.
     pub fn flip(&self) -> PreOrderMemOutboard {
-        let mut target = PreOrderMemOutboard::new(self.root, self.tree, vec![0; self.tree.outboard_size().to_usize()]);
+        let mut target = PreOrderMemOutboard::new(
+            self.root,
+            self.tree,
+            vec![0; self.tree.outboard_size().to_usize()],
+        );
         crate::io::sync::copy(self, &mut target).unwrap();
         target
     }
@@ -344,7 +348,11 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
 
     /// Flip the outboard to a post order outboard.
     pub fn flip(&self) -> PostOrderMemOutboard {
-        let mut target = PostOrderMemOutboard::new(self.root, self.tree, vec![0; self.tree.outboard_size().to_usize()]);
+        let mut target = PostOrderMemOutboard::new(
+            self.root,
+            self.tree,
+            vec![0; self.tree.outboard_size().to_usize()],
+        );
         crate::io::sync::copy(self, &mut target).unwrap();
         target
     }

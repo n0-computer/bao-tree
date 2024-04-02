@@ -1,10 +1,13 @@
 //! Implementation of bao streaming for std io and tokio io
+use std::pin::Pin;
+
 use crate::{blake3, BaoTree, BlockSize, ByteNum, ChunkNum, ChunkRanges, TreeNode};
 use bytes::Bytes;
 
 mod error;
 pub use error::*;
 use range_collections::{range_set::RangeSetRange, RangeSetRef};
+use std::future::Future;
 
 use self::outboard::PostOrderMemOutboard;
 #[cfg(feature = "tokio_fsm")]
@@ -139,3 +142,5 @@ pub(crate) fn combine_hash_pair(l: &blake3::Hash, r: &blake3::Hash) -> [u8; 64] 
     *rb = *r.as_bytes();
     res
 }
+
+pub(crate) type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;

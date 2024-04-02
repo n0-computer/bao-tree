@@ -169,7 +169,7 @@ mod fsm_tests {
         fn bao_tree_decode_slice_all_stream(len in 0..32768usize) {
             let data = make_test_data(len);
             let chunk_range = 0..(data.len() / 1024 + 1) as u64;
-            futures::executor::block_on(bao_tree_decode_slice_fsm_impl(data, chunk_range));
+            tokio::runtime::Runtime::new().unwrap().block_on(bao_tree_decode_slice_fsm_impl(data, chunk_range));
         }
     }
 }
@@ -989,7 +989,7 @@ proptest! {
         let mut expected_encoded = Vec::new();
         let outboard = PostOrderMemOutboard::create(&data, block_size);
         let data: Bytes = data.into();
-        futures::executor::block_on(crate::io::fsm::encode_ranges_validated(
+        tokio::runtime::Runtime::new().unwrap().block_on(crate::io::fsm::encode_ranges_validated(
             data,
             outboard,
             &ranges,
