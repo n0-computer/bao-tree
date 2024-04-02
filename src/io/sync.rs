@@ -1,4 +1,7 @@
-//! Syncronous IO
+//! Sync IO operations
+//!
+//! The traits to perform positioned io are re-exported from
+//! [positioned-io](https://crates.io/crates/positioned-io).
 use std::{
     io::{self, Read, Write},
     ops::Range,
@@ -10,51 +13,19 @@ use crate::{
     io::error::{AnyDecodeError, EncodeError},
     io::{
         outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
-        Header, Leaf, Parent,
+        Leaf, Parent,
     },
     iter::BaoChunk,
     rec::{encode_selected_rec, truncate_ranges},
-    BaoTree, BlockSize, ByteNum, ChunkRanges, ChunkRangesRef, TreeNode,
+    BaoTree, ByteNum, ChunkRanges, ChunkRangesRef, TreeNode,
 };
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
 use smallvec::SmallVec;
 
-use super::{combine_hash_pair, DecodeError, StartDecodeError};
+use super::{combine_hash_pair, BaoContentItem, DecodeError};
 use crate::{hash_subtree, iter::ResponseIterRef};
-
-/// An item of a decode response
-#[derive(Debug)]
-pub enum DecodeResponseItem {
-    /// We got the header and now know how big the overall size is
-    ///
-    /// Actually this is just how big the remote side *claims* the overall size is.
-    /// In an adversarial setting, this could be wrong.
-    Header(Header),
-    /// a parent node, to update the outboard
-    Parent(Parent),
-    /// a leaf node, to write to the file
-    Leaf(Leaf),
-}
-
-impl From<Header> for DecodeResponseItem {
-    fn from(h: Header) -> Self {
-        Self::Header(h)
-    }
-}
-
-impl From<Parent> for DecodeResponseItem {
-    fn from(p: Parent) -> Self {
-        Self::Parent(p)
-    }
-}
-
-impl From<Leaf> for DecodeResponseItem {
-    fn from(l: Leaf) -> Self {
-        Self::Leaf(l)
-    }
-}
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///
@@ -84,7 +55,7 @@ pub trait Outboard {
 
 /// A mutable outboard.
 ///
-/// This trait extends [Outboard] with methods to save a hash pair for a node and to set the
+/// This trait provides a way to save a hash pair for a node and to set the
 /// length of the data file.
 ///
 /// This trait can be used to incrementally save an outboard when receiving data.
@@ -250,26 +221,10 @@ where
     Ok(validator.res)
 }
 
-// When this enum is used it is in the Header variant for the first 8 bytes, then stays in
-// the Content state for the remainder.  Since the Content is the largest part that this
-// size inbalance is fine, hence allow clippy::large_enum_variant.
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-enum Position<'a> {
-    /// currently reading the header, so don't know how big the tree is
-    /// so we need to store the ranges and the chunk group log
-    Header {
-        ranges: &'a ChunkRangesRef,
-        block_size: BlockSize,
-    },
-    /// currently reading the tree, all the info we need is in the iter
-    Content { iter: ResponseIterRef<'a> },
-}
-
 /// Iterator that can be used to decode a response to a range request
 #[derive(Debug)]
 pub struct DecodeResponseIter<'a, R> {
-    inner: Position<'a>,
+    inner: ResponseIterRef<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
     buf: BytesMut,
@@ -280,32 +235,28 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     ///
     /// For decoding you need to know the root hash, block size, and the ranges that were requested.
     /// Additionally you need to provide a reader that can be used to read the encoded data.
-    pub fn new(
-        root: blake3::Hash,
-        block_size: BlockSize,
-        encoded: R,
-        ranges: &'a ChunkRangesRef,
-    ) -> Self {
-        let buf = BytesMut::with_capacity(block_size.bytes());
-        Self::new_with_buffer(root, block_size, encoded, ranges, buf)
+    pub fn new(root: blake3::Hash, tree: BaoTree, encoded: R, ranges: &'a ChunkRangesRef) -> Self {
+        let buf = BytesMut::with_capacity(tree.block_size().bytes());
+        Self::new_with_buffer(root, tree, encoded, ranges, buf)
     }
 
     /// Create a new iterator to decode a response.
     ///
     /// This is the same as [Self::new], but allows you to provide a buffer to use for decoding.
-    /// The buffer will be resized as needed, but it's capacity should be the [BlockSize::bytes].
+    /// The buffer will be resized as needed, but it's capacity should be the [crate::BlockSize::bytes].
     pub fn new_with_buffer(
         root: blake3::Hash,
-        block_size: BlockSize,
+        tree: BaoTree,
         encoded: R,
         ranges: &'a ChunkRangesRef,
         buf: BytesMut,
     ) -> Self {
+        let ranges = truncate_ranges(ranges, tree.size());
         let mut stack = SmallVec::new();
         stack.push(root);
         Self {
             stack,
-            inner: Position::Header { ranges, block_size },
+            inner: ResponseIterRef::new(tree, ranges),
             encoded,
             buf,
         }
@@ -319,29 +270,12 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     /// Get a reference to the tree used for decoding.
     ///
     /// This is only available after the first chunk has been decoded.
-    pub fn tree(&self) -> Option<BaoTree> {
-        match &self.inner {
-            Position::Content { iter } => Some(iter.tree()),
-            Position::Header { .. } => None,
-        }
+    pub fn tree(&self) -> BaoTree {
+        self.inner.tree()
     }
 
-    fn next0(&mut self) -> result::Result<Option<DecodeResponseItem>, AnyDecodeError> {
-        let inner = match &mut self.inner {
-            Position::Content { ref mut iter } => iter,
-            Position::Header { block_size, ranges } => {
-                let size =
-                    read_len(&mut self.encoded).map_err(StartDecodeError::maybe_not_found)?;
-                let tree = BaoTree::new(size, *block_size);
-                // now we know the size, so we can canonicalize the ranges
-                let ranges = truncate_ranges(ranges, tree.size());
-                self.inner = Position::Content {
-                    iter: ResponseIterRef::new(tree, ranges),
-                };
-                return Ok(Some(Header { size }.into()));
-            }
-        };
-        match inner.next() {
+    fn next0(&mut self) -> result::Result<Option<BaoContentItem>, AnyDecodeError> {
+        match self.inner.next() {
             Some(BaoChunk::Parent {
                 is_root,
                 left,
@@ -393,7 +327,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
 }
 
 impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
-    type Item = result::Result<DecodeResponseItem, AnyDecodeError>;
+    type Item = result::Result<BaoContentItem, AnyDecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next0().transpose()
@@ -533,49 +467,35 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
 ///
 /// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
 /// the outboard.
-pub fn decode_response_into<R, O, W>(
-    root: blake3::Hash,
-    block_size: BlockSize,
+pub fn decode_ranges<R, O, W>(
     ranges: &ChunkRangesRef,
     encoded: R,
-    create: impl FnOnce(BaoTree, blake3::Hash) -> io::Result<O>,
     mut target: W,
-) -> io::Result<Option<O>>
+    mut outboard: O,
+) -> io::Result<()>
 where
-    O: OutboardMut,
+    O: OutboardMut + Outboard,
     R: Read,
     W: WriteAt,
 {
-    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges);
-    let mut outboard = None;
-    let mut tree = None;
-    let mut create = Some(create);
+    let iter = DecodeResponseIter::new(outboard.root(), outboard.tree(), encoded, ranges);
     for item in iter {
         match item? {
-            DecodeResponseItem::Header(Header { size }) => {
-                tree = Some(BaoTree::new(size, block_size));
-            }
-            DecodeResponseItem::Parent(Parent { node, pair }) => {
-                let outboard = if let Some(outboard) = outboard.as_mut() {
-                    outboard
-                } else {
-                    let create = create.take().unwrap();
-                    outboard = Some(create(tree.take().unwrap(), root)?);
-                    outboard.as_mut().unwrap()
-                };
+            BaoContentItem::Parent(Parent { node, pair }) => {
                 outboard.save(node, &pair)?;
             }
-            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+            BaoContentItem::Leaf(Leaf { offset, data }) => {
                 target.write_all_at(offset.0, &data)?;
             }
         }
     }
-    Ok(outboard)
+    Ok(())
 }
 
-/// Compute the outboard for the given data. Unlike [outboard_post_order], this will
-/// work with any outboard implementation, but it is not guaranteed that writes
-/// are sequential.
+/// Compute the outboard for the given data.
+///
+/// Unlike [outboard_post_order], this will work with any outboard
+/// implementation, but it is not guaranteed that writes are sequential.
 pub fn outboard(
     data: impl Read,
     tree: BaoTree,
@@ -675,13 +595,6 @@ fn outboard_post_order_impl(
     debug_assert_eq!(stack.len(), 1);
     let hash = stack.pop().unwrap();
     Ok(hash)
-}
-
-fn read_len(mut from: impl Read) -> std::io::Result<ByteNum> {
-    let mut buf = [0; 8];
-    from.read_exact(&mut buf)?;
-    let len = ByteNum(u64::from_le_bytes(buf));
-    Ok(len)
 }
 
 fn read_parent(mut from: impl Read) -> std::io::Result<(blake3::Hash, blake3::Hash)> {

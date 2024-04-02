@@ -40,22 +40,35 @@ pub struct Leaf {
     pub data: Bytes,
 }
 
+/// A content item for the bao streaming protocol.
+///
+/// After reading the initial header, the only possible items are `Parent` and
+/// `Leaf`.
+#[derive(Debug)]
+pub enum BaoContentItem {
+    /// a parent node, to update the outboard
+    Parent(Parent),
+    /// a leaf node, to write to the file
+    Leaf(Leaf),
+}
+
+impl From<Parent> for BaoContentItem {
+    fn from(p: Parent) -> Self {
+        Self::Parent(p)
+    }
+}
+
+impl From<Leaf> for BaoContentItem {
+    fn from(l: Leaf) -> Self {
+        Self::Leaf(l)
+    }
+}
+
 /// The outboard size of a file of size `size` with a block size of `block_size`
+///
+/// This is the outboard size *without* the size prefix.
 pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
     BaoTree::new(ByteNum(size), block_size).outboard_size().0
-}
-
-/// The outboard size including the 8 byte size header
-///
-/// This exists mostly as a homage to the original bao implementation.
-pub fn outboard_size_with_prefix(size: u64, block_size: BlockSize) -> u64 {
-    outboard_size(size, block_size) + 8
-}
-
-/// The encoded size of a file of size `size` with a block size of `block_size`,
-/// including a size prefix.
-pub fn encoded_size(size: u64, block_size: BlockSize) -> u64 {
-    outboard_size_with_prefix(size, block_size) + size
 }
 
 /// Computes the pre order outboard of a file in memory.

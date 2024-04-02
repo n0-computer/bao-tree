@@ -10,8 +10,12 @@
 //! [TreeNode] provides various helpers to e.g. get the offset of a node in
 //! different traversal orders.
 //!
-//! There are various newtypes for the different kinds of integers used in the
-//! tree, e.g. [ByteNum] for number of bytes, [ChunkNum] for number of chunks.
+//! There are newtypes for the different kinds of integers used in the
+//! tree:
+//! [ByteNum] is an u64 number of bytes,
+//! [ChunkNum] is an u64 number of chunks,
+//! [TreeNode] is an u64 tree node identifier,
+//! and [BlockSize] is the log base 2 of the chunk group size.
 //!
 //! All this is then used in the [io] module to implement the actual io, both
 //! synchronous and asynchronous.
@@ -249,7 +253,10 @@ impl BaoTree {
         self.blocks().0 - 1
     }
 
-    pub(crate) fn outboard_size(&self) -> ByteNum {
+    /// The outboard size for this tree.
+    ///
+    /// This is the outboard size *without* the size prefix.
+    pub fn outboard_size(&self) -> ByteNum {
         ByteNum(self.outboard_hash_pairs() * 64)
     }
 

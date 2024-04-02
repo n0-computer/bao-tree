@@ -15,6 +15,7 @@ use test_strategy::proptest;
 use tokio::io::AsyncReadExt;
 
 use crate::io::outboard::PreOrderMemOutboard;
+use crate::io::BaoContentItem;
 use crate::rec::{
     get_leaf_ranges, make_test_data, partial_chunk_iter_reference, range_union,
     response_iter_reference, truncate_ranges, ReferencePreOrderPartialChunkIterRef,
@@ -23,15 +24,20 @@ use crate::{assert_tuple_eq, prop_assert_tuple_eq, ChunkRanges, ChunkRangesRef};
 use crate::{
     blake3, hash_subtree,
     io::{
-        fsm::{BaoContentItem, ResponseDecoderReadingNext},
-        outboard::PostOrderMemOutboard,
-        sync::{DecodeResponseItem, Outboard},
-        Header, Leaf, Parent,
+        fsm::ResponseDecoderReadingNext, outboard::PostOrderMemOutboard, sync::Outboard, Leaf,
+        Parent,
     },
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
     rec::{encode_selected_rec, select_nodes_rec},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
 };
+
+fn read_len(mut from: impl std::io::Read) -> std::io::Result<ByteNum> {
+    let mut buf = [0; 8];
+    from.read_exact(&mut buf)?;
+    let len = ByteNum(u64::from_le_bytes(buf));
+    Ok(len)
+}
 
 #[cfg(feature = "validate")]
 use futures::StreamExt;
@@ -508,22 +514,15 @@ fn encode_decode_full_sync_impl(
     crate::io::sync::encode_ranges_validated(data, &outboard, &ChunkRanges::all(), &mut encoded)
         .unwrap();
     let mut encoded_read = std::io::Cursor::new(encoded);
+    let size = read_len(&mut encoded_read).unwrap();
+    let tree = BaoTree::new(size, outboard.tree().block_size());
     let mut decoded = Vec::new();
-    let ob_res_opt = crate::io::sync::decode_response_into(
+    let mut ob_res = PostOrderMemOutboard::new(
         outboard.root(),
-        outboard.tree().block_size,
-        &ranges,
-        &mut encoded_read,
-        |tree, root: blake3::Hash| {
-            let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
-            let outboard_data = vec![0; outboard_size];
-            Ok(PostOrderMemOutboard::new(root, tree, outboard_data))
-        },
-        &mut decoded,
-    )
-    .unwrap();
-    let ob_res = ob_res_opt
-        .unwrap_or_else(|| PostOrderMemOutboard::new(outboard.root(), outboard.tree(), vec![]));
+        tree,
+        vec![0; tree.outboard_size().to_usize()],
+    );
+    crate::io::sync::decode_ranges(&ranges, encoded_read, &mut decoded, &mut ob_res).unwrap();
     ((decoded, ob_res), (data.to_vec(), outboard))
 }
 
@@ -559,7 +558,7 @@ async fn encode_decode_full_fsm_impl(
         PostOrderMemOutboard::new(root, tree, outboard_data)
     };
     let mut decoded = BytesMut::new();
-    crate::io::fsm::decode_response(read_encoded, ranges, &mut decoded, &mut ob_res)
+    crate::io::fsm::decode_ranges(read_encoded, ranges, &mut decoded, &mut ob_res)
         .await
         .unwrap();
     ((data, outboard), (decoded.to_vec(), ob_res))
@@ -573,13 +572,10 @@ fn encode_decode_partial_sync_impl(
     let mut encoded = Vec::new();
     crate::io::sync::encode_ranges_validated(data, &outboard, ranges, &mut encoded).unwrap();
     let expected_data = data;
-    let encoded_read = std::io::Cursor::new(encoded);
-    let iter = crate::io::sync::DecodeResponseIter::new(
-        outboard.root,
-        outboard.tree.block_size,
-        encoded_read,
-        ranges,
-    );
+    let mut encoded_read = std::io::Cursor::new(encoded);
+    let size = read_len(&mut encoded_read).unwrap();
+    let tree = BaoTree::new(size, outboard.tree.block_size);
+    let iter = crate::io::sync::DecodeResponseIter::new(outboard.root, tree, encoded_read, ranges);
     for item in iter {
         let item = match item {
             Ok(item) => item,
@@ -588,13 +584,7 @@ fn encode_decode_partial_sync_impl(
             }
         };
         match item {
-            DecodeResponseItem::Header(Header { size }) => {
-                // check that the size matches
-                if size != outboard.tree.size {
-                    return false;
-                }
-            }
-            DecodeResponseItem::Parent(Parent { node, pair }) => {
+            BaoContentItem::Parent(Parent { node, pair }) => {
                 // check that the hash pair matches
                 if let Some(expected_pair) = outboard.load(node).unwrap() {
                     if pair != expected_pair {
@@ -602,7 +592,7 @@ fn encode_decode_partial_sync_impl(
                     }
                 }
             }
-            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+            BaoContentItem::Leaf(Leaf { offset, data }) => {
                 // check that the data matches
                 if expected_data[offset.to_usize()..offset.to_usize() + data.len()] != data {
                     return false;

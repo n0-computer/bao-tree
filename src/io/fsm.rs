@@ -5,6 +5,9 @@
 //!
 //! This makes them occasionally a bit verbose to use, but allows being generic
 //! without having to box the futures.
+//!
+//! The traits to perform async positioned io are re-exported from
+//! [iroh-io](https://crates.io/crates/iroh-io).
 use std::{io, result};
 
 use crate::{
@@ -31,30 +34,7 @@ use crate::{
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::{combine_hash_pair, DecodeError, StartDecodeError};
-
-/// An item of bao content
-///
-/// We know that we are not going to get headers after the first item.
-#[derive(Debug)]
-pub enum BaoContentItem {
-    /// a parent node, to update the outboard
-    Parent(Parent),
-    /// a leaf node, to write to the file
-    Leaf(Leaf),
-}
-
-impl From<Parent> for BaoContentItem {
-    fn from(p: Parent) -> Self {
-        Self::Parent(p)
-    }
-}
-
-impl From<Leaf> for BaoContentItem {
-    fn from(l: Leaf) -> Self {
-        Self::Leaf(l)
-    }
-}
+use super::{combine_hash_pair, BaoContentItem, DecodeError, StartDecodeError};
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///
@@ -97,7 +77,7 @@ pub trait Outboard {
 
 /// A mutable outboard.
 ///
-/// This trait extends [Outboard] with methods to save a hash pair for a node and to set the
+/// This trait provides a way to save a hash pair for a node and to set the
 /// length of the data file.
 ///
 /// This trait can be used to incrementally save an outboard when receiving data.
@@ -576,7 +556,7 @@ where
 ///
 /// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
 /// the outboard.
-pub async fn decode_response<R, O, W>(
+pub async fn decode_ranges<R, O, W>(
     encoded: R,
     ranges: ChunkRanges,
     mut target: W,
@@ -614,9 +594,10 @@ fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     (l_hash, r_hash)
 }
 
-/// Compute the outboard for the given data. Unlike [outboard_post_order], this will
-/// work with any outboard implementation, but it is not guaranteed that writes
-/// are sequential.
+/// Compute the outboard for the given data.
+///
+/// Unlike [outboard_post_order], this will work with any outboard
+/// implementation, but it is not guaranteed that writes are sequential.
 pub async fn outboard(
     data: impl AsyncRead + Unpin,
     tree: BaoTree,

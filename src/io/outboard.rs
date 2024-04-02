@@ -132,6 +132,9 @@ impl<R> PostOrderOutboard<R> {
 }
 
 /// A post order outboard that is optimized for memory storage.
+///
+/// The traits are implemented for fixed size slices or mutable slices, so you
+/// must make sure that the data is already the right size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostOrderMemOutboard<T = Vec<u8>> {
     /// root hash
@@ -172,8 +175,9 @@ impl PostOrderMemOutboard {
 impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
     /// Create a new outboard from a root hash, tree, and existing outboard data.
     ///
-    /// This will just do a check that the data is the right size, but not check
-    /// the actual hashes.
+    /// Note that when writing to a [PreOrderMemOutboard], you must make sure
+    /// that the data is already the right size. The size can be computed with
+    /// [BaoTree::outboard_size].
     pub fn new(root: blake3::Hash, tree: BaoTree, outboard_data: T) -> Self {
         Self {
             root,
@@ -310,6 +314,9 @@ fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutbo
 }
 
 /// A pre order outboard that is optimized for memory storage.
+///
+/// The traits are implemented for fixed size slices or mutable slices, so you
+/// must make sure that the data is already the right size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreOrderMemOutboard<T = Vec<u8>> {
     /// root hash
@@ -348,8 +355,9 @@ impl PreOrderMemOutboard {
 impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
     /// Create a new outboard from a root hash, tree, and existing outboard data.
     ///
-    /// This will just do a check that the data is the right size, but not check
-    /// the actual hashes.
+    /// Note that when writing to a [PreOrderMemOutboard], you must make sure
+    /// that the data is already the right size. The size can be computed with
+    /// [BaoTree::outboard_size].
     ///
     /// Note that if you have data with a length prefix, you have to remove the prefix first.
     pub fn new(root: blake3::Hash, tree: BaoTree, outboard_data: T) -> Self {

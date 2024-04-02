@@ -10,12 +10,7 @@ use range_collections::RangeSet2;
 
 use crate::{
     assert_tuple_eq, blake3,
-    io::{
-        full_chunk_groups,
-        outboard::PreOrderMemOutboard,
-        sync::{DecodeResponseItem, Outboard},
-        Leaf,
-    },
+    io::{full_chunk_groups, outboard::PreOrderMemOutboard, sync::Outboard, BaoContentItem, Leaf},
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
     prop_assert_tuple_eq,
     rec::{
@@ -33,6 +28,13 @@ use super::{
     tree::{ByteNum, ChunkNum},
     BaoTree, BlockSize, TreeNode,
 };
+
+fn read_len(mut from: impl std::io::Read) -> std::io::Result<ByteNum> {
+    let mut buf = [0; 8];
+    from.read_exact(&mut buf)?;
+    let len = ByteNum(u64::from_le_bytes(buf));
+    Ok(len)
+}
 
 /// Compute the blake3 hash for the given data,
 ///
@@ -134,7 +136,7 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     let expected = data;
     let ranges = ChunkRanges::from(range);
     let mut ec = Cursor::new(encoded);
-    for item in decode_ranges_into_chunks(root, BlockSize::ZERO, &mut ec, &ranges) {
+    for item in decode_ranges_into_chunks(root, BlockSize::ZERO, &mut ec, &ranges).unwrap() {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
@@ -243,7 +245,9 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
     let expected = data.clone();
     let mut all_ranges: range_collections::RangeSet<[ByteNum; 2]> = RangeSet2::empty();
     let mut ec = Cursor::new(encoded);
-    for item in decode_ranges_into_chunks(root, block_size, &mut ec, &ChunkRanges::from(range)) {
+    for item in
+        decode_ranges_into_chunks(root, block_size, &mut ec, &ChunkRanges::from(range)).unwrap()
+    {
         let (pos, slice) = item.unwrap();
         // compute all data ranges
         all_ranges |= RangeSet2::from(pos..pos + (slice.len() as u64));
@@ -517,20 +521,22 @@ fn test_pre_order_outboard_fast() {
 pub fn decode_ranges_into_chunks<'a>(
     root: blake3::Hash,
     block_size: BlockSize,
-    encoded: impl Read + 'a,
+    mut encoded: impl Read + 'a,
     ranges: &'a ChunkRangesRef,
-) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
-    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges);
-    iter.filter_map(|item| match item {
+) -> std::io::Result<impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a> {
+    let size = read_len(&mut encoded)?;
+    let tree = BaoTree::new(size, block_size);
+    let iter = DecodeResponseIter::new(root, tree, encoded, ranges);
+    Ok(iter.filter_map(|item| match item {
         Ok(item) => {
-            if let DecodeResponseItem::Leaf(Leaf { offset, data }) = item {
+            if let BaoContentItem::Leaf(Leaf { offset, data }) = item {
                 Some(Ok((offset, data.to_vec())))
             } else {
                 None
             }
         }
         Err(e) => Some(Err(e.into())),
-    })
+    }))
 }
 
 /// iterate over all nodes in the tree in depth first, left to right, pre order
