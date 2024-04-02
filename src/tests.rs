@@ -49,24 +49,6 @@ fn bao_tree_blake3_impl(data: Vec<u8>) -> (blake3::Hash, blake3::Hash) {
     (expected, actual)
 }
 
-/// Computes a reference post order outboard using the abao crate (chunk_group_log = 0) and the non-standard finalize_post_order function.
-fn post_order_outboard_reference_2(data: &[u8]) -> PostOrderMemOutboard {
-    let mut outboard = Vec::new();
-    let cursor = std::io::Cursor::new(&mut outboard);
-    let mut encoder = abao::encode::Encoder::new_outboard(cursor);
-    encoder.write_all(data).unwrap();
-    // requires non standard fn finalize_post_order
-    let hash = encoder.finalize_post_order().unwrap();
-    // remove the length suffix
-    outboard.truncate(outboard.len() - 8);
-    let hash = blake3::Hash::from(*hash.as_bytes());
-    PostOrderMemOutboard::new(
-        hash,
-        BaoTree::new(ByteNum(data.len() as u64), BlockSize::ZERO),
-        outboard,
-    )
-}
-
 /// Computes a reference pre order outboard using the bao crate (chunk_group_log = 0) and then flips it to a post-order outboard.
 fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let mut outboard = Vec::new();
@@ -82,10 +64,10 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
 }
 
 fn encode_slice_reference(data: &[u8], chunk_range: Range<ChunkNum>) -> (Vec<u8>, blake3::Hash) {
-    let (outboard, hash) = abao::encode::outboard(data);
+    let (outboard, hash) = bao::encode::outboard(data);
     let slice_start = chunk_range.start.to_bytes().0;
     let slice_len = (chunk_range.end - chunk_range.start).to_bytes().0;
-    let mut encoder = abao::encode::SliceExtractor::new_outboard(
+    let mut encoder = bao::encode::SliceExtractor::new_outboard(
         Cursor::new(&data),
         Cursor::new(&outboard),
         slice_start,
@@ -1030,10 +1012,8 @@ proptest! {
     #[test]
     fn flip(len in 0usize..100000) {
         let data = make_test_data(len);
-        let post1 = post_order_outboard_reference(&data);
-        let post2 = post_order_outboard_reference_2(&data);
-        prop_assert_eq!(&post1, &post2);
-        prop_assert_eq!(&post1, &post1.flip().flip());
+        let post = post_order_outboard_reference(&data);
+        prop_assert_eq!(&post, &post.flip().flip());
     }
 
 
