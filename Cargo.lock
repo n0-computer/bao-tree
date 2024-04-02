@@ -3,29 +3,6 @@
 version = 3
 
 [[package]]
-name = "abao"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2daa0989489b05a455a9707adbbbc17443edf7bbc902ce499cd3b84148d68a40"
-dependencies = [
- "arrayref",
- "arrayvec",
- "blake3",
- "futures",
- "tokio",
-]
-
-[[package]]
-name = "abao"
-version = "0.2.0"
-source = "git+https://github.com/n0-computer/abao?branch=post-order-outboard#9675e0426badc06fe728aea72d02892c91f5caa1"
-dependencies = [
- "arrayref",
- "arrayvec",
- "blake3",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -177,7 +154,6 @@ dependencies = [
 name = "bao-tree"
 version = "0.11.1"
 dependencies = [
- "abao 0.2.0 (git+https://github.com/n0-computer/abao?branch=post-order-outboard)",
  "anyhow",
  "bao",
  "bytes",
@@ -395,7 +371,6 @@ checksum = "98cc8fbded0c607b7ba9dd60cd98df59af97e84d24e49c8557331cfc26d301ce"
 name = "cli"
 version = "0.1.0"
 dependencies = [
- "abao 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "anyhow",
  "bao",
  "bao-tree",

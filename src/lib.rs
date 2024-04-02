@@ -10,8 +10,12 @@
 //! [TreeNode] provides various helpers to e.g. get the offset of a node in
 //! different traversal orders.
 //!
-//! There are various newtypes for the different kinds of integers used in the
-//! tree, e.g. [ByteNum] for number of bytes, [ChunkNum] for number of chunks.
+//! There are newtypes for the different kinds of integers used in the
+//! tree:
+//! [ByteNum] is an u64 number of bytes,
+//! [ChunkNum] is an u64 number of chunks,
+//! [TreeNode] is an u64 tree node identifier,
+//! and [BlockSize] is the log base 2 of the chunk group size.
 //!
 //! All this is then used in the [io] module to implement the actual io, both
 //! synchronous and asynchronous.
@@ -42,7 +46,7 @@ pub type ChunkRanges = range_collections::RangeSet2<ChunkNum>;
 
 /// A referenceable set of chunk ranges
 ///
-/// [ChunkRanges] implements [AsRef<ChunkRangesRef>].
+/// [ChunkRanges] implements [`AsRef<ChunkRangesRef>`].
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
 fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
@@ -204,7 +208,7 @@ impl BaoTree {
     /// Traverse the part of the tree that is relevant for a ranges querys
     /// in pre order as [NodeInfo]s
     ///
-    /// This is mostly used internally by the [PreOrderChunkIterRef]
+    /// This is mostly used internally.
     ///
     /// When `min_level` is set to a value greater than 0, the iterator will
     /// skip all branch nodes that are at a level < min_level if they are fully
@@ -249,11 +253,14 @@ impl BaoTree {
         self.blocks().0 - 1
     }
 
-    pub(crate) fn outboard_size(size: ByteNum, block_size: BlockSize) -> ByteNum {
-        let tree = Self::new(size, block_size);
-        ByteNum(tree.outboard_hash_pairs() * 64 + 8)
+    /// The outboard size for this tree.
+    ///
+    /// This is the outboard size *without* the size prefix.
+    pub fn outboard_size(&self) -> ByteNum {
+        ByteNum(self.outboard_hash_pairs() * 64)
     }
 
+    #[allow(dead_code)]
     fn filled_size(&self) -> TreeNode {
         let blocks = self.chunks();
         let n = (blocks.0 + 1) / 2;

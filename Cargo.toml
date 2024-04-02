@@ -34,8 +34,6 @@ default = ["tokio_fsm", "validate"]
 hex = "0.4.3"
 bao = "0.12.1"
 tokio = { version = "1", features = ["full"] }
-# abao with chunk group size 16 (abao default)
-abao = { git = "https://github.com/n0-computer/abao", branch = "post-order-outboard", features = ["group_size_1k"], default_features = false }
 proptest = "1.0.0"
 rand = "0.8.5"
 criterion = "0.4.0"
@@ -54,6 +52,9 @@ harness = false
 
 [workspace]
 members = ["cli"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [[example]]
 name = "cli"

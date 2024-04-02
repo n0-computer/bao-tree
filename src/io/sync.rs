@@ -1,7 +1,9 @@
-//! Syncronous IO
+//! Sync IO operations
+//!
+//! The traits to perform positioned io are re-exported from
+//! [positioned-io](https://crates.io/crates/positioned-io).
 use std::{
     io::{self, Read, Write},
-    ops::Range,
     result,
 };
 
@@ -9,59 +11,20 @@ use crate::{
     blake3,
     io::error::{AnyDecodeError, EncodeError},
     io::{
-        outboard::{parse_hash_pair, PostOrderMemOutboard, PostOrderOutboard, PreOrderOutboard},
-        Header, Leaf, Parent,
+        outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
+        Leaf, Parent,
     },
     iter::BaoChunk,
     rec::{encode_selected_rec, truncate_ranges},
-    BaoTree, BlockSize, ByteNum, ChunkRanges, ChunkRangesRef, TreeNode,
+    BaoTree, ChunkRangesRef, TreeNode,
 };
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
-use range_collections::{range_set::RangeSetRange, RangeSetRef};
 use smallvec::SmallVec;
 
-use super::{combine_hash_pair, outboard::PreOrderMemOutboard, DecodeError, StartDecodeError};
+use super::{combine_hash_pair, BaoContentItem, DecodeError};
 use crate::{hash_subtree, iter::ResponseIterRef};
-
-macro_rules! io_error {
-    ($($arg:tt)*) => {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!($($arg)*)))
-    };
-}
-
-/// An item of a decode response
-#[derive(Debug)]
-pub enum DecodeResponseItem {
-    /// We got the header and now know how big the overall size is
-    ///
-    /// Actually this is just how big the remote side *claims* the overall size is.
-    /// In an adversarial setting, this could be wrong.
-    Header(Header),
-    /// a parent node, to update the outboard
-    Parent(Parent),
-    /// a leaf node, to write to the file
-    Leaf(Leaf),
-}
-
-impl From<Header> for DecodeResponseItem {
-    fn from(h: Header) -> Self {
-        Self::Header(h)
-    }
-}
-
-impl From<Parent> for DecodeResponseItem {
-    fn from(p: Parent) -> Self {
-        Self::Parent(p)
-    }
-}
-
-impl From<Leaf> for DecodeResponseItem {
-    fn from(l: Leaf) -> Self {
-        Self::Leaf(l)
-    }
-}
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///
@@ -91,7 +54,7 @@ pub trait Outboard {
 
 /// A mutable outboard.
 ///
-/// This trait extends [Outboard] with methods to save a hash pair for a node and to set the
+/// This trait provides a way to save a hash pair for a node and to set the
 /// length of the data file.
 ///
 /// This trait can be used to incrementally save an outboard when receiving data.
@@ -134,22 +97,8 @@ impl<O: Outboard> Outboard for &mut O {
 
 impl<R: ReadAt + Size> PreOrderOutboard<R> {
     /// Create a new outboard from a reader, root hash, and block size.
-    pub fn new(root: blake3::Hash, block_size: BlockSize, data: R) -> io::Result<Self> {
-        let mut content = [0u8; 8];
-        data.read_exact_at(0, &mut content)?;
-        let len = ByteNum(u64::from_le_bytes(content[0..8].try_into().unwrap()));
-        let tree = BaoTree::new(len, block_size);
-        let expected_outboard_size = super::outboard_size(len.0, block_size);
-        let size = data.size()?;
-        if size != Some(expected_outboard_size) {
-            io_error!(
-                "Expected outboard size of {} bytes, but got {} bytes",
-                expected_outboard_size,
-                size.map(|s| s.to_string()).unwrap_or("unknown".to_string())
-            );
-        }
-        // zero pad the rest, if needed.
-        Ok(Self { root, tree, data })
+    pub fn new(root: blake3::Hash, tree: BaoTree, data: R) -> Self {
+        Self { root, tree, data }
     }
 }
 
@@ -166,7 +115,7 @@ impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(None);
         };
-        let offset = offset * 64 + 8;
+        let offset = offset * 64;
         let mut content = [0u8; 64];
         self.data.read_exact_at(offset, &mut content)?;
         Ok(Some(parse_hash_pair(content)))
@@ -178,7 +127,7 @@ impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(());
         };
-        let offset = offset * 64 + 8;
+        let offset = offset * 64;
         let mut content = [0u8; 64];
         content[0..32].copy_from_slice(hash_pair.0.as_bytes());
         content[32..64].copy_from_slice(hash_pair.1.as_bytes());
@@ -189,27 +138,8 @@ impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
 
 impl<R: ReadAt + Size> PostOrderOutboard<R> {
     /// Create a new outboard from a reader, root hash, and block size.
-    pub fn new(root: blake3::Hash, block_size: BlockSize, data: R) -> io::Result<Self> {
-        // validate roughly that the outboard is correct
-        let Some(outboard_size) = data.size()? else {
-            io_error!("outboard must have a known size");
-        };
-        if outboard_size < 8 {
-            io_error!("outboard is too short");
-        };
-        let mut suffix = [0u8; 8];
-        data.read_exact_at(outboard_size - 8, &mut suffix)?;
-        let len = u64::from_le_bytes(suffix);
-        let expected_outboard_size = super::outboard_size(len, block_size);
-        if outboard_size != expected_outboard_size {
-            io_error!(
-                "Expected outboard size of {} bytes, but got {} bytes",
-                expected_outboard_size,
-                outboard_size
-            );
-        }
-        let tree = BaoTree::new(ByteNum(len), block_size);
-        Ok(Self { root, tree, data })
+    pub fn new(root: blake3::Hash, tree: BaoTree, data: R) -> Self {
+        Self { root, tree, data }
     }
 }
 
@@ -226,166 +156,17 @@ impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
         let Some(offset) = self.tree.post_order_offset(node) else {
             return Ok(None);
         };
-        let offset = offset.value() * 64 + 8;
+        let offset = offset.value() * 64;
         let mut content = [0u8; 64];
         self.data.read_exact_at(offset, &mut content)?;
         Ok(Some(parse_hash_pair(content)))
     }
 }
 
-impl PreOrderMemOutboard {
-    /// Load a pre-order outboard from a reader, root hash, and block size.
-    pub fn load(
-        root: blake3::Hash,
-        outboard_reader: impl ReadAt + Size,
-        block_size: BlockSize,
-    ) -> io::Result<Self> {
-        // validate roughly that the outboard is correct
-        let Some(size) = outboard_reader.size()? else {
-            io_error!("outboard must have a known size");
-        };
-        let Ok(size) = usize::try_from(size) else {
-            io_error!("outboard size must be less than usize::MAX");
-        };
-        let mut outboard = vec![0; size];
-        outboard_reader.read_exact_at(0, &mut outboard)?;
-        if outboard.len() < 8 {
-            io_error!("outboard must be at least 8 bytes");
-        };
-        let prefix = &outboard[..8];
-        let len = u64::from_le_bytes(prefix.try_into().unwrap());
-        let expected_outboard_size = super::outboard_size(len, block_size);
-        let outboard_size = outboard.len() as u64;
-        if outboard_size != expected_outboard_size {
-            io_error!(
-                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"
-            );
-        }
-        let tree = BaoTree::new(ByteNum(len), block_size);
-        outboard.splice(..8, []);
-        Ok(Self {
-            root,
-            tree,
-            data: outboard,
-        })
-    }
-}
-
-impl PostOrderMemOutboard {
-    /// Load a post-order outboard from a reader, root hash, and block size.
-    pub fn load(
-        root: blake3::Hash,
-        outboard_reader: impl ReadAt + Size,
-        block_size: BlockSize,
-    ) -> io::Result<Self> {
-        // validate roughly that the outboard is correct
-        let Some(size) = outboard_reader.size()? else {
-            io_error!("outboard must have a known size");
-        };
-        let Ok(size) = usize::try_from(size) else {
-            io_error!("outboard size must be less than usize::MAX");
-        };
-        let mut outboard = vec![0; size];
-        outboard_reader.read_exact_at(0, &mut outboard)?;
-        if outboard.len() < 8 {
-            io_error!("outboard must be at least 8 bytes");
-        };
-        let suffix = &outboard[outboard.len() - 8..];
-        let len = u64::from_le_bytes(suffix.try_into().unwrap());
-        let expected_outboard_size = super::outboard_size(len, block_size);
-        let outboard_size = outboard.len() as u64;
-        if outboard_size != expected_outboard_size {
-            io_error!(
-                "outboard length does not match expected outboard length: {outboard_size} != {expected_outboard_size}"
-            );
-        }
-        let tree = BaoTree::new(ByteNum(len), block_size);
-        outboard.truncate(outboard.len() - 8);
-        Ok(Self {
-            root,
-            tree,
-            data: outboard,
-        })
-    }
-}
-
-/// Given an outboard, return a range set of all valid ranges
-pub fn valid_outboard_ranges<O>(outboard: &O) -> io::Result<ChunkRanges>
-where
-    O: Outboard,
-{
-    struct RecursiveValidator<'a, O: Outboard> {
-        tree: BaoTree,
-        shifted_filled_size: TreeNode,
-        res: ChunkRanges,
-        outboard: &'a O,
-    }
-
-    impl<'a, O: Outboard> RecursiveValidator<'a, O> {
-        fn validate_rec(
-            &mut self,
-            parent_hash: &blake3::Hash,
-            shifted: TreeNode,
-            is_root: bool,
-        ) -> io::Result<()> {
-            let node = shifted.subtract_block_size(self.tree.block_size.0);
-            let (l_hash, r_hash) = if let Some((l_hash, r_hash)) = self.outboard.load(node)? {
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
-                if &actual != parent_hash {
-                    // we got a validation error. Simply continue without adding the range
-                    return Ok(());
-                }
-                (l_hash, r_hash)
-            } else {
-                (*parent_hash, blake3::Hash::from([0; 32]))
-            };
-            if shifted.is_leaf() {
-                let start = node.chunk_range().start;
-                let end = (start + self.tree.chunk_group_chunks() * 2).min(self.tree.chunks());
-                self.res |= ChunkRanges::from(start..end);
-            } else {
-                // recurse
-                let left = shifted.left_child().unwrap();
-                self.validate_rec(&l_hash, left, false)?;
-                let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
-                self.validate_rec(&r_hash, right, false)?;
-            }
-            Ok(())
-        }
-    }
-    let tree = outboard.tree();
-    let root_hash = outboard.root();
-    let (shifted_root, shifted_filled_size) = tree.shifted();
-    let mut validator = RecursiveValidator {
-        tree,
-        shifted_filled_size,
-        res: ChunkRanges::empty(),
-        outboard,
-    };
-    validator.validate_rec(&root_hash, shifted_root, true)?;
-    Ok(validator.res)
-}
-
-// When this enum is used it is in the Header variant for the first 8 bytes, then stays in
-// the Content state for the remainder.  Since the Content is the largest part that this
-// size inbalance is fine, hence allow clippy::large_enum_variant.
-#[derive(Debug)]
-#[allow(clippy::large_enum_variant)]
-enum Position<'a> {
-    /// currently reading the header, so don't know how big the tree is
-    /// so we need to store the ranges and the chunk group log
-    Header {
-        ranges: &'a ChunkRangesRef,
-        block_size: BlockSize,
-    },
-    /// currently reading the tree, all the info we need is in the iter
-    Content { iter: ResponseIterRef<'a> },
-}
-
 /// Iterator that can be used to decode a response to a range request
 #[derive(Debug)]
 pub struct DecodeResponseIter<'a, R> {
-    inner: Position<'a>,
+    inner: ResponseIterRef<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
     buf: BytesMut,
@@ -396,32 +177,28 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     ///
     /// For decoding you need to know the root hash, block size, and the ranges that were requested.
     /// Additionally you need to provide a reader that can be used to read the encoded data.
-    pub fn new(
-        root: blake3::Hash,
-        block_size: BlockSize,
-        encoded: R,
-        ranges: &'a ChunkRangesRef,
-    ) -> Self {
-        let buf = BytesMut::with_capacity(block_size.bytes());
-        Self::new_with_buffer(root, block_size, encoded, ranges, buf)
+    pub fn new(root: blake3::Hash, tree: BaoTree, encoded: R, ranges: &'a ChunkRangesRef) -> Self {
+        let buf = BytesMut::with_capacity(tree.block_size().bytes());
+        Self::new_with_buffer(root, tree, encoded, ranges, buf)
     }
 
     /// Create a new iterator to decode a response.
     ///
     /// This is the same as [Self::new], but allows you to provide a buffer to use for decoding.
-    /// The buffer will be resized as needed, but it's capacity should be the [BlockSize::bytes].
+    /// The buffer will be resized as needed, but it's capacity should be the [crate::BlockSize::bytes].
     pub fn new_with_buffer(
         root: blake3::Hash,
-        block_size: BlockSize,
+        tree: BaoTree,
         encoded: R,
         ranges: &'a ChunkRangesRef,
         buf: BytesMut,
     ) -> Self {
+        let ranges = truncate_ranges(ranges, tree.size());
         let mut stack = SmallVec::new();
         stack.push(root);
         Self {
             stack,
-            inner: Position::Header { ranges, block_size },
+            inner: ResponseIterRef::new(tree, ranges),
             encoded,
             buf,
         }
@@ -435,29 +212,12 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     /// Get a reference to the tree used for decoding.
     ///
     /// This is only available after the first chunk has been decoded.
-    pub fn tree(&self) -> Option<BaoTree> {
-        match &self.inner {
-            Position::Content { iter } => Some(iter.tree()),
-            Position::Header { .. } => None,
-        }
+    pub fn tree(&self) -> BaoTree {
+        self.inner.tree()
     }
 
-    fn next0(&mut self) -> result::Result<Option<DecodeResponseItem>, AnyDecodeError> {
-        let inner = match &mut self.inner {
-            Position::Content { ref mut iter } => iter,
-            Position::Header { block_size, ranges } => {
-                let size =
-                    read_len(&mut self.encoded).map_err(StartDecodeError::maybe_not_found)?;
-                let tree = BaoTree::new(size, *block_size);
-                // now we know the size, so we can canonicalize the ranges
-                let ranges = truncate_ranges(ranges, tree.size());
-                self.inner = Position::Content {
-                    iter: ResponseIterRef::new(tree, ranges),
-                };
-                return Ok(Some(Header { size }.into()));
-            }
-        };
-        match inner.next() {
+    fn next0(&mut self) -> result::Result<Option<BaoContentItem>, AnyDecodeError> {
+        match self.inner.next() {
             Some(BaoChunk::Parent {
                 is_root,
                 left,
@@ -509,7 +269,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
 }
 
 impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
-    type Item = result::Result<DecodeResponseItem, AnyDecodeError>;
+    type Item = result::Result<BaoContentItem, AnyDecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next0().transpose()
@@ -649,87 +409,100 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
 ///
 /// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
 /// the outboard.
-pub fn decode_response_into<R, O, W>(
-    root: blake3::Hash,
-    block_size: BlockSize,
+pub fn decode_ranges<R, O, W>(
     ranges: &ChunkRangesRef,
     encoded: R,
-    create: impl FnOnce(BaoTree, blake3::Hash) -> io::Result<O>,
     mut target: W,
-) -> io::Result<Option<O>>
+    mut outboard: O,
+) -> io::Result<()>
 where
-    O: OutboardMut,
+    O: OutboardMut + Outboard,
     R: Read,
     W: WriteAt,
 {
-    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges);
-    let mut outboard = None;
-    let mut tree = None;
-    let mut create = Some(create);
+    let iter = DecodeResponseIter::new(outboard.root(), outboard.tree(), encoded, ranges);
     for item in iter {
         match item? {
-            DecodeResponseItem::Header(Header { size }) => {
-                tree = Some(BaoTree::new(size, block_size));
-            }
-            DecodeResponseItem::Parent(Parent { node, pair }) => {
-                let outboard = if let Some(outboard) = outboard.as_mut() {
-                    outboard
-                } else {
-                    let create = create.take().unwrap();
-                    outboard = Some(create(tree.take().unwrap(), root)?);
-                    outboard.as_mut().unwrap()
-                };
+            BaoContentItem::Parent(Parent { node, pair }) => {
                 outboard.save(node, &pair)?;
             }
-            DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+            BaoContentItem::Leaf(Leaf { offset, data }) => {
                 target.write_all_at(offset.0, &data)?;
             }
         }
     }
-    Ok(outboard)
-}
-
-/// Write ranges from memory to disk
-///
-/// This is useful for writing changes to outboards.
-/// Note that it is up to you to call flush.
-pub fn write_ranges(
-    from: impl AsRef<[u8]>,
-    mut to: impl WriteAt,
-    ranges: &RangeSetRef<u64>,
-) -> io::Result<()> {
-    let from = from.as_ref();
-    let end = from.len() as u64;
-    for range in ranges.iter() {
-        let range = match range {
-            RangeSetRange::RangeFrom(x) => *x.start..end,
-            RangeSetRange::Range(x) => *x.start..*x.end,
-        };
-        let start = usize::try_from(range.start).unwrap();
-        let end = usize::try_from(range.end).unwrap();
-        to.write_all_at(range.start, &from[start..end])?;
-    }
     Ok(())
 }
 
-/// Compute the post order outboard for the given data, writing into a io::Write
-pub fn outboard_post_order(
+/// Compute the outboard for the given data.
+///
+/// Unlike [outboard_post_order], this will work with any outboard
+/// implementation, but it is not guaranteed that writes are sequential.
+pub fn outboard(
     data: impl Read,
-    size: u64,
-    block_size: BlockSize,
-    mut outboard: impl Write,
+    tree: BaoTree,
+    mut outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
-    let tree = BaoTree::new(ByteNum(size), block_size);
-    let mut buffer = vec![0; tree.chunk_group_bytes().to_usize()];
-    let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
-    outboard.write_all(&size.to_le_bytes())?;
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let hash = outboard_impl(tree, data, &mut outboard, &mut buffer)?;
     Ok(hash)
 }
 
-/// Compute the post order outboard for the given data
+/// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
+fn outboard_impl(
+    tree: BaoTree,
+    mut data: impl Read,
+    mut outboard: impl OutboardMut,
+    buffer: &mut [u8],
+) -> io::Result<blake3::Hash> {
+    // do not allocate for small trees
+    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
+    debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
+    for item in tree.post_order_chunks_iter() {
+        match item {
+            BaoChunk::Parent { is_root, node, .. } => {
+                let right_hash = stack.pop().unwrap();
+                let left_hash = stack.pop().unwrap();
+                outboard.save(node, &(left_hash, right_hash))?;
+                let parent = parent_cv(&left_hash, &right_hash, is_root);
+                stack.push(parent);
+            }
+            BaoChunk::Leaf {
+                size,
+                is_root,
+                start_chunk,
+                ..
+            } => {
+                let buf = &mut buffer[..size];
+                data.read_exact(buf)?;
+                let hash = hash_subtree(start_chunk.0, buf, is_root);
+                stack.push(hash);
+            }
+        }
+    }
+    debug_assert_eq!(stack.len(), 1);
+    let hash = stack.pop().unwrap();
+    Ok(hash)
+}
+
+/// Compute the post order outboard for the given data, writing into a io::Write
 ///
-/// This is the internal version that takes a start chunk and does not append the size!
-pub(crate) fn outboard_post_order_impl(
+/// For the post order outboard, writes to the target are sequential.
+///
+/// This will not add the size to the output. You need to store it somewhere else
+/// or append it yourself.
+pub fn outboard_post_order(
+    data: impl Read,
+    tree: BaoTree,
+    mut outboard: impl Write,
+) -> io::Result<blake3::Hash> {
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
+    Ok(hash)
+}
+
+/// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
+fn outboard_post_order_impl(
     tree: BaoTree,
     mut data: impl Read,
     mut outboard: impl Write,
@@ -766,57 +539,6 @@ pub(crate) fn outboard_post_order_impl(
     Ok(hash)
 }
 
-/// Fill a mutable outboard from the given in memory data
-pub(crate) fn write_outboard_from_mem<O: Outboard + OutboardMut>(
-    data: &[u8],
-    mut outboard: O,
-) -> io::Result<blake3::Hash> {
-    let tree = outboard.tree();
-    if tree.size != ByteNum(data.len() as u64) {
-        io_error!(
-            "data size does not match outboard size: {} != {}",
-            data.len(),
-            tree.size
-        );
-    }
-    // do not allocate for small trees
-    let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    for item in tree.post_order_chunks_iter() {
-        match item {
-            BaoChunk::Parent { is_root, node, .. } => {
-                let right_hash = stack.pop().unwrap();
-                let left_hash = stack.pop().unwrap();
-                let pair = (left_hash, right_hash);
-                outboard.save(node, &pair)?;
-                let parent = parent_cv(&left_hash, &right_hash, is_root);
-                stack.push(parent);
-            }
-            BaoChunk::Leaf {
-                size,
-                is_root,
-                start_chunk,
-                ..
-            } => {
-                let start = start_chunk.to_bytes().to_usize();
-                let end = start + size;
-                let buf = &data[start..end];
-                let hash = hash_subtree(start_chunk.0, buf, is_root);
-                stack.push(hash);
-            }
-        }
-    }
-    debug_assert_eq!(stack.len(), 1);
-    let hash = stack.pop().unwrap();
-    Ok(hash)
-}
-
-fn read_len(mut from: impl Read) -> std::io::Result<ByteNum> {
-    let mut buf = [0; 8];
-    from.read_exact(&mut buf)?;
-    let len = ByteNum(u64::from_le_bytes(buf));
-    Ok(len)
-}
-
 fn read_parent(mut from: impl Read) -> std::io::Result<(blake3::Hash, blake3::Hash)> {
     let mut buf = [0; 64];
     from.read_exact(&mut buf)?;
@@ -825,83 +547,267 @@ fn read_parent(mut from: impl Read) -> std::io::Result<(blake3::Hash, blake3::Ha
     Ok((l_hash, r_hash))
 }
 
-/// seeks read the bytes for the range from the source
-fn read_range(from: impl ReadAt, range: Range<ByteNum>, buf: &mut [u8]) -> std::io::Result<&[u8]> {
-    let len = (range.end - range.start).to_usize();
-    let buf = &mut buf[..len];
-    from.read_exact_at(range.start.0, buf)?;
-    Ok(buf)
-}
-
-/// Given an outboard and a file, return all valid ranges
-pub fn valid_file_ranges<O, R>(outboard: &O, reader: R) -> io::Result<ChunkRanges>
-where
-    O: Outboard,
-    R: ReadAt,
-{
-    struct RecursiveValidator<'a, O: Outboard, R: ReadAt> {
-        tree: BaoTree,
-        valid_nodes: TreeNode,
-        res: ChunkRanges,
-        outboard: &'a O,
-        reader: R,
-        buffer: Vec<u8>,
-    }
-
-    impl<'a, O: Outboard, R: ReadAt> RecursiveValidator<'a, O, R> {
-        fn validate_rec(
-            &mut self,
-            parent_hash: &blake3::Hash,
-            node: TreeNode,
-            is_root: bool,
-        ) -> io::Result<()> {
-            if let Some((l_hash, r_hash)) = self.outboard.load(node)? {
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
-                if &actual != parent_hash {
-                    // we got a validation error. Simply continue without adding the range
-                    return Ok(());
-                }
-                if node.is_leaf() {
-                    let (s, m, e) = self.tree.leaf_byte_ranges3(node);
-                    let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
-                    let actual = hash_subtree(s.chunks().0, l_data, false);
-                    if actual == l_hash {
-                        self.res |= ChunkRanges::from(s.chunks()..m.chunks());
-                    }
-
-                    let r_data = read_range(&mut self.reader, m..e, &mut self.buffer)?;
-                    let actual = hash_subtree(m.chunks().0, r_data, false);
-                    if actual == r_hash {
-                        self.res |= ChunkRanges::from(m.chunks()..e.chunks());
-                    }
-                } else {
-                    // recurse
-                    let left = node.left_child().unwrap();
-                    self.validate_rec(&l_hash, left, false)?;
-                    let right = node.right_descendant(self.valid_nodes).unwrap();
-                    self.validate_rec(&r_hash, right, false)?;
-                }
-            } else if node.is_leaf() {
-                let (s, m, _) = self.tree.leaf_byte_ranges3(node);
-                let l_data = read_range(&mut self.reader, s..m, &mut self.buffer)?;
-                let actual = hash_subtree(s.chunks().0, l_data, is_root);
-                if actual == *parent_hash {
-                    self.res |= ChunkRanges::from(s.chunks()..m.chunks());
-                }
-            };
-            Ok(())
+/// Copy an outboard to another outboard.
+///
+/// This can be used to persist an in memory outboard or to change from
+/// pre-order to post-order.
+pub fn copy(from: impl Outboard, mut to: impl OutboardMut) -> io::Result<()> {
+    let tree = from.tree();
+    for node in tree.pre_order_nodes_iter() {
+        if let Some(hash_pair) = from.load(node)? {
+            to.save(node, &hash_pair)?;
         }
     }
-    let tree = outboard.tree();
-    let root_hash = outboard.root();
-    let mut validator = RecursiveValidator {
-        tree,
-        valid_nodes: tree.filled_size(),
-        res: ChunkRanges::empty(),
-        outboard,
-        reader,
-        buffer: vec![0; tree.block_size.bytes()],
-    };
-    validator.validate_rec(&root_hash, tree.root(), true)?;
-    Ok(validator.res)
+    Ok(())
 }
+
+#[cfg(feature = "validate")]
+mod validate {
+    use std::{io, ops::Range};
+
+    use genawaiter::sync::{Co, Gen};
+    use positioned_io::ReadAt;
+
+    use crate::{
+        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ByteNum,
+        ChunkNum, ChunkRangesRef, TreeNode,
+    };
+
+    use super::Outboard;
+
+    /// Given a data file and an outboard, compute all valid ranges.
+    ///
+    /// This is not cheap since it recomputes the hashes for all chunks.
+    ///
+    /// To reduce the amount of work, you can specify a range you are interested in.
+    pub fn valid_ranges<'a, O, D>(
+        outboard: O,
+        data: D,
+        ranges: &'a ChunkRangesRef,
+    ) -> impl IntoIterator<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+        D: ReadAt + 'a,
+    {
+        Gen::new(move |co| async move {
+            if let Err(cause) = RecursiveDataValidator::validate(outboard, data, ranges, &co).await
+            {
+                co.yield_(Err(cause)).await;
+            }
+        })
+    }
+
+    struct RecursiveDataValidator<'a, O: Outboard, D: ReadAt> {
+        tree: BaoTree,
+        shifted_filled_size: TreeNode,
+        outboard: O,
+        data: D,
+        buffer: Vec<u8>,
+        co: &'a Co<io::Result<Range<ChunkNum>>>,
+    }
+
+    impl<'a, O: Outboard, D: ReadAt> RecursiveDataValidator<'a, O, D> {
+        async fn validate(
+            outboard: O,
+            data: D,
+            ranges: &ChunkRangesRef,
+            co: &Co<io::Result<Range<ChunkNum>>>,
+        ) -> io::Result<()> {
+            let tree = outboard.tree();
+            let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+            if tree.blocks().0 == 1 {
+                // special case for a tree that fits in one block / chunk group
+                let tmp = &mut buffer[..tree.size().to_usize()];
+                data.read_exact_at(0, tmp)?;
+                let actual = hash_subtree(0, tmp, true);
+                if actual == outboard.root() {
+                    co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
+                }
+                return Ok(());
+            }
+            let ranges = truncate_ranges(ranges, tree.size());
+            let root_hash = outboard.root();
+            let (shifted_root, shifted_filled_size) = tree.shifted();
+            let mut validator = RecursiveDataValidator {
+                tree,
+                shifted_filled_size,
+                outboard,
+                data,
+                buffer,
+                co,
+            };
+            validator
+                .validate_rec(&root_hash, shifted_root, true, ranges)
+                .await
+        }
+
+        async fn yield_if_valid(
+            &mut self,
+            range: Range<ByteNum>,
+            hash: &blake3::Hash,
+            is_root: bool,
+        ) -> io::Result<()> {
+            let len = (range.end - range.start).to_usize();
+            let tmp = &mut self.buffer[..len];
+            self.data.read_exact_at(range.start.0, tmp)?;
+            // is_root is always false because the case of a single chunk group is handled before calling this function
+            let actual = hash_subtree(range.start.full_chunks().0, tmp, is_root);
+            if &actual == hash {
+                // yield the left range
+                self.co
+                    .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                    .await;
+            }
+            io::Result::Ok(())
+        }
+
+        fn validate_rec<'b>(
+            &'b mut self,
+            parent_hash: &'b blake3::Hash,
+            shifted: TreeNode,
+            is_root: bool,
+            ranges: &'b ChunkRangesRef,
+        ) -> LocalBoxFuture<'b, io::Result<()>> {
+            Box::pin(async move {
+                if ranges.is_empty() {
+                    // this part of the tree is not of interest, so we can skip it
+                    return Ok(());
+                }
+                let node = shifted.subtract_block_size(self.tree.block_size.0);
+                let (l, m, r) = self.tree.leaf_byte_ranges3(node);
+                if !self.tree.is_relevant_for_outboard(node) {
+                    self.yield_if_valid(l..r, parent_hash, is_root).await?;
+                    return Ok(());
+                }
+                let Some((l_hash, r_hash)) = self.outboard.load(node)? else {
+                    // outboard is incomplete, we can't validate
+                    return Ok(());
+                };
+                let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+                if &actual != parent_hash {
+                    // hash mismatch, we can't validate
+                    return Ok(());
+                };
+                let (l_ranges, r_ranges) = split(ranges, node);
+                if shifted.is_leaf() {
+                    if !l_ranges.is_empty() {
+                        self.yield_if_valid(l..m, &l_hash, false).await?;
+                    }
+                    if !r_ranges.is_empty() {
+                        self.yield_if_valid(m..r, &r_hash, false).await?;
+                    }
+                } else {
+                    // recurse (we are in the domain of the shifted tree)
+                    let left = shifted.left_child().unwrap();
+                    self.validate_rec(&l_hash, left, false, l_ranges).await?;
+                    let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
+                    self.validate_rec(&r_hash, right, false, r_ranges).await?;
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// Given just an outboard, compute all valid ranges.
+    ///
+    /// This is not cheap since it recomputes the hashes for all chunks.
+    pub fn valid_outboard_ranges<'a, O>(
+        outboard: O,
+        ranges: &'a ChunkRangesRef,
+    ) -> impl IntoIterator<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+    {
+        Gen::new(move |co| async move {
+            if let Err(cause) = RecursiveOutboardValidator::validate(outboard, ranges, &co).await {
+                co.yield_(Err(cause)).await;
+            }
+        })
+    }
+
+    struct RecursiveOutboardValidator<'a, O: Outboard> {
+        tree: BaoTree,
+        shifted_filled_size: TreeNode,
+        outboard: O,
+        co: &'a Co<io::Result<Range<ChunkNum>>>,
+    }
+
+    impl<'a, O: Outboard> RecursiveOutboardValidator<'a, O> {
+        async fn validate(
+            outboard: O,
+            ranges: &ChunkRangesRef,
+            co: &Co<io::Result<Range<ChunkNum>>>,
+        ) -> io::Result<()> {
+            let tree = outboard.tree();
+            if tree.blocks().0 == 1 {
+                // special case for a tree that fits in one block / chunk group
+                co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
+                return Ok(());
+            }
+            let ranges = truncate_ranges(ranges, tree.size());
+            let root_hash = outboard.root();
+            let (shifted_root, shifted_filled_size) = tree.shifted();
+            let mut validator = RecursiveOutboardValidator {
+                tree,
+                shifted_filled_size,
+                outboard,
+                co,
+            };
+            validator
+                .validate_rec(&root_hash, shifted_root, true, ranges)
+                .await
+        }
+
+        fn validate_rec<'b>(
+            &'b mut self,
+            parent_hash: &'b blake3::Hash,
+            shifted: TreeNode,
+            is_root: bool,
+            ranges: &'b ChunkRangesRef,
+        ) -> LocalBoxFuture<'b, io::Result<()>> {
+            Box::pin(async move {
+                let yield_node_range = |range: Range<ByteNum>| {
+                    self.co
+                        .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                };
+                if ranges.is_empty() {
+                    // this part of the tree is not of interest, so we can skip it
+                    return Ok(());
+                }
+                let node = shifted.subtract_block_size(self.tree.block_size.0);
+                let (l, m, r) = self.tree.leaf_byte_ranges3(node);
+                if !self.tree.is_relevant_for_outboard(node) {
+                    yield_node_range(l..r).await;
+                    return Ok(());
+                }
+                let Some((l_hash, r_hash)) = self.outboard.load(node)? else {
+                    // outboard is incomplete, we can't validate
+                    return Ok(());
+                };
+                let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+                if &actual != parent_hash {
+                    // hash mismatch, we can't validate
+                    return Ok(());
+                };
+                let (l_ranges, r_ranges) = split(ranges, node);
+                if shifted.is_leaf() {
+                    if !l_ranges.is_empty() {
+                        yield_node_range(l..m).await;
+                    }
+                    if !r_ranges.is_empty() {
+                        yield_node_range(m..r).await;
+                    }
+                } else {
+                    // recurse (we are in the domain of the shifted tree)
+                    let left = shifted.left_child().unwrap();
+                    self.validate_rec(&l_hash, left, false, l_ranges).await?;
+                    let right = shifted.right_descendant(self.shifted_filled_size).unwrap();
+                    self.validate_rec(&r_hash, right, false, r_ranges).await?;
+                }
+                Ok(())
+            })
+        }
+    }
+}
+#[cfg(feature = "validate")]
+pub use validate::{valid_outboard_ranges, valid_ranges};

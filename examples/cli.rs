@@ -179,16 +179,16 @@ fn parse_ranges(ranges: Vec<String>) -> anyhow::Result<RangeSet2<u64>> {
 }
 
 mod sync {
-    use std::io::{self, Cursor, Write};
+    use std::io::{self, Cursor, Read, Write};
 
     use bao_tree::{
         io::{
             outboard::PreOrderMemOutboard,
             round_up_to_chunks,
-            sync::{encode_ranges_validated, DecodeResponseItem, DecodeResponseIter, Outboard},
-            Header, Leaf, Parent,
+            sync::{encode_ranges_validated, DecodeResponseIter, Outboard},
+            BaoContentItem, Leaf, Parent,
         },
-        BlockSize, ChunkRanges,
+        BaoTree, BlockSize, ByteNum, ChunkRanges,
     };
     use positioned_io::WriteAt;
 
@@ -211,16 +211,17 @@ mod sync {
         block_size: BlockSize,
         v: bool,
     ) -> io::Result<()> {
-        let iter =
-            DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
+        let mut reader = Cursor::new(&msg.encoded);
+        let mut size = [0; 8];
+        reader.read_exact(&mut size)?;
+        let size = ByteNum(u64::from_le_bytes(size));
+        let tree = BaoTree::new(size, block_size);
+        let iter = DecodeResponseIter::new(msg.hash, tree, Cursor::new(&msg.encoded), &msg.ranges);
         let mut indent = 0;
+        target.set_len(size.0)?;
         for response in iter {
             match response? {
-                DecodeResponseItem::Header(Header { size }) => {
-                    log!(v, "got header claiming a size of {}", size);
-                    target.set_len(size.0)?;
-                }
-                DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
+                BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
                     indent = indent.max(node.level() + 1);
                     let prefix = " ".repeat((indent - node.level()) as usize);
                     log!(
@@ -233,7 +234,7 @@ mod sync {
                         r.to_hex()
                     );
                 }
-                DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+                BaoContentItem::Leaf(Leaf { offset, data }) => {
                     let prefix = " ".repeat(indent as usize);
                     log!(
                         v,
@@ -250,15 +251,16 @@ mod sync {
     }
 
     fn decode_to_stdout(msg: &Message, block_size: BlockSize, v: bool) -> io::Result<()> {
-        let iter =
-            DecodeResponseIter::new(msg.hash, block_size, Cursor::new(&msg.encoded), &msg.ranges);
+        let mut reader = Cursor::new(&msg.encoded);
+        let mut size = [0; 8];
+        reader.read_exact(&mut size)?;
+        let size = ByteNum(u64::from_le_bytes(size));
+        let tree = BaoTree::new(size, block_size);
+        let iter = DecodeResponseIter::new(msg.hash, tree, Cursor::new(&msg.encoded), &msg.ranges);
         let mut indent = 0;
         for response in iter {
             match response? {
-                DecodeResponseItem::Header(Header { size }) => {
-                    log!(v, "got header claiming a size of {}", size);
-                }
-                DecodeResponseItem::Parent(Parent { node, pair: (l, r) }) => {
+                BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
                     indent = indent.max(node.level() + 1);
                     let prefix = " ".repeat((indent - node.level()) as usize);
                     log!(
@@ -271,7 +273,7 @@ mod sync {
                         r.to_hex()
                     );
                 }
-                DecodeResponseItem::Leaf(Leaf { offset, data }) => {
+                BaoContentItem::Leaf(Leaf { offset, data }) => {
                     let prefix = " ".repeat(indent as usize);
                     log!(
                         v,
@@ -340,9 +342,11 @@ mod sync {
 }
 
 mod fsm {
-    use bao_tree::io::fsm::{
-        encode_ranges_validated, BaoContentItem, Outboard, ResponseDecoderReadingNext,
-        ResponseDecoderStart,
+    use bao_tree::io::{
+        fsm::{
+            encode_ranges_validated, Outboard, ResponseDecoderReadingNext, ResponseDecoderStart,
+        },
+        BaoContentItem,
     };
     use iroh_io::AsyncSliceWriter;
     use tokio::io::AsyncWriteExt;

@@ -1,10 +1,13 @@
 //! Implementation of bao streaming for std io and tokio io
+use std::pin::Pin;
+
 use crate::{blake3, BaoTree, BlockSize, ByteNum, ChunkNum, ChunkRanges, TreeNode};
 use bytes::Bytes;
 
 mod error;
 pub use error::*;
 use range_collections::{range_set::RangeSetRange, RangeSetRef};
+use std::future::Future;
 
 use self::outboard::PostOrderMemOutboard;
 #[cfg(feature = "tokio_fsm")]
@@ -40,20 +43,41 @@ pub struct Leaf {
     pub data: Bytes,
 }
 
-/// The outboard size of a file of size `size` with a block size of `block_size`
-pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
-    BaoTree::outboard_size(ByteNum(size), block_size).0
+/// A content item for the bao streaming protocol.
+///
+/// After reading the initial header, the only possible items are `Parent` and
+/// `Leaf`.
+#[derive(Debug)]
+pub enum BaoContentItem {
+    /// a parent node, to update the outboard
+    Parent(Parent),
+    /// a leaf node, to write to the file
+    Leaf(Leaf),
 }
 
-/// The encoded size of a file of size `size` with a block size of `block_size`
-pub fn encoded_size(size: u64, block_size: BlockSize) -> u64 {
-    outboard_size(size, block_size) + size
+impl From<Parent> for BaoContentItem {
+    fn from(p: Parent) -> Self {
+        Self::Parent(p)
+    }
+}
+
+impl From<Leaf> for BaoContentItem {
+    fn from(l: Leaf) -> Self {
+        Self::Leaf(l)
+    }
+}
+
+/// The outboard size of a file of size `size` with a block size of `block_size`
+///
+/// This is the outboard size *without* the size prefix.
+pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
+    BaoTree::new(ByteNum(size), block_size).outboard_size().0
 }
 
 /// Computes the pre order outboard of a file in memory.
 pub fn outboard(input: impl AsRef<[u8]>, block_size: BlockSize) -> (Vec<u8>, blake3::Hash) {
     let outboard = PostOrderMemOutboard::create(input, block_size).flip();
-    let hash = *outboard.hash();
+    let hash = outboard.root;
     (outboard.into_inner_with_prefix(), hash)
 }
 
@@ -79,8 +103,7 @@ pub fn round_up_to_chunks(ranges: &RangeSetRef<u64>) -> ChunkRanges {
     res
 }
 
-/// Given a range set of byte ranges, round it up to chunk groups
-/// Given a range set of chunk ranges, return the full chunk groups.
+/// Given a range set of byte ranges, round it up to chunk groups.
 ///
 /// If we store outboard data at a level of granularity of `block_size`, we can only
 /// share full chunk groups because we don't have proofs for anything below a chunk group.
@@ -119,3 +142,5 @@ pub(crate) fn combine_hash_pair(l: &blake3::Hash, r: &blake3::Hash) -> [u8; 64] 
     *rb = *r.as_bytes();
     res
 }
+
+pub(crate) type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;

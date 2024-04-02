@@ -10,12 +10,7 @@ use range_collections::RangeSet2;
 
 use crate::{
     assert_tuple_eq, blake3,
-    io::{
-        full_chunk_groups,
-        outboard::PreOrderMemOutboard,
-        sync::{DecodeResponseItem, Outboard},
-        Leaf,
-    },
+    io::{full_chunk_groups, outboard::PreOrderMemOutboard, sync::Outboard, BaoContentItem, Leaf},
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
     prop_assert_tuple_eq,
     rec::{
@@ -34,6 +29,13 @@ use super::{
     BaoTree, BlockSize, TreeNode,
 };
 
+fn read_len(mut from: impl std::io::Read) -> std::io::Result<ByteNum> {
+    let mut buf = [0; 8];
+    from.read_exact(&mut buf)?;
+    let len = ByteNum(u64::from_le_bytes(buf));
+    Ok(len)
+}
+
 /// Compute the blake3 hash for the given data,
 ///
 /// using blake3_hash_inner which is used in hash_block.
@@ -47,25 +49,6 @@ fn bao_tree_blake3_impl(data: Vec<u8>) -> (blake3::Hash, blake3::Hash) {
     (expected, actual)
 }
 
-/// Computes a reference post order outboard using the abao crate (chunk_group_log = 0) and the non-standard finalize_post_order function.
-fn post_order_outboard_reference_2(data: &[u8]) -> PostOrderMemOutboard {
-    let mut outboard = Vec::new();
-    let cursor = std::io::Cursor::new(&mut outboard);
-    let mut encoder = abao::encode::Encoder::new_outboard(cursor);
-    encoder.write_all(data).unwrap();
-    // requires non standard fn finalize_post_order
-    let hash = encoder.finalize_post_order().unwrap();
-    // remove the length suffix
-    outboard.truncate(outboard.len() - 8);
-    let hash = blake3::Hash::from(*hash.as_bytes());
-    PostOrderMemOutboard::new(
-        hash,
-        BaoTree::new(ByteNum(data.len() as u64), BlockSize::ZERO),
-        outboard,
-    )
-    .unwrap()
-}
-
 /// Computes a reference pre order outboard using the bao crate (chunk_group_log = 0) and then flips it to a post-order outboard.
 fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let mut outboard = Vec::new();
@@ -77,14 +60,14 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let tree = BaoTree::new(ByteNum(data.len() as u64), BlockSize::ZERO);
     outboard.splice(..8, []);
     let pre = PreOrderMemOutboard::new(hash, tree, outboard);
-    pre.unwrap().flip()
+    pre.flip()
 }
 
 fn encode_slice_reference(data: &[u8], chunk_range: Range<ChunkNum>) -> (Vec<u8>, blake3::Hash) {
-    let (outboard, hash) = abao::encode::outboard(data);
+    let (outboard, hash) = bao::encode::outboard(data);
     let slice_start = chunk_range.start.to_bytes().0;
     let slice_len = (chunk_range.end - chunk_range.start).to_bytes().0;
-    let mut encoder = abao::encode::SliceExtractor::new_outboard(
+    let mut encoder = bao::encode::SliceExtractor::new_outboard(
         Cursor::new(&data),
         Cursor::new(&outboard),
         slice_start,
@@ -103,8 +86,6 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     };
     let expected = encode_slice_reference(&data, range.clone()).0;
     let ob = PostOrderMemOutboard::create(&data, BlockSize::ZERO);
-    let hash = ob.root();
-    let outboard = ob.into_inner_with_suffix();
     let ranges = ChunkRanges::from(range);
     let actual = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
     assert_eq!(expected.len(), actual.len());
@@ -120,7 +101,6 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
         return;
     }
     let mut actual2 = Vec::new();
-    let ob = PostOrderMemOutboard::load(hash, outboard, BlockSize::ZERO).unwrap();
     encode_ranges(&data, &ob, &ranges, Cursor::new(&mut actual2)).unwrap();
     assert_eq!(expected.len(), actual2.len());
     assert_eq!(expected, actual2);
@@ -138,7 +118,7 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     let expected = data;
     let ranges = ChunkRanges::from(range);
     let mut ec = Cursor::new(encoded);
-    for item in decode_ranges_into_chunks(root, BlockSize::ZERO, &mut ec, &ranges) {
+    for item in decode_ranges_into_chunks(root, BlockSize::ZERO, &mut ec, &ranges).unwrap() {
         let (pos, slice) = item.unwrap();
         let pos = pos.to_usize();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
@@ -230,7 +210,7 @@ fn bao_tree_outboard_levels() {
         assert_eq!(expected, hash);
         assert_eq!(
             ByteNum(outboard.len() as u64),
-            BaoTree::outboard_size(ByteNum(td.len() as u64), block_size)
+            BaoTree::new(ByteNum(td.len() as u64), block_size).outboard_size() + 8
         );
     }
 }
@@ -247,7 +227,9 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
     let expected = data.clone();
     let mut all_ranges: range_collections::RangeSet<[ByteNum; 2]> = RangeSet2::empty();
     let mut ec = Cursor::new(encoded);
-    for item in decode_ranges_into_chunks(root, block_size, &mut ec, &ChunkRanges::from(range)) {
+    for item in
+        decode_ranges_into_chunks(root, block_size, &mut ec, &ChunkRanges::from(range)).unwrap()
+    {
         let (pos, slice) = item.unwrap();
         // compute all data ranges
         all_ranges |= RangeSet2::from(pos..pos + (slice.len() as u64));
@@ -521,20 +503,22 @@ fn test_pre_order_outboard_fast() {
 pub fn decode_ranges_into_chunks<'a>(
     root: blake3::Hash,
     block_size: BlockSize,
-    encoded: impl Read + 'a,
+    mut encoded: impl Read + 'a,
     ranges: &'a ChunkRangesRef,
-) -> impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a {
-    let iter = DecodeResponseIter::new(root, block_size, encoded, ranges);
-    iter.filter_map(|item| match item {
+) -> std::io::Result<impl Iterator<Item = std::io::Result<(ByteNum, Vec<u8>)>> + 'a> {
+    let size = read_len(&mut encoded)?;
+    let tree = BaoTree::new(size, block_size);
+    let iter = DecodeResponseIter::new(root, tree, encoded, ranges);
+    Ok(iter.filter_map(|item| match item {
         Ok(item) => {
-            if let DecodeResponseItem::Leaf(Leaf { offset, data }) = item {
+            if let BaoContentItem::Leaf(Leaf { offset, data }) = item {
                 Some(Ok((offset, data.to_vec())))
             } else {
                 None
             }
         }
         Err(e) => Some(Err(e.into())),
-    })
+    }))
 }
 
 /// iterate over all nodes in the tree in depth first, left to right, pre order
@@ -1028,10 +1012,8 @@ proptest! {
     #[test]
     fn flip(len in 0usize..100000) {
         let data = make_test_data(len);
-        let post1 = post_order_outboard_reference(&data);
-        let post2 = post_order_outboard_reference_2(&data);
-        prop_assert_eq!(&post1, &post2);
-        prop_assert_eq!(&post1, &post1.flip().flip());
+        let post = post_order_outboard_reference(&data);
+        prop_assert_eq!(&post, &post.flip().flip());
     }
 
 
