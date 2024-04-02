@@ -106,13 +106,6 @@ pub struct PreOrderOutboard<R> {
     pub data: R,
 }
 
-impl<R> PreOrderOutboard<R> {
-    /// Return the inner reader
-    pub fn into_inner(self) -> R {
-        self.data
-    }
-}
-
 /// A generic outboard in post order
 #[derive(Debug, Clone)]
 pub struct PostOrderOutboard<R> {
@@ -122,13 +115,6 @@ pub struct PostOrderOutboard<R> {
     pub tree: BaoTree,
     /// hashes with length prefix
     pub data: R,
-}
-
-impl<R> PostOrderOutboard<R> {
-    /// Return the inner reader
-    pub fn into_inner(self) -> R {
-        self.data
-    }
 }
 
 /// A post order outboard that is optimized for memory storage.
@@ -186,11 +172,6 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
         }
     }
 
-    /// Get the inner data.
-    pub fn data(&self) -> &T {
-        &self.data
-    }
-
     /// Map the outboard data to a new type.
     pub fn map_data<F, U>(self, f: F) -> PostOrderMemOutboard<U>
     where
@@ -202,11 +183,6 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
             tree: self.tree,
             data: f(self.data),
         }
-    }
-
-    /// The outboard data, without the length suffix.
-    pub fn outboard(&self) -> &[u8] {
-        self.data.as_ref()
     }
 
     /// Flip the outboard to pre order.
@@ -369,37 +345,16 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
     }
 
     /// Map the outboard data to a new type.
-    pub fn map_data<F, U>(self, f: F) -> std::result::Result<PreOrderMemOutboard<U>, &'static str>
+    pub fn map_data<F, U>(self, f: F) -> PreOrderMemOutboard<U>
     where
         F: FnOnce(T) -> U,
         U: AsRef<[u8]>,
     {
-        let len = self.data.as_ref().len();
-        let data = f(self.data);
-        if data.as_ref().len() == len {
-            Ok(PreOrderMemOutboard {
-                root: self.root,
-                tree: self.tree,
-                data,
-            })
-        } else {
-            Err("invalid outboard data size")
+        PreOrderMemOutboard {
+            root: self.root,
+            tree: self.tree,
+            data: f(self.data),
         }
-    }
-
-    /// The outboard data, including the length prefix.
-    pub fn outboard(&self) -> &[u8] {
-        self.data.as_ref()
-    }
-
-    /// The root hash.
-    pub fn hash(&self) -> &blake3::Hash {
-        &self.root
-    }
-
-    /// Get the inner data.
-    pub fn into_inner(self) -> T {
-        self.data
     }
 
     /// Flip the outboard to a post order outboard.
@@ -440,7 +395,7 @@ impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PreOrderMemOutboard<T> {
 }
 
 #[cfg(feature = "tokio_fsm")]
-impl<T: AsRef<[u8]> + 'static> crate::io::fsm::Outboard for PreOrderMemOutboard<T> {
+impl<T: AsRef<[u8]>> crate::io::fsm::Outboard for PreOrderMemOutboard<T> {
     fn root(&self) -> blake3::Hash {
         self.root
     }

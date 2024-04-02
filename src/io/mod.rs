@@ -74,7 +74,7 @@ pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
 /// Computes the pre order outboard of a file in memory.
 pub fn outboard(input: impl AsRef<[u8]>, block_size: BlockSize) -> (Vec<u8>, blake3::Hash) {
     let outboard = PostOrderMemOutboard::create(input, block_size).flip();
-    let hash = *outboard.hash();
+    let hash = outboard.root;
     (outboard.into_inner_with_prefix(), hash)
 }
 
@@ -100,8 +100,7 @@ pub fn round_up_to_chunks(ranges: &RangeSetRef<u64>) -> ChunkRanges {
     res
 }
 
-/// Given a range set of byte ranges, round it up to chunk groups
-/// Given a range set of chunk ranges, return the full chunk groups.
+/// Given a range set of byte ranges, round it up to chunk groups.
 ///
 /// If we store outboard data at a level of granularity of `block_size`, we can only
 /// share full chunk groups because we don't have proofs for anything below a chunk group.

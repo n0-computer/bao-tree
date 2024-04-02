@@ -260,6 +260,7 @@ impl BaoTree {
         ByteNum(self.outboard_hash_pairs() * 64)
     }
 
+    #[allow(dead_code)]
     fn filled_size(&self) -> TreeNode {
         let blocks = self.chunks();
         let n = (blocks.0 + 1) / 2;
