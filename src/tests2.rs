@@ -39,9 +39,6 @@ fn read_len(mut from: impl std::io::Read) -> std::io::Result<ByteNum> {
     Ok(len)
 }
 
-#[cfg(feature = "validate")]
-use futures::StreamExt;
-
 fn tree() -> impl Strategy<Value = BaoTree> {
     (0u64..100000, 0u8..5).prop_map(|(size, block_size)| {
         let block_size = BlockSize(block_size);
@@ -243,267 +240,254 @@ fn mem_outboard_flip_proptest(#[strategy(tree())] tree: BaoTree) {
     mem_outboard_flip_impl(tree);
 }
 
-/// range is a range of chunks. Just using u64 for convenience in tests
 #[cfg(feature = "validate")]
-fn valid_outboard_ranges_sync(outboard: impl crate::io::sync::Outboard) -> ChunkRanges {
-    let ranges = ChunkRanges::all();
-    let iter = crate::io::sync::valid_outboard_ranges(outboard, &ranges);
-    let mut res = ChunkRanges::empty();
-    for item in iter {
-        res |= ChunkRanges::from(item.unwrap());
-    }
-    res
-}
+mod validate {
+    use super::*;
+    use futures::StreamExt;
 
-/// range is a range of chunks. Just using u64 for convenience in tests
-#[cfg(feature = "validate")]
-fn valid_ranges_fsm(outboard: impl crate::io::fsm::Outboard, data: Bytes) -> ChunkRanges {
-    futures::executor::block_on(async move {
+    /// range is a range of chunks. Just using u64 for convenience in tests
+    fn valid_outboard_ranges_sync(outboard: impl crate::io::sync::Outboard) -> ChunkRanges {
         let ranges = ChunkRanges::all();
+        let iter = crate::io::sync::valid_outboard_ranges(outboard, &ranges);
+        let mut res = ChunkRanges::empty();
+        for item in iter {
+            res |= ChunkRanges::from(item.unwrap());
+        }
+        res
+    }
+
+    /// range is a range of chunks. Just using u64 for convenience in tests
+    fn valid_ranges_fsm(outboard: impl crate::io::fsm::Outboard, data: Bytes) -> ChunkRanges {
+        futures::executor::block_on(async move {
+            let ranges = ChunkRanges::all();
+            let mut stream = crate::io::fsm::valid_ranges(outboard, data, &ranges);
+            let mut res = ChunkRanges::empty();
+            while let Some(item) = stream.next().await {
+                let item = item?;
+                res |= ChunkRanges::from(item);
+            }
+            std::io::Result::Ok(res)
+        })
+        .unwrap()
+    }
+
+    /// range is a range of chunks. Just using u64 for convenience in tests
+    fn valid_outboard_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> ChunkRanges {
+        futures::executor::block_on(async move {
+            let ranges = ChunkRanges::all();
+            let mut stream = crate::io::fsm::valid_outboard_ranges(outboard, &ranges);
+            let mut res = ChunkRanges::empty();
+            while let Some(item) = stream.next().await {
+                let item = item?;
+                res |= ChunkRanges::from(item);
+            }
+            std::io::Result::Ok(res)
+        })
+        .unwrap()
+    }
+
+    fn validate_outboard_sync_pos_impl(tree: BaoTree) {
+        let size = tree.size.to_usize();
+        let block_size = tree.block_size;
+        let data = make_test_data(size);
+        let outboard = PostOrderMemOutboard::create(data, block_size);
+        let expected = ChunkRanges::from(..outboard.tree().chunks());
+        let actual = valid_outboard_ranges_sync(&outboard);
+        assert_eq!(expected, actual)
+    }
+
+    async fn valid_file_ranges_test_impl() {
+        // interesting cases:
+        // below 16 chunks
+        // exactly 16 chunks
+        // 16 chunks + 1
+        // 32 chunks
+        // 32 chunks + 1 < seems to fail!
+        let data = make_test_data(1024 * 16 * 2 + 1024 * 15);
+        let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
+        let ranges = ChunkRanges::from(ChunkNum(0)..ChunkNum(120));
+        // data[32768] = 0;
+        let data = Bytes::from(data);
         let mut stream = crate::io::fsm::valid_ranges(outboard, data, &ranges);
-        let mut res = ChunkRanges::empty();
         while let Some(item) = stream.next().await {
-            let item = item?;
-            res |= ChunkRanges::from(item);
+            let item = item.unwrap();
+            println!("{:?}", item);
         }
-        std::io::Result::Ok(res)
-    })
-    .unwrap()
-}
-
-/// range is a range of chunks. Just using u64 for convenience in tests
-#[cfg(feature = "validate")]
-fn valid_outboard_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> ChunkRanges {
-    futures::executor::block_on(async move {
-        let ranges = ChunkRanges::all();
-        let mut stream = crate::io::fsm::valid_outboard_ranges(outboard, &ranges);
-        let mut res = ChunkRanges::empty();
-        while let Some(item) = stream.next().await {
-            let item = item?;
-            res |= ChunkRanges::from(item);
-        }
-        std::io::Result::Ok(res)
-    })
-    .unwrap()
-}
-
-#[cfg(feature = "validate")]
-fn validate_outboard_sync_pos_impl(tree: BaoTree) {
-    let size = tree.size.to_usize();
-    let block_size = tree.block_size;
-    let data = make_test_data(size);
-    let outboard = PostOrderMemOutboard::create(data, block_size);
-    let expected = ChunkRanges::from(..outboard.tree().chunks());
-    let actual = valid_outboard_ranges_sync(&outboard);
-    assert_eq!(expected, actual)
-}
-
-#[cfg(feature = "validate")]
-async fn valid_file_ranges_test_impl() {
-    // interesting cases:
-    // below 16 chunks
-    // exactly 16 chunks
-    // 16 chunks + 1
-    // 32 chunks
-    // 32 chunks + 1 < seems to fail!
-    let data = make_test_data(1024 * 16 * 2 + 1024 * 15);
-    let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
-    let ranges = ChunkRanges::from(ChunkNum(0)..ChunkNum(120));
-    // data[32768] = 0;
-    let data = Bytes::from(data);
-    let mut stream = crate::io::fsm::valid_ranges(outboard, data, &ranges);
-    while let Some(item) = stream.next().await {
-        let item = item.unwrap();
-        println!("{:?}", item);
     }
-}
 
-/// range is a range of chunks. Just using u64 for convenience in tests
-#[cfg(feature = "validate")]
-#[test]
-fn valid_file_ranges_fsm() {
-    futures::executor::block_on(valid_file_ranges_test_impl())
-}
+    /// range is a range of chunks. Just using u64 for convenience in tests
+    #[test]
+    fn valid_file_ranges_fsm() {
+        futures::executor::block_on(valid_file_ranges_test_impl())
+    }
 
-#[cfg(feature = "validate")]
-#[proptest]
-fn validate_outboard_sync_pos_proptest(#[strategy(tree())] tree: BaoTree) {
-    validate_outboard_sync_pos_impl(tree);
-}
+    #[proptest]
+    fn validate_outboard_sync_pos_proptest(#[strategy(tree())] tree: BaoTree) {
+        validate_outboard_sync_pos_impl(tree);
+    }
 
-#[cfg(feature = "validate")]
-fn validate_outboard_fsm_pos_impl(tree: BaoTree) {
-    let size = tree.size.to_usize();
-    let block_size = tree.block_size;
-    let data = make_test_data(size);
-    let mut outboard = PostOrderMemOutboard::create(data, block_size);
-    let expected = ChunkRanges::from(..outboard.tree().chunks());
-    let actual = valid_outboard_ranges_fsm(&mut outboard);
-    assert_eq!(expected, actual)
-}
+    fn validate_outboard_fsm_pos_impl(tree: BaoTree) {
+        let size = tree.size.to_usize();
+        let block_size = tree.block_size;
+        let data = make_test_data(size);
+        let mut outboard = PostOrderMemOutboard::create(data, block_size);
+        let expected = ChunkRanges::from(..outboard.tree().chunks());
+        let actual = valid_outboard_ranges_fsm(&mut outboard);
+        assert_eq!(expected, actual)
+    }
 
-#[cfg(feature = "validate")]
-#[proptest]
-fn validate_outboard_fsm_pos_proptest(#[strategy(tree())] tree: BaoTree) {
-    validate_outboard_fsm_pos_impl(tree);
-}
-
-#[cfg(feature = "validate")]
-#[test]
-fn validate_outboard_fsm_pos_cases() {
-    let cases = [(0x10001, 0)];
-    for (size, block_level) in cases {
-        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+    #[proptest]
+    fn validate_outboard_fsm_pos_proptest(#[strategy(tree())] tree: BaoTree) {
         validate_outboard_fsm_pos_impl(tree);
     }
-}
 
-#[cfg(feature = "validate")]
-fn validate_fsm_pos_impl(tree: BaoTree) {
-    let size = tree.size.to_usize();
-    let block_size = tree.block_size;
-    let data = make_test_data(size);
-    let mut outboard = PostOrderMemOutboard::create(&data, block_size);
-    let expected = ChunkRanges::from(..outboard.tree().chunks());
-    let actual = valid_ranges_fsm(&mut outboard, data.into());
-    assert_eq!(expected, actual)
-}
+    #[test]
+    fn validate_outboard_fsm_pos_cases() {
+        let cases = [(0x10001, 0)];
+        for (size, block_level) in cases {
+            let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+            validate_outboard_fsm_pos_impl(tree);
+        }
+    }
 
-#[cfg(feature = "validate")]
-#[proptest]
-fn validate_fsm_pos_proptest(#[strategy(tree())] tree: BaoTree) {
-    validate_fsm_pos_impl(tree);
-}
+    fn validate_fsm_pos_impl(tree: BaoTree) {
+        let size = tree.size.to_usize();
+        let block_size = tree.block_size;
+        let data = make_test_data(size);
+        let mut outboard = PostOrderMemOutboard::create(&data, block_size);
+        let expected = ChunkRanges::from(..outboard.tree().chunks());
+        let actual = valid_ranges_fsm(&mut outboard, data.into());
+        assert_eq!(expected, actual)
+    }
 
-#[cfg(feature = "validate")]
-#[test]
-fn validate_fsm_pos_cases() {
-    let cases = [
-        // (0x10001, 0),
-        (0x401, 0),
-    ];
-    for (size, block_level) in cases {
-        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+    #[proptest]
+    fn validate_fsm_pos_proptest(#[strategy(tree())] tree: BaoTree) {
         validate_fsm_pos_impl(tree);
     }
-}
 
-fn flip_bit(data: &mut [u8], rand: usize) {
-    // flip a random bit in the outboard
-    // this is the post order outboard without the length suffix,
-    // so it's all hashes
-    let bit = rand % data.len() * 8;
-    let byte = bit / 8;
-    let bit = bit % 8;
-    data[byte] ^= 1 << bit;
-}
-
-/// Check that flipping a random bit in the outboard makes at least one range invalid
-fn validate_outboard_sync_neg_impl(tree: BaoTree, rand: u32) {
-    let rand = rand as usize;
-    let size = tree.size.to_usize();
-    let block_size = tree.block_size;
-    let data = make_test_data(size);
-    let mut outboard = PostOrderMemOutboard::create(data, block_size);
-    let expected = ChunkRanges::from(..outboard.tree().chunks());
-    if !outboard.data.is_empty() {
-        // flip a random bit in the outboard
-        flip_bit(&mut outboard.data, rand);
-        // Check that at least one range is invalid
-        let actual = valid_outboard_ranges_sync(&outboard);
-        assert_ne!(expected, actual);
+    #[test]
+    fn validate_fsm_pos_cases() {
+        let cases = [
+            // (0x10001, 0),
+            (0x401, 0),
+        ];
+        for (size, block_level) in cases {
+            let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+            validate_fsm_pos_impl(tree);
+        }
     }
-}
 
-#[test]
-fn validate_outboard_sync_neg_cases() {
-    let cases = [((0x6001, 3), 1265277760)];
-    for ((size, block_level), rand) in cases {
-        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+    fn flip_bit(data: &mut [u8], rand: usize) {
+        // flip a random bit in the outboard
+        // this is the post order outboard without the length suffix,
+        // so it's all hashes
+        let bit = rand % data.len() * 8;
+        let byte = bit / 8;
+        let bit = bit % 8;
+        data[byte] ^= 1 << bit;
+    }
+
+    /// Check that flipping a random bit in the outboard makes at least one range invalid
+    fn validate_outboard_sync_neg_impl(tree: BaoTree, rand: u32) {
+        let rand = rand as usize;
+        let size = tree.size.to_usize();
+        let block_size = tree.block_size;
+        let data = make_test_data(size);
+        let mut outboard = PostOrderMemOutboard::create(data, block_size);
+        let expected = ChunkRanges::from(..outboard.tree().chunks());
+        if !outboard.data.is_empty() {
+            // flip a random bit in the outboard
+            flip_bit(&mut outboard.data, rand);
+            // Check that at least one range is invalid
+            let actual = valid_outboard_ranges_sync(&outboard);
+            assert_ne!(expected, actual);
+        }
+    }
+
+    #[test]
+    fn validate_outboard_sync_neg_cases() {
+        let cases = [((0x6001, 3), 1265277760)];
+        for ((size, block_level), rand) in cases {
+            let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+            validate_outboard_sync_neg_impl(tree, rand);
+        }
+    }
+
+    #[proptest]
+    fn validate_outboard_sync_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
         validate_outboard_sync_neg_impl(tree, rand);
     }
-}
 
-#[proptest]
-fn validate_outboard_sync_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
-    validate_outboard_sync_neg_impl(tree, rand);
-}
-
-/// Check that flipping a random bit in the outboard makes at least one range invalid
-#[cfg(feature = "validate")]
-fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
-    let rand = rand as usize;
-    let size = tree.size.to_usize();
-    let block_size = tree.block_size;
-    let data = make_test_data(size);
-    let mut outboard = PostOrderMemOutboard::create(data, block_size);
-    let expected = ChunkRanges::from(..outboard.tree().chunks());
-    if !outboard.data.is_empty() {
-        // flip a random bit in the outboard
-        flip_bit(&mut outboard.data, rand);
-        // Check that at least one range is invalid
-        let actual = valid_outboard_ranges_fsm(&mut outboard);
-        assert_ne!(expected, actual);
+    /// Check that flipping a random bit in the outboard makes at least one range invalid
+    fn validate_outboard_fsm_neg_impl(tree: BaoTree, rand: u32) {
+        let rand = rand as usize;
+        let size = tree.size.to_usize();
+        let block_size = tree.block_size;
+        let data = make_test_data(size);
+        let mut outboard = PostOrderMemOutboard::create(data, block_size);
+        let expected = ChunkRanges::from(..outboard.tree().chunks());
+        if !outboard.data.is_empty() {
+            // flip a random bit in the outboard
+            flip_bit(&mut outboard.data, rand);
+            // Check that at least one range is invalid
+            let actual = valid_outboard_ranges_fsm(&mut outboard);
+            assert_ne!(expected, actual);
+        }
     }
-}
 
-#[cfg(feature = "validate")]
-#[proptest]
-fn validate_outboard_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
-    validate_outboard_fsm_neg_impl(tree, rand);
-}
-
-#[cfg(feature = "validate")]
-#[test]
-fn validate_outboard_fsm_neg_cases() {
-    let cases = [((0x2001, 0), 2738363904)];
-    for ((size, block_level), rand) in cases {
-        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+    #[proptest]
+    fn validate_outboard_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
         validate_outboard_fsm_neg_impl(tree, rand);
     }
-}
 
-/// Check that flipping a random bit in the outboard makes at least one range invalid
-#[cfg(feature = "validate")]
-fn validate_fsm_neg_impl(tree: BaoTree, rand: u32) {
-    let rand = rand as usize;
-    let size = tree.size.to_usize();
-    let block_size = tree.block_size;
-    let data = make_test_data(size);
-    let mut outboard = PostOrderMemOutboard::create(&data, block_size);
-    let expected = ChunkRanges::from(..outboard.tree().chunks());
-    if !outboard.data.is_empty() {
-        // flip a random bit in the outboard
-        flip_bit(&mut outboard.data, rand);
-        // Check that at least one range is invalid
-        let actual = valid_ranges_fsm(&mut outboard, data.into());
-        assert_ne!(expected, actual);
+    #[test]
+    fn validate_outboard_fsm_neg_cases() {
+        let cases = [((0x2001, 0), 2738363904)];
+        for ((size, block_level), rand) in cases {
+            let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+            validate_outboard_fsm_neg_impl(tree, rand);
+        }
     }
-}
 
-#[proptest]
-#[cfg(feature = "validate")]
-fn validate_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
-    validate_fsm_neg_impl(tree, rand);
-}
+    /// Check that flipping a random bit in the outboard makes at least one range invalid
+    fn validate_fsm_neg_impl(tree: BaoTree, rand: u32) {
+        let rand = rand as usize;
+        let size = tree.size.to_usize();
+        let block_size = tree.block_size;
+        let data = make_test_data(size);
+        let mut outboard = PostOrderMemOutboard::create(&data, block_size);
+        let expected = ChunkRanges::from(..outboard.tree().chunks());
+        if !outboard.data.is_empty() {
+            // flip a random bit in the outboard
+            flip_bit(&mut outboard.data, rand);
+            // Check that at least one range is invalid
+            let actual = valid_ranges_fsm(&mut outboard, data.into());
+            assert_ne!(expected, actual);
+        }
+    }
 
-#[test]
-#[cfg(feature = "validate")]
-fn validate_fsm_neg_cases() {
-    let cases = [((0x2001, 0), 2738363904)];
-    for ((size, block_level), rand) in cases {
-        let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+    #[proptest]
+    fn validate_fsm_neg_proptest(#[strategy(tree())] tree: BaoTree, rand: u32) {
         validate_fsm_neg_impl(tree, rand);
     }
-}
 
-#[test]
-fn validate_bug() {
-    let data = Bytes::from(make_test_data(19308432));
-    let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
-    let expected = ChunkRanges::from(..ByteNum(data.len() as u64).chunks());
-    let actual = valid_ranges_fsm(outboard, data.clone());
-    assert_eq!(expected, actual);
+    #[test]
+    fn validate_fsm_neg_cases() {
+        let cases = [((0x2001, 0), 2738363904)];
+        for ((size, block_level), rand) in cases {
+            let tree = BaoTree::new(ByteNum(size), BlockSize(block_level));
+            validate_fsm_neg_impl(tree, rand);
+        }
+    }
+
+    #[test]
+    fn validate_bug() {
+        let data = Bytes::from(make_test_data(19308432));
+        let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
+        let expected = ChunkRanges::from(..ByteNum(data.len() as u64).chunks());
+        let actual = valid_ranges_fsm(outboard, data.clone());
+        assert_eq!(expected, actual);
+    }
 }
 
 /// Encode data fully, decode it again, and check that both data and outboard are the same
