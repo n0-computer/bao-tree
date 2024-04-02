@@ -187,7 +187,9 @@ impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
 
     /// Flip the outboard to pre order.
     pub fn flip(&self) -> PreOrderMemOutboard {
-        flip_post(self.root, self.tree, self.data.as_ref())
+        let mut target = PreOrderMemOutboard::new(self.root, self.tree, vec![0; self.tree.outboard_size().to_usize()]);
+        crate::io::sync::copy(self, &mut target).unwrap();
+        target
     }
 }
 
@@ -272,23 +274,6 @@ fn load_post(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<(blake3::Has
     load_raw_post_mem(tree, data, node).map(parse_hash_pair)
 }
 
-fn flip_post(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PreOrderMemOutboard {
-    let mut out = vec![0; data.len()];
-    for node in tree.post_order_nodes_iter() {
-        if let Some((l, r)) = load_post(&tree, data, node) {
-            let offset = tree.pre_order_offset(node).unwrap();
-            let offset = (offset as usize) * 64;
-            out[offset..offset + 32].copy_from_slice(l.as_bytes());
-            out[offset + 32..offset + 64].copy_from_slice(r.as_bytes());
-        }
-    }
-    PreOrderMemOutboard {
-        root,
-        tree,
-        data: out,
-    }
-}
-
 /// A pre order outboard that is optimized for memory storage.
 ///
 /// The traits are implemented for fixed size slices or mutable slices, so you
@@ -359,7 +344,9 @@ impl<T: AsRef<[u8]>> PreOrderMemOutboard<T> {
 
     /// Flip the outboard to a post order outboard.
     pub fn flip(&self) -> PostOrderMemOutboard {
-        flip_pre(self.root, self.tree, self.data.as_ref())
+        let mut target = PostOrderMemOutboard::new(self.root, self.tree, vec![0; self.tree.outboard_size().to_usize()]);
+        crate::io::sync::copy(self, &mut target).unwrap();
+        target
     }
 }
 
@@ -448,23 +435,6 @@ fn load_raw_pre_mem(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<[u8; 
 
 fn load_pre(tree: &BaoTree, data: &[u8], node: TreeNode) -> Option<(blake3::Hash, blake3::Hash)> {
     load_raw_pre_mem(tree, data, node).map(parse_hash_pair)
-}
-
-fn flip_pre(root: blake3::Hash, tree: BaoTree, data: &[u8]) -> PostOrderMemOutboard {
-    let mut out = vec![0; data.len()];
-    for node in tree.post_order_nodes_iter() {
-        if let Some((l, r)) = load_pre(&tree, data, node) {
-            let offset = tree.post_order_offset(node).unwrap().value();
-            let offset = usize::try_from(offset * 64).unwrap();
-            out[offset..offset + 32].copy_from_slice(l.as_bytes());
-            out[offset + 32..offset + 64].copy_from_slice(r.as_bytes());
-        }
-    }
-    PostOrderMemOutboard {
-        root,
-        tree,
-        data: out,
-    }
 }
 
 pub(crate) fn parse_hash_pair(buf: [u8; 64]) -> (blake3::Hash, blake3::Hash) {

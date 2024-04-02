@@ -554,8 +554,9 @@ fn read_parent(mut from: impl Read) -> std::io::Result<(blake3::Hash, blake3::Ha
 pub fn copy(from: impl Outboard, mut to: impl OutboardMut) -> io::Result<()> {
     let tree = from.tree();
     for node in tree.pre_order_nodes_iter() {
-        let hash_pair = from.load(node)?.unwrap();
-        to.save(node, &hash_pair)?;
+        if let Some(hash_pair) = from.load(node)? {
+            to.save(node, &hash_pair)?;
+        }
     }
     Ok(())
 }

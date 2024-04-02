@@ -706,8 +706,9 @@ async fn outboard_post_order_impl(
 pub async fn copy(mut from: impl Outboard, mut to: impl OutboardMut) -> io::Result<()> {
     let tree = from.tree();
     for node in tree.pre_order_nodes_iter() {
-        let hash_pair = from.load(node).await?.unwrap();
-        to.save(node, &hash_pair).await?;
+        if let Some(hash_pair) = from.load(node).await? {
+            to.save(node, &hash_pair).await?;
+        }
     }
     Ok(())
 }
