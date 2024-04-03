@@ -42,7 +42,7 @@ struct Args {
     /// bao crate.
     #[clap(long, default_value_t = 4)]
     block_size: u8,
-    /// Use async io (not implemented yet)
+    /// Use async io
     #[clap(long)]
     r#async: bool,
     /// Quiet mode, no progress output to stderr

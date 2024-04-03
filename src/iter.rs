@@ -16,6 +16,7 @@ use crate::{split, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, Tr
 /// Usually this is used within an iterator, so we hope that the compiler will optimize away
 /// the redundant information.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct NodeInfo<'a> {
     /// the node
     pub node: TreeNode,
@@ -39,6 +40,7 @@ pub struct NodeInfo<'a> {
 ///
 /// This is mostly used internally
 #[derive(Debug)]
+#[cfg(test)]
 pub struct PreOrderPartialIterRef<'a> {
     /// the tree we want to traverse
     tree: BaoTree,
@@ -56,6 +58,7 @@ pub struct PreOrderPartialIterRef<'a> {
     shifted_root: TreeNode,
 }
 
+#[cfg(test)]
 impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef, min_level: u8) -> Self {
@@ -77,6 +80,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
     }
 }
 
+#[cfg(test)]
 impl<'a> Iterator for PreOrderPartialIterRef<'a> {
     type Item = NodeInfo<'a>;
 

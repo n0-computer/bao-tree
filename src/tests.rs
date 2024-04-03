@@ -59,7 +59,11 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
     let hash = blake3::Hash::from(*hash.as_bytes());
     let tree = BaoTree::new(ByteNum(data.len() as u64), BlockSize::ZERO);
     outboard.splice(..8, []);
-    let pre = PreOrderMemOutboard::new(hash, tree, outboard);
+    let pre = PreOrderMemOutboard {
+        root: hash,
+        tree,
+        data: outboard,
+    };
     pre.flip()
 }
 

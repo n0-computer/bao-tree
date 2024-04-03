@@ -1,11 +1,11 @@
-//! The tree for the bao file format
+//! # The tree for the bao file format
 //!
 //! This crate is similar to the [bao crate](https://crates.io/crates/bao), but
 //! takes a slightly different approach.
 //!
 //! The core struct is [BaoTree], which describes the geometry of the tree and
-//! various ways to traverse it. An individual node is identified by [TreeNode],
-//! which is just a newtype wrapper for an u64.
+//! various ways to traverse it. An individual tree node is identified by
+//! [TreeNode], which is just a newtype wrapper for an u64.
 //!
 //! [TreeNode] provides various helpers to e.g. get the offset of a node in
 //! different traversal orders.
@@ -18,7 +18,108 @@
 //! and [BlockSize] is the log base 2 of the chunk group size.
 //!
 //! All this is then used in the [io] module to implement the actual io, both
-//! synchronous and asynchronous.
+//! [synchronous](io::sync) and [asynchronous](io::fsm).
+//!
+//! # Basic usage
+//!
+//! The basic workflow is like this: you have some existing data, for which
+//! you want to enable verified streaming. This data can either be in memory,
+//! in a file, or even a remote resource such as an HTTP server.
+//!
+//! ## Outboard creation
+//!
+//! You create an outboard using the [CreateOutboard](io::sync::CreateOutboard)
+//! trait. It has functions to [create](io::sync::CreateOutboard::create) an
+//! outboard from scratch or to [initialize](io::sync::CreateOutboard::init_from)
+//! data and root hash from existing data.
+//!
+//! ## Serving requests
+//!
+//! You serve streaming requests by using the
+//! [encode_ranges](io::sync::encode_ranges) or
+//! [encode_ranges_validated](io::sync::encode_ranges_validated) functions
+//! in the sync or async io module. For this you need data and a matching
+//! outboard.
+//!
+//! The difference between the two functions is that the validated version
+//! will check the hash of each chunk against the bao tree encoded in the
+//! outboard, so you will detect data corruption before sending out data
+//! to the requester. When using the unvalidated version, you might send out
+//! corrupted data without ever noticing and earn a bad reputation.
+//!
+//! Due to the speed of the blake3 hash function, validation is not a
+//! significant performance overhead compared to network operations and
+//! encryption.
+//!
+//! The requester will send a set of chunk ranges they are interested in.
+//! To compute chunk ranges from byte ranges, there is a helper function
+//! [round_up_to_chunks](io::round_up_to_chunks) that takes a byte range and
+//! rounds up to chunk ranges.
+//!
+//! If you just want to stream the entire blob, you can use [ChunkRanges::all]
+//! as the range.
+//!
+//! ## Processing requests
+//!
+//! You process requests by using the [decode_ranges](io::sync::decode_ranges)
+//! function in the sync or async io module. This function requires prior
+//! knowledge of the tree geometry (total data size and block size). A common
+//! way to get this information is to have the block size as a common parameter
+//! of both sides, and send the total data size as a prefix of the encoded data.
+//!
+//! This function will perform validation in any case, there is no variant
+//! that skips validation since that would defeat the purpose of verified
+//! streaming.
+//!
+//! The original bao crate uses a little endian u64 as the prefix.
+//!
+//! ## Simple end to end example
+//!
+//! # ```
+//! use bao_tree::{ByteNum, BlockSize, BaoTree};
+//! use bao_tree::io::outboard::PreOrderOutboard;
+//! use bao_tree::io::round_up_to_chunks;
+//! use bao_tree::io::sync::{encode_ranges_validated, decode_ranges, CreateOutboard};
+//! use range_collections::RangeSet2;
+//!
+//! /// Use a block size of 16 KiB, a good default for most cases
+//! const BLOCK_SIZE: BlockSize = BlockSize(4);
+//!
+//! # fn main() -> std::io::Result<()> {
+//! /// The file we want to serve
+//! let file = std::fs::File::open("video.mp4")?;
+//! /// Create an outboard for the file, using the current size
+//! let mut ob = `PreOrderOutboard::<Vec<u8>>::create`(&file, BLOCK_SIZE)?;
+//! /// Encode the first 100000 bytes of the file
+//! let ranges = RangeSet2::from(0..100000);
+//! let ranges = round_up_to_chunks(&ranges);
+//! let mut encoded = vec![];
+//! encode_ranges_validated(&file, &ob, &ranges, &mut encoded)?;
+//!
+//! /// Decode the encoded data
+//! let mut decoded = std::fs::File::create("copy.mp4")?;
+//! let mut ob = PreOrderOutboard {
+//!   tree: ob.tree,
+//!   root: ob.root,
+//!   data: vec![],
+//! };
+//! decode_ranges(&ranges, std::io::Cursor::new(encoded), &mut decoded, &mut ob)?;
+//!
+//! /// the first 100000 bytes of the file should now be in `decoded`
+//! /// in addition, the required part of the tree to validate that the data is
+//! /// correct are in `ob.data`
+//! # Ok(())
+//! # }
+//! # ```
+//!
+//! # Compatibility with the [bao crate](https://crates.io/crates/bao)
+//!
+//! This crate will be compatible with the bao crate, provided you do the
+//! following:
+//!
+//! - use a block size of 1024, so no chunk groups
+//! - use a little endian u64 as the prefix for the encoded data
+//! - use only a single range
 #![deny(missing_docs)]
 use range_collections::RangeSetRef;
 use std::{
@@ -213,6 +314,7 @@ impl BaoTree {
     /// When `min_level` is set to a value greater than 0, the iterator will
     /// skip all branch nodes that are at a level < min_level if they are fully
     /// covered by the ranges.
+    #[cfg(test)]
     pub fn ranges_pre_order_nodes_iter<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
@@ -271,6 +373,7 @@ impl BaoTree {
     ///
     /// If a tree has a non-zero block size, this is different than the node
     /// being a leaf (level=0).
+    #[cfg(test)]
     const fn is_leaf(&self, node: TreeNode) -> bool {
         node.level() == self.block_size.to_u32()
     }
@@ -280,6 +383,7 @@ impl BaoTree {
     /// the only node that is not persisted is the last leaf node, if it is
     /// less than half full
     #[inline]
+    #[cfg(test)]
     const fn is_persisted(&self, node: TreeNode) -> bool {
         !self.is_leaf(node) || node.mid().to_bytes().0 < self.size.0
     }

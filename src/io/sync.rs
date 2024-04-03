@@ -3,20 +3,20 @@
 //! The traits to perform positioned io are re-exported from
 //! [positioned-io](https://crates.io/crates/positioned-io).
 use std::{
-    io::{self, Read, Write},
+    io::{self, Read, Seek, Write},
     result,
 };
 
 use crate::{
     blake3,
-    io::error::{AnyDecodeError, EncodeError},
     io::{
+        error::{AnyDecodeError, EncodeError},
         outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
     iter::BaoChunk,
     rec::{encode_selected_rec, truncate_ranges},
-    BaoTree, ChunkRangesRef, TreeNode,
+    BaoTree, BlockSize, ByteNum, ChunkRangesRef, TreeNode,
 };
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
@@ -63,11 +63,39 @@ pub trait Outboard {
 pub trait OutboardMut: Sized {
     /// Save a hash pair for a node
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()>;
+
+    /// Sync the outboard.
+    fn sync(&mut self) -> io::Result<()>;
+}
+
+/// Convenience trait to initialize an outboard from a data source.
+///
+/// In complex real applications, you might want to do this manually.
+pub trait CreateOutboard {
+    /// create an outboard from a data source. This requires the outboard to
+    /// have a default implementation, which is the case for the memory
+    /// implementations.
+    fn create(data: impl Read + Seek + Unpin, block_size: BlockSize) -> io::Result<Self>
+    where
+        Self: Default + Sized;
+
+    /// Init the outboard from a data source. This will use the existing
+    /// tree and only init the data and set the root hash.
+    ///
+    /// So this can be used to initialize an outboard that does not have a default,
+    /// such as a file based one. It also does not require [Seek] on the data.
+    ///
+    /// It will however only include data up the the current tree size.
+    fn init_from(&mut self, data: impl Read) -> io::Result<()>;
 }
 
 impl<O: OutboardMut> OutboardMut for &mut O {
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         (**self).save(node, hash_pair)
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        (**self).sync()
     }
 }
 
@@ -95,13 +123,6 @@ impl<O: Outboard> Outboard for &mut O {
     }
 }
 
-impl<R: ReadAt + Size> PreOrderOutboard<R> {
-    /// Create a new outboard from a reader, root hash, and block size.
-    pub fn new(root: blake3::Hash, tree: BaoTree, data: R) -> Self {
-        Self { root, tree, data }
-    }
-}
-
 impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
     fn root(&self) -> blake3::Hash {
         self.root
@@ -122,7 +143,7 @@ impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
     }
 }
 
-impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
+impl<W: WriteAt> OutboardMut for PreOrderOutboard<W> {
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(());
@@ -134,12 +155,53 @@ impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
         self.data.write_all_at(offset, &content)?;
         Ok(())
     }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.data.flush()
+    }
 }
 
-impl<R: ReadAt + Size> PostOrderOutboard<R> {
-    /// Create a new outboard from a reader, root hash, and block size.
-    pub fn new(root: blake3::Hash, tree: BaoTree, data: R) -> Self {
-        Self { root, tree, data }
+impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
+    fn create(mut data: impl Read + Seek, block_size: BlockSize) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        let size = data.seek(io::SeekFrom::End(0))?;
+        data.rewind()?;
+        let tree = BaoTree::new(ByteNum(size), block_size);
+        let mut res = Self {
+            tree,
+            ..Default::default()
+        };
+        res.init_from(data)?;
+        res.sync()?;
+        Ok(res)
+    }
+
+    fn init_from(&mut self, data: impl Read) -> io::Result<()> {
+        let mut this = self;
+        let root = outboard(data, this.tree, &mut this)?;
+        this.root = root;
+        this.sync()?;
+        Ok(())
+    }
+}
+
+impl<W: WriteAt> OutboardMut for PostOrderOutboard<W> {
+    fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
+        let Some(offset) = self.tree.post_order_offset(node) else {
+            return Ok(());
+        };
+        let offset = offset.value() * 64;
+        let mut content = [0u8; 64];
+        content[0..32].copy_from_slice(hash_pair.0.as_bytes());
+        content[32..64].copy_from_slice(hash_pair.1.as_bytes());
+        self.data.write_all_at(offset, &content)?;
+        Ok(())
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.data.flush()
     }
 }
 

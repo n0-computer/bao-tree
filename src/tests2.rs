@@ -492,11 +492,11 @@ fn encode_decode_full_sync_impl(
     let size = read_len(&mut encoded_read).unwrap();
     let tree = BaoTree::new(size, outboard.tree().block_size());
     let mut decoded = Vec::new();
-    let mut ob_res = PostOrderMemOutboard::new(
-        outboard.root(),
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
         tree,
-        vec![0; tree.outboard_size().to_usize()],
-    );
+        data: vec![0; tree.outboard_size().to_usize()],
+    };
     crate::io::sync::decode_ranges(&ranges, encoded_read, &mut decoded, &mut ob_res).unwrap();
     ((decoded, ob_res), (data.to_vec(), outboard))
 }
@@ -530,7 +530,11 @@ async fn encode_decode_full_fsm_impl(
         let root = outboard.root();
         let outboard_size = usize::try_from(tree.outboard_hash_pairs() * 64).unwrap();
         let outboard_data = vec![0u8; outboard_size];
-        PostOrderMemOutboard::new(root, tree, outboard_data)
+        PostOrderMemOutboard {
+            root,
+            tree,
+            data: outboard_data,
+        }
     };
     let mut decoded = BytesMut::new();
     crate::io::fsm::decode_ranges(read_encoded, ranges, &mut decoded, &mut ob_res)

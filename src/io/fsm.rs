@@ -20,7 +20,7 @@ use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt};
 
 use crate::{
     io::{
@@ -94,6 +94,30 @@ pub trait OutboardMut: Sized {
     fn sync(&mut self) -> impl Future<Output = io::Result<()>>;
 }
 
+/// Convenience trait to initialize an outboard from a data source.
+///
+/// In complex real applications, you might want to do this manually.
+pub trait CreateOutboard {
+    /// create an outboard from a data source. This requires the outboard to
+    /// have a default implementation, which is the case for the memory
+    /// implementations.
+    fn create(
+        data: impl AsyncRead + AsyncSeek + Unpin,
+        block_size: BlockSize,
+    ) -> impl Future<Output = io::Result<Self>>
+    where
+        Self: Default + Sized;
+
+    /// Init the outboard from a data source. This will use the existing
+    /// tree and only init the data and set the root hash.
+    ///
+    /// So this can be used to initialize an outboard that does not have a default,
+    /// such as a file based one. It also does not require [AsyncSeek] on the data.
+    ///
+    /// It will however only include data up the the current tree size.
+    fn init_from(&mut self, data: impl AsyncRead + Unpin) -> impl Future<Output = io::Result<()>>;
+}
+
 impl<'b, O: Outboard> Outboard for &'b mut O {
     fn root(&self) -> blake3::Hash {
         (**self).root()
@@ -164,6 +188,80 @@ impl<W: AsyncSliceWriter> OutboardMut for PreOrderOutboard<W> {
 
     async fn sync(&mut self) -> io::Result<()> {
         self.data.sync().await
+    }
+}
+
+impl<W: AsyncSliceWriter> OutboardMut for PostOrderOutboard<W> {
+    async fn save(
+        &mut self,
+        node: TreeNode,
+        hash_pair: &(blake3::Hash, blake3::Hash),
+    ) -> io::Result<()> {
+        let Some(offset) = self.tree.post_order_offset(node) else {
+            return Ok(());
+        };
+        let offset = offset.value() * 64;
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(hash_pair.0.as_bytes());
+        buf[32..].copy_from_slice(hash_pair.1.as_bytes());
+        self.data.write_at(offset, &buf).await?;
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> io::Result<()> {
+        self.data.sync().await
+    }
+}
+
+impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
+    async fn create(
+        mut data: impl AsyncRead + AsyncSeek + Unpin,
+        block_size: BlockSize,
+    ) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        use tokio::io::AsyncSeekExt;
+        let mut res = Self::default();
+        let size = data.seek(io::SeekFrom::End(0)).await?;
+        data.rewind().await?;
+        res.tree = BaoTree::new(ByteNum(size), block_size);
+        res.init_from(data).await?;
+        Ok(res)
+    }
+
+    async fn init_from(&mut self, data: impl AsyncRead + Unpin) -> io::Result<()> {
+        let mut this = self;
+        let root = outboard(data, this.tree, &mut this).await?;
+        this.root = root;
+        this.sync().await?;
+        Ok(())
+    }
+}
+
+impl<W: AsyncSliceWriter> CreateOutboard for PostOrderOutboard<W> {
+    async fn create(
+        mut data: impl AsyncRead + AsyncSeek + Unpin,
+        block_size: BlockSize,
+    ) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        use tokio::io::AsyncSeekExt;
+        let mut res = Self::default();
+        let size = data.seek(io::SeekFrom::End(0)).await?;
+        data.rewind().await?;
+        res.tree = BaoTree::new(ByteNum(size), block_size);
+        res.init_from(data).await?;
+        Ok(res)
+    }
+
+    async fn init_from(&mut self, data: impl AsyncRead + Unpin) -> io::Result<()> {
+        let mut this = self;
+        let root = outboard(data, this.tree, &mut this).await?;
+        this.root = root;
+        this.sync().await?;
+        Ok(())
     }
 }
 
