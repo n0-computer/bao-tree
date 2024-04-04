@@ -32,8 +32,9 @@ use crate::{
     BaoTree, BlockSize, ByteNum, TreeNode,
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
+pub use super::BaoContentItem;
 
-use super::{combine_hash_pair, BaoContentItem, DecodeError, StartDecodeError};
+use super::{combine_hash_pair, DecodeError, StartDecodeError};
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///

@@ -187,6 +187,32 @@ impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
     }
 }
 
+impl<W: WriteAt> CreateOutboard for PostOrderOutboard<W> {
+    fn create(mut data: impl Read + Seek, block_size: BlockSize) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        let size = data.seek(io::SeekFrom::End(0))?;
+        data.rewind()?;
+        let tree = BaoTree::new(ByteNum(size), block_size);
+        let mut res = Self {
+            tree,
+            ..Default::default()
+        };
+        res.init_from(data)?;
+        res.sync()?;
+        Ok(res)
+    }
+
+    fn init_from(&mut self, data: impl Read) -> io::Result<()> {
+        let mut this = self;
+        let root = outboard(data, this.tree, &mut this)?;
+        this.root = root;
+        this.sync()?;
+        Ok(())
+    }
+}
+
 impl<W: WriteAt> OutboardMut for PostOrderOutboard<W> {
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         let Some(offset) = self.tree.post_order_offset(node) else {
