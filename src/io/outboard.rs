@@ -92,7 +92,7 @@ impl crate::io::fsm::OutboardMut for EmptyOutboard {
 }
 
 /// A generic outboard in pre order
-/// 
+///
 /// All fields are public, so an outboard does not enforce any invariants.
 /// This is necessary since we want outboards to exist in an incomplete state
 /// where data does not match the root hash.
@@ -120,7 +120,7 @@ impl<R: Default> Default for PreOrderOutboard<R> {
 }
 
 /// A generic outboard in post order
-/// 
+///
 /// All fields are public, so an outboard does not enforce any invariants.
 /// This is necessary since we want outboards to exist in an incomplete state
 /// where data does not match the root hash.
@@ -145,7 +145,7 @@ impl<D: Default> Default for PostOrderOutboard<D> {
 }
 
 /// A post order outboard that is optimized for memory storage.
-/// 
+///
 /// The [PostOrderOutboard] will work just fine using e.g. a [`Vec<u8>`] as storage.
 /// However, it will not work for types such as [bytes::Bytes] or [bytes::BytesMut]
 /// that do not implement the io traits.

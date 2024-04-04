@@ -1,7 +1,7 @@
 //! Implementation of bao streaming for std io and tokio io
 use std::pin::Pin;
 
-use crate::{blake3, BaoTree, BlockSize, ByteNum, ChunkNum, ChunkRanges, TreeNode};
+use crate::{blake3, BlockSize, ByteNum, ChunkNum, ChunkRanges, TreeNode};
 use bytes::Bytes;
 
 mod error;
@@ -9,7 +9,6 @@ pub use error::*;
 use range_collections::{range_set::RangeSetRange, RangeSetRef};
 use std::future::Future;
 
-use self::outboard::PostOrderMemOutboard;
 #[cfg(feature = "tokio_fsm")]
 pub mod fsm;
 pub mod outboard;
@@ -65,20 +64,6 @@ impl From<Leaf> for BaoContentItem {
     fn from(l: Leaf) -> Self {
         Self::Leaf(l)
     }
-}
-
-/// The outboard size of a file of size `size` with a block size of `block_size`
-///
-/// This is the outboard size *without* the size prefix.
-pub fn outboard_size(size: u64, block_size: BlockSize) -> u64 {
-    BaoTree::new(ByteNum(size), block_size).outboard_size().0
-}
-
-/// Computes the pre order outboard of a file in memory.
-pub fn outboard(input: impl AsRef<[u8]>, block_size: BlockSize) -> (Vec<u8>, blake3::Hash) {
-    let outboard = PostOrderMemOutboard::create(input, block_size).flip();
-    let hash = outboard.root;
-    (outboard.into_inner_with_prefix(), hash)
 }
 
 /// Given a range set of byte ranges, round it up to full chunks.

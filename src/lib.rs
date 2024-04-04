@@ -75,11 +75,11 @@
 //!
 //! ## Simple end to end example
 //!
-//! # ```
-//! use bao_tree::{ByteNum, BlockSize, BaoTree};
+//! ```no_run
+//! use bao_tree::{ByteNum, BlockSize, BaoTree, ChunkRanges};
 //! use bao_tree::io::outboard::PreOrderOutboard;
 //! use bao_tree::io::round_up_to_chunks;
-//! use bao_tree::io::sync::{encode_ranges_validated, decode_ranges, CreateOutboard};
+//! use bao_tree::io::sync::{encode_ranges_validated, decode_ranges, valid_ranges, CreateOutboard};
 //! use range_collections::RangeSet2;
 //!
 //! /// Use a block size of 16 KiB, a good default for most cases
@@ -89,7 +89,7 @@
 //! /// The file we want to serve
 //! let file = std::fs::File::open("video.mp4")?;
 //! /// Create an outboard for the file, using the current size
-//! let mut ob = `PreOrderOutboard::<Vec<u8>>::create`(&file, BLOCK_SIZE)?;
+//! let mut ob = PreOrderOutboard::<Vec<u8>>::create(&file, BLOCK_SIZE)?;
 //! /// Encode the first 100000 bytes of the file
 //! let ranges = RangeSet2::from(0..100000);
 //! let ranges = round_up_to_chunks(&ranges);
@@ -108,9 +108,14 @@
 //! /// the first 100000 bytes of the file should now be in `decoded`
 //! /// in addition, the required part of the tree to validate that the data is
 //! /// correct are in `ob.data`
+//!
+//! /// Print the valid ranges of the file
+//! for range in valid_ranges(&ob, &decoded, &ChunkRanges::all()) {
+//!     println!("{:?}", range);
+//! }
 //! # Ok(())
 //! # }
-//! # ```
+//! ```
 //!
 //! # Compatibility with the [bao crate](https://crates.io/crates/bao)
 //!
