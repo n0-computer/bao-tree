@@ -22,6 +22,7 @@ use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt};
 
+pub use super::BaoContentItem;
 use crate::{
     io::{
         error::EncodeError,
@@ -32,7 +33,6 @@ use crate::{
     BaoTree, BlockSize, ByteNum, TreeNode,
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
-pub use super::BaoContentItem;
 
 use super::{combine_hash_pair, DecodeError, StartDecodeError};
 
@@ -99,11 +99,30 @@ pub trait OutboardMut: Sized {
 ///
 /// In complex real applications, you might want to do this manually.
 pub trait CreateOutboard {
+    /// Create an outboard from a seekable data source, measuring the size first.
+    ///
+    /// This requires the outboard to have a default implementation, which is
+    /// the case for the memory implementations.
+    #[allow(async_fn_in_trait)]
+    async fn create(
+        mut data: impl AsyncRead + AsyncSeek + Unpin,
+        block_size: BlockSize,
+    ) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        use tokio::io::AsyncSeekExt;
+        let size = data.seek(io::SeekFrom::End(0)).await?;
+        data.rewind().await?;
+        Self::create_sized(data, size, block_size).await
+    }
+
     /// create an outboard from a data source. This requires the outboard to
     /// have a default implementation, which is the case for the memory
     /// implementations.
-    fn create(
-        data: impl AsyncRead + AsyncSeek + Unpin,
+    fn create_sized(
+        data: impl AsyncRead + Unpin,
+        size: u64,
         block_size: BlockSize,
     ) -> impl Future<Output = io::Result<Self>>
     where
@@ -215,17 +234,15 @@ impl<W: AsyncSliceWriter> OutboardMut for PostOrderOutboard<W> {
 }
 
 impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
-    async fn create(
-        mut data: impl AsyncRead + AsyncSeek + Unpin,
+    async fn create_sized(
+        data: impl AsyncRead + Unpin,
+        size: u64,
         block_size: BlockSize,
     ) -> io::Result<Self>
     where
         Self: Default + Sized,
     {
-        use tokio::io::AsyncSeekExt;
         let mut res = Self::default();
-        let size = data.seek(io::SeekFrom::End(0)).await?;
-        data.rewind().await?;
         res.tree = BaoTree::new(ByteNum(size), block_size);
         res.init_from(data).await?;
         Ok(res)
@@ -241,17 +258,15 @@ impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
 }
 
 impl<W: AsyncSliceWriter> CreateOutboard for PostOrderOutboard<W> {
-    async fn create(
-        mut data: impl AsyncRead + AsyncSeek + Unpin,
+    async fn create_sized(
+        data: impl AsyncRead + Unpin,
+        size: u64,
         block_size: BlockSize,
     ) -> io::Result<Self>
     where
         Self: Default + Sized,
     {
-        use tokio::io::AsyncSeekExt;
         let mut res = Self::default();
-        let size = data.seek(io::SeekFrom::End(0)).await?;
-        data.rewind().await?;
         res.tree = BaoTree::new(ByteNum(size), block_size);
         res.init_from(data).await?;
         Ok(res)

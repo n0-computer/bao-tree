@@ -76,7 +76,7 @@
 //! ## Simple end to end example
 //!
 //! ```no_run
-//! use bao_tree::{ByteNum, BlockSize, BaoTree, ChunkRanges};
+//! use bao_tree::{BlockSize, ChunkRanges};
 //! use bao_tree::io::outboard::PreOrderOutboard;
 //! use bao_tree::io::round_up_to_chunks;
 //! use bao_tree::io::sync::{encode_ranges_validated, decode_ranges, valid_ranges, CreateOutboard};

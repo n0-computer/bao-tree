@@ -72,10 +72,20 @@ pub trait OutboardMut: Sized {
 ///
 /// In complex real applications, you might want to do this manually.
 pub trait CreateOutboard {
+    /// Create an outboard from a data source.
+    fn create(mut data: impl Read + Seek, block_size: BlockSize) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        let size = data.seek(io::SeekFrom::End(0))?;
+        data.rewind()?;
+        Self::create_sized(data, size, block_size)
+    }
+
     /// create an outboard from a data source. This requires the outboard to
     /// have a default implementation, which is the case for the memory
     /// implementations.
-    fn create(data: impl Read + Seek + Unpin, block_size: BlockSize) -> io::Result<Self>
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
     where
         Self: Default + Sized;
 
@@ -162,12 +172,10 @@ impl<W: WriteAt> OutboardMut for PreOrderOutboard<W> {
 }
 
 impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
-    fn create(mut data: impl Read + Seek, block_size: BlockSize) -> io::Result<Self>
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
     where
         Self: Default + Sized,
     {
-        let size = data.seek(io::SeekFrom::End(0))?;
-        data.rewind()?;
         let tree = BaoTree::new(ByteNum(size), block_size);
         let mut res = Self {
             tree,
@@ -188,12 +196,10 @@ impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
 }
 
 impl<W: WriteAt> CreateOutboard for PostOrderOutboard<W> {
-    fn create(mut data: impl Read + Seek, block_size: BlockSize) -> io::Result<Self>
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
     where
         Self: Default + Sized,
     {
-        let size = data.seek(io::SeekFrom::End(0))?;
-        data.rewind()?;
         let tree = BaoTree::new(ByteNum(size), block_size);
         let mut res = Self {
             tree,

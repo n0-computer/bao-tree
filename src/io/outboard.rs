@@ -201,6 +201,19 @@ impl PostOrderMemOutboard {
 }
 
 impl<T: AsRef<[u8]>> PostOrderMemOutboard<T> {
+    /// Map the outboard data to a new type.
+    pub fn map_data<F, U>(self, f: F) -> PostOrderMemOutboard<U>
+    where
+        F: FnOnce(T) -> U,
+        U: AsRef<[u8]>,
+    {
+        PostOrderMemOutboard {
+            root: self.root,
+            tree: self.tree,
+            data: f(self.data),
+        }
+    }
+
     /// Flip the outboard to pre order.
     pub fn flip(&self) -> PreOrderMemOutboard {
         let mut target = PreOrderMemOutboard {
