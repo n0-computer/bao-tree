@@ -42,7 +42,7 @@ struct Args {
     /// bao crate.
     #[clap(long, default_value_t = 4)]
     block_size: u8,
-    /// Use async io (not implemented yet)
+    /// Use async io
     #[clap(long)]
     r#async: bool,
     /// Quiet mode, no progress output to stderr
@@ -188,7 +188,7 @@ mod sync {
             sync::{encode_ranges_validated, DecodeResponseIter, Outboard},
             BaoContentItem, Leaf, Parent,
         },
-        BaoTree, BlockSize, ByteNum, ChunkRanges,
+        BaoTree, BlockSize, ChunkRanges,
     };
     use positioned_io::WriteAt;
 
@@ -214,11 +214,11 @@ mod sync {
         let mut reader = Cursor::new(&msg.encoded);
         let mut size = [0; 8];
         reader.read_exact(&mut size)?;
-        let size = ByteNum(u64::from_le_bytes(size));
+        let size = u64::from_le_bytes(size);
         let tree = BaoTree::new(size, block_size);
         let iter = DecodeResponseIter::new(msg.hash, tree, Cursor::new(&msg.encoded), &msg.ranges);
         let mut indent = 0;
-        target.set_len(size.0)?;
+        target.set_len(size)?;
         for response in iter {
             match response? {
                 BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
@@ -243,7 +243,7 @@ mod sync {
                         offset,
                         data.len()
                     );
-                    target.write_at(offset.0, &data)?;
+                    target.write_at(offset, &data)?;
                 }
             }
         }
@@ -254,7 +254,7 @@ mod sync {
         let mut reader = Cursor::new(&msg.encoded);
         let mut size = [0; 8];
         reader.read_exact(&mut size)?;
-        let size = ByteNum(u64::from_le_bytes(size));
+        let size = u64::from_le_bytes(size);
         let tree = BaoTree::new(size, block_size);
         let iter = DecodeResponseIter::new(msg.hash, tree, Cursor::new(&msg.encoded), &msg.ranges);
         let mut indent = 0;
@@ -291,7 +291,7 @@ mod sync {
 
     pub(super) fn main(args: Args) -> anyhow::Result<()> {
         assert!(args.block_size <= 8);
-        let block_size = BlockSize(args.block_size);
+        let block_size = BlockSize::from_chunk_log(args.block_size);
         let v = !args.quiet;
         match args.command {
             Command::Encode(EncodeArgs { file, ranges, out }) => {
@@ -342,14 +342,15 @@ mod sync {
 }
 
 mod fsm {
-    use bao_tree::io::{
-        fsm::{
-            encode_ranges_validated, Outboard, ResponseDecoderReadingNext, ResponseDecoderStart,
+    use bao_tree::{
+        io::{
+            fsm::{encode_ranges_validated, Outboard, ResponseDecoder, ResponseDecoderNext},
+            BaoContentItem,
         },
-        BaoContentItem,
+        BaoTree,
     };
     use iroh_io::AsyncSliceWriter;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
 
@@ -374,12 +375,17 @@ mod fsm {
         block_size: BlockSize,
         v: bool,
     ) -> io::Result<()> {
-        let fsm =
-            ResponseDecoderStart::new(msg.hash, msg.ranges, block_size, Cursor::new(&msg.encoded));
-        let (mut reading, size) = fsm.next().await?;
+        let mut encoded = Cursor::new(&msg.encoded);
+        let size = encoded.read_u64_le().await?;
+        let mut reading = ResponseDecoder::new(
+            msg.hash,
+            msg.ranges,
+            BaoTree::new(size, block_size),
+            encoded,
+        );
         log!(v, "got header claiming a size of {}", size);
         let mut indent = 0;
-        while let ResponseDecoderReadingNext::More((reading1, res)) = reading.next().await {
+        while let ResponseDecoderNext::More((reading1, res)) = reading.next().await {
             match res? {
                 BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
                     indent = indent.max(node.level() + 1);
@@ -403,7 +409,7 @@ mod fsm {
                         offset,
                         data.len()
                     );
-                    target.write_at(offset.0, &data).await?;
+                    target.write_at(offset, &data).await?;
                 }
             }
             reading = reading1;
@@ -412,12 +418,17 @@ mod fsm {
     }
 
     async fn decode_to_stdout(msg: Message, block_size: BlockSize, v: bool) -> io::Result<()> {
-        let fsm =
-            ResponseDecoderStart::new(msg.hash, msg.ranges, block_size, Cursor::new(&msg.encoded));
-        let (mut reading, size) = fsm.next().await?;
+        let mut encoded = Cursor::new(&msg.encoded);
+        let size = encoded.read_u64_le().await?;
+        let mut reading = ResponseDecoder::new(
+            msg.hash,
+            msg.ranges,
+            BaoTree::new(size, block_size),
+            Cursor::new(&msg.encoded),
+        );
         log!(v, "got header claiming a size of {}", size);
         let mut indent = 0;
-        while let ResponseDecoderReadingNext::More((reading1, res)) = reading.next().await {
+        while let ResponseDecoderNext::More((reading1, res)) = reading.next().await {
             match res? {
                 BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
                     indent = indent.max(node.level() + 1);
@@ -451,7 +462,7 @@ mod fsm {
 
     pub(super) async fn main(args: Args) -> anyhow::Result<()> {
         assert!(args.block_size <= 8);
-        let block_size = BlockSize(args.block_size);
+        let block_size = BlockSize::from_chunk_log(args.block_size);
         let v = !args.quiet;
         match args.command {
             Command::Encode(EncodeArgs { file, ranges, out }) => {

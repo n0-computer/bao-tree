@@ -18,31 +18,6 @@ index_newtype! {
 
 pub(crate) const BLAKE3_CHUNK_SIZE: usize = 1024;
 
-index_newtype! {
-    /// A block number.
-    ///
-    /// This is a newtype for u64.
-    pub struct BlockNum(pub u64);
-}
-
-impl BlockNum {
-    pub fn to_chunks(self, block_level: BlockSize) -> ChunkNum {
-        ChunkNum(self.0 << block_level.0)
-    }
-
-    pub fn to_bytes(self, block_level: BlockSize) -> ByteNum {
-        ByteNum(self.0 << (block_level.0 + 10))
-    }
-}
-
-index_newtype! {
-    /// A number of bytes.
-    ///
-    /// This is a newtype for u64. It does not distinguish between an absolute
-    /// number of bytes or a difference between two numbers of bytes.
-    pub struct ByteNum(pub u64);
-}
-
 /// A block size.
 ///
 /// Block sizes are powers of 2, with the smallest being 1024 bytes.
@@ -54,7 +29,7 @@ index_newtype! {
 /// The actual size in bytes can be computed with [BlockSize::bytes].
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlockSize(pub u8);
+pub struct BlockSize(pub(crate) u8);
 
 impl fmt::Display for BlockSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -63,6 +38,18 @@ impl fmt::Display for BlockSize {
 }
 
 impl BlockSize {
+    /// Create a block size from the log2 of the size in bytes / 1024
+    ///
+    /// 0 is 1024 bytes, 1 is 2048 bytes, etc.
+    pub const fn from_chunk_log(chunk_log: u8) -> Self {
+        Self(chunk_log)
+    }
+
+    /// Get the log2 of the number of 1 KiB blocks in a chunk.
+    pub const fn chunk_log(self) -> u8 {
+        self.0
+    }
+
     /// The default block size, 1024 bytes
     ///
     /// This means that blocks and blake3 chunks are the same size.
@@ -89,5 +76,29 @@ impl BlockSize {
     /// Convert to an u32 for comparison with levels
     pub(crate) const fn to_u32(self) -> u32 {
         self.0 as u32
+    }
+}
+
+impl ChunkNum {
+    /// number of chunks that this number of bytes covers
+    ///
+    /// E.g. 1024 bytes is 1 chunk, 1025 bytes is 2 chunks
+    pub const fn chunks(size: u64) -> ChunkNum {
+        let mask = (1 << 10) - 1;
+        let part = ((size & mask) != 0) as u64;
+        let whole = size >> 10;
+        ChunkNum(whole + part)
+    }
+
+    /// number of chunks that this number of bytes covers
+    ///
+    /// E.g. 1024 bytes is 1 chunk, 1025 bytes is still 1 chunk
+    pub const fn full_chunks(size: u64) -> ChunkNum {
+        ChunkNum(size >> 10)
+    }
+
+    /// number of bytes that this number of chunks covers
+    pub const fn to_bytes(&self) -> u64 {
+        self.0 << 10
     }
 }

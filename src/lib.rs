@@ -1,24 +1,140 @@
-//! The tree for the bao file format
+//! # The tree for the bao file format
 //!
 //! This crate is similar to the [bao crate](https://crates.io/crates/bao), but
 //! takes a slightly different approach.
 //!
 //! The core struct is [BaoTree], which describes the geometry of the tree and
-//! various ways to traverse it. An individual node is identified by [TreeNode],
-//! which is just a newtype wrapper for an u64.
+//! various ways to traverse it. An individual tree node is identified by
+//! [TreeNode], which is just a newtype wrapper for an u64.
 //!
 //! [TreeNode] provides various helpers to e.g. get the offset of a node in
 //! different traversal orders.
 //!
 //! There are newtypes for the different kinds of integers used in the
 //! tree:
-//! [ByteNum] is an u64 number of bytes,
 //! [ChunkNum] is an u64 number of chunks,
 //! [TreeNode] is an u64 tree node identifier,
 //! and [BlockSize] is the log base 2 of the chunk group size.
 //!
 //! All this is then used in the [io] module to implement the actual io, both
-//! synchronous and asynchronous.
+//! [synchronous](io::sync) and [asynchronous](io::fsm).
+//!
+//! # Basic usage
+//!
+//! The basic workflow is like this: you have some existing data, for which
+//! you want to enable verified streaming. This data can either be in memory,
+//! in a file, or even a remote resource such as an HTTP server.
+//!
+//! ## Outboard creation
+//!
+//! You create an outboard using the [CreateOutboard](io::sync::CreateOutboard)
+//! trait. It has functions to [create](io::sync::CreateOutboard::create) an
+//! outboard from scratch or to [initialize](io::sync::CreateOutboard::init_from)
+//! data and root hash from existing data.
+//!
+//! ## Serving requests
+//!
+//! You serve streaming requests by using the
+//! [encode_ranges](io::sync::encode_ranges) or
+//! [encode_ranges_validated](io::sync::encode_ranges_validated) functions
+//! in the sync or async io module. For this you need data and a matching
+//! outboard.
+//!
+//! The difference between the two functions is that the validated version
+//! will check the hash of each chunk against the bao tree encoded in the
+//! outboard, so you will detect data corruption before sending out data
+//! to the requester. When using the unvalidated version, you might send out
+//! corrupted data without ever noticing and earn a bad reputation.
+//!
+//! Due to the speed of the blake3 hash function, validation is not a
+//! significant performance overhead compared to network operations and
+//! encryption.
+//!
+//! The requester will send a set of chunk ranges they are interested in.
+//! To compute chunk ranges from byte ranges, there is a helper function
+//! [round_up_to_chunks](io::round_up_to_chunks) that takes a byte range and
+//! rounds up to chunk ranges.
+//!
+//! If you just want to stream the entire blob, you can use [ChunkRanges::all]
+//! as the range.
+//!
+//! ## Processing requests
+//!
+//! You process requests by using the [decode_ranges](io::sync::decode_ranges)
+//! function in the sync or async io module. This function requires prior
+//! knowledge of the tree geometry (total data size and block size). A common
+//! way to get this information is to have the block size as a common parameter
+//! of both sides, and send the total data size as a prefix of the encoded data.
+//!
+//! This function will perform validation in any case, there is no variant
+//! that skips validation since that would defeat the purpose of verified
+//! streaming.
+//!
+//! The original bao crate uses a little endian u64 as the prefix.
+//!
+//! ## Simple end to end example
+//!
+//! ```no_run
+//! use bao_tree::{
+//!     io::{
+//!         outboard::PreOrderOutboard,
+//!         round_up_to_chunks,
+//!         sync::{decode_ranges, encode_ranges_validated, valid_ranges, CreateOutboard},
+//!     },
+//!     BlockSize, ByteRanges, ChunkRanges,
+//! };
+//! use std::io;
+//!
+//! /// Use a block size of 16 KiB, a good default for most cases
+//! const BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(4);
+//!
+//! # fn main() -> io::Result<()> {
+//! // The file we want to serve
+//! let file = std::fs::File::open("video.mp4")?;
+//! // Create an outboard for the file, using the current size
+//! let ob = PreOrderOutboard::<Vec<u8>>::create(&file, BLOCK_SIZE)?;
+//! // Encode the first 100000 bytes of the file
+//! let ranges = ByteRanges::from(0..100000);
+//! let ranges = round_up_to_chunks(&ranges);
+//! // Stream of data to client. Needs to implement `io::Write`. We just use a vec here.
+//! let mut to_client = vec![];
+//! encode_ranges_validated(&file, &ob, &ranges, &mut to_client)?;
+//!
+//! // Stream of data from client. Needs to implement `io::Read`. We just wrap the vec in a cursor.
+//! let from_server = io::Cursor::new(to_client);
+//! let root = ob.root;
+//! let tree = ob.tree;
+//!
+//! // Decode the encoded data into a file
+//! let mut decoded = std::fs::File::create("copy.mp4")?;
+//! let mut ob = PreOrderOutboard {
+//!     tree,
+//!     root,
+//!     data: vec![],
+//! };
+//! decode_ranges(&ranges, from_server, &mut decoded, &mut ob)?;
+//!
+//! // the first 100000 bytes of the file should now be in `decoded`
+//! // in addition, the required part of the tree to validate that the data is
+//! // correct are in `ob.data`
+//!
+//! // Print the valid ranges of the file
+//! for range in valid_ranges(&ob, &decoded, &ChunkRanges::all()) {
+//!     println!("{:?}", range);
+//! }
+//! #Ok(())
+//! #}
+
+//! ```
+//!
+//! # Compatibility with the [bao crate](https://crates.io/crates/bao)
+//!
+//! This crate will be compatible with the bao crate, provided you do the
+//! following:
+//!
+//! - use a block size of 1024, so no chunk groups
+//! - use a little endian u64 as the prefix for the encoded data
+//! - use only a single range
 #![deny(missing_docs)]
 use range_collections::RangeSetRef;
 use std::{
@@ -31,8 +147,7 @@ pub mod iter;
 mod rec;
 mod tree;
 use iter::*;
-use tree::BlockNum;
-pub use tree::{BlockSize, ByteNum, ChunkNum};
+pub use tree::{BlockSize, ChunkNum};
 pub mod io;
 pub use iroh_blake3 as blake3;
 
@@ -43,6 +158,9 @@ mod tests2;
 
 /// A set of chunk ranges
 pub type ChunkRanges = range_collections::RangeSet2<ChunkNum>;
+
+/// A set of byte ranges
+pub type ByteRanges = range_collections::RangeSet2<u64>;
 
 /// A referenceable set of chunk ranges
 ///
@@ -88,7 +206,7 @@ fn recursive_hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaoTree {
     /// Total number of bytes in the file
-    size: ByteNum,
+    size: u64,
     /// Log base 2 of the chunk group size
     block_size: BlockSize,
 }
@@ -114,12 +232,12 @@ impl PostOrderOffset {
 
 impl BaoTree {
     /// Create a new self contained BaoTree
-    pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
+    pub fn new(size: u64, block_size: BlockSize) -> Self {
         Self { size, block_size }
     }
 
     /// The size of the blob from which this tree was constructed, in bytes
-    pub fn size(&self) -> ByteNum {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
@@ -132,7 +250,7 @@ impl BaoTree {
     /// compute the root node and the number of nodes for a shifted tree.
     pub(crate) fn shifted(&self) -> (TreeNode, TreeNode) {
         let level = self.block_size.0;
-        let size = self.size.0;
+        let size = self.size;
         let shift = 10 + level;
         let mask = (1 << shift) - 1;
         // number of full blocks of size 1024 << level
@@ -149,7 +267,7 @@ impl BaoTree {
         (TreeNode(root), TreeNode(filled_size))
     }
 
-    fn byte_range(&self, node: TreeNode) -> Range<ByteNum> {
+    fn byte_range(&self, node: TreeNode) -> Range<u64> {
         let start = node.chunk_range().start.to_bytes();
         let end = node.chunk_range().end.to_bytes();
         start..end.min(self.size)
@@ -159,7 +277,7 @@ impl BaoTree {
     ///
     /// Returns two ranges, the first is the left range, the second is the right range
     /// If the leaf is partially contained in the tree, the right range will be empty
-    fn leaf_byte_ranges3(&self, leaf: TreeNode) -> (ByteNum, ByteNum, ByteNum) {
+    fn leaf_byte_ranges3(&self, leaf: TreeNode) -> (u64, u64, u64) {
         let Range { start, end } = leaf.byte_range();
         let mid = leaf.mid().to_bytes();
         if !(start < self.size || (start == 0 && self.size == 0)) {
@@ -213,6 +331,7 @@ impl BaoTree {
     /// When `min_level` is set to a value greater than 0, the iterator will
     /// skip all branch nodes that are at a level < min_level if they are fully
     /// covered by the ranges.
+    #[cfg(test)]
     pub fn ranges_pre_order_nodes_iter<'a>(
         &self,
         ranges: &'a RangeSetRef<ChunkNum>,
@@ -227,8 +346,8 @@ impl BaoTree {
     pub fn root(&self) -> TreeNode {
         let shift = 10;
         let mask = (1 << shift) - 1;
-        let full_blocks = self.size.0 >> shift;
-        let open_block = ((self.size.0 & mask) != 0) as u64;
+        let full_blocks = self.size >> shift;
+        let open_block = ((self.size & mask) != 0) as u64;
         let blocks = (full_blocks + open_block).max(1);
         let chunks = ChunkNum(blocks);
         TreeNode::root(chunks)
@@ -238,26 +357,26 @@ impl BaoTree {
     ///
     /// At chunk group size 1, this is the same as the number of chunks
     /// Even a tree with 0 bytes size has a single block
-    pub fn blocks(&self) -> BlockNum {
+    pub fn blocks(&self) -> u64 {
         // handle the case of an empty tree having 1 block
-        self.size.blocks(self.block_size).max(BlockNum(1))
+        blocks(self.size, self.block_size).max(1)
     }
 
     /// Number of chunks in the tree
     pub fn chunks(&self) -> ChunkNum {
-        self.size.chunks()
+        ChunkNum::chunks(self.size)
     }
 
     /// Number of hash pairs in the outboard
     fn outboard_hash_pairs(&self) -> u64 {
-        self.blocks().0 - 1
+        self.blocks() - 1
     }
 
     /// The outboard size for this tree.
     ///
     /// This is the outboard size *without* the size prefix.
-    pub fn outboard_size(&self) -> ByteNum {
-        ByteNum(self.outboard_hash_pairs() * 64)
+    pub fn outboard_size(&self) -> u64 {
+        self.outboard_hash_pairs() * 64
     }
 
     #[allow(dead_code)]
@@ -271,6 +390,7 @@ impl BaoTree {
     ///
     /// If a tree has a non-zero block size, this is different than the node
     /// being a leaf (level=0).
+    #[cfg(test)]
     const fn is_leaf(&self, node: TreeNode) -> bool {
         node.level() == self.block_size.to_u32()
     }
@@ -280,8 +400,9 @@ impl BaoTree {
     /// the only node that is not persisted is the last leaf node, if it is
     /// less than half full
     #[inline]
+    #[cfg(test)]
     const fn is_persisted(&self, node: TreeNode) -> bool {
-        !self.is_leaf(node) || node.mid().to_bytes().0 < self.size.0
+        !self.is_leaf(node) || node.mid().to_bytes() < self.size
     }
 
     /// true if this is a node that is relevant for the outboard
@@ -295,7 +416,7 @@ impl BaoTree {
             // a parent node, always relevant
             true
         } else {
-            node.mid().to_bytes().0 < self.size.0
+            node.mid().to_bytes() < self.size
         }
     }
 
@@ -337,43 +458,20 @@ impl BaoTree {
         ChunkNum(1 << self.block_size.0)
     }
 
-    const fn chunk_group_bytes(&self) -> ByteNum {
+    const fn chunk_group_bytes(&self) -> u64 {
         self.chunk_group_chunks().to_bytes()
     }
 }
 
-impl ByteNum {
-    /// number of chunks that this number of bytes covers
-    pub const fn chunks(&self) -> ChunkNum {
-        let mask = (1 << 10) - 1;
-        let part = ((self.0 & mask) != 0) as u64;
-        let whole = self.0 >> 10;
-        ChunkNum(whole + part)
-    }
-
-    /// number of chunks that this number of bytes covers
-    pub const fn full_chunks(&self) -> ChunkNum {
-        ChunkNum(self.0 >> 10)
-    }
-
-    /// number of blocks that this number of bytes covers,
-    /// given a block size
-    pub const fn blocks(&self, block_size: BlockSize) -> BlockNum {
-        let chunk_group_log = block_size.0;
-        let size = self.0;
-        let block_bits = chunk_group_log + 10;
-        let block_mask = (1 << block_bits) - 1;
-        let full_blocks = size >> block_bits;
-        let open_block = ((size & block_mask) != 0) as u64;
-        BlockNum(full_blocks + open_block)
-    }
-}
-
-impl ChunkNum {
-    /// number of bytes that this number of chunks covers
-    pub const fn to_bytes(&self) -> ByteNum {
-        ByteNum(self.0 << 10)
-    }
+/// number of blocks that this number of bytes covers,
+/// given a block size
+pub(crate) const fn blocks(size: u64, block_size: BlockSize) -> u64 {
+    let chunk_group_log = block_size.0;
+    let block_bits = chunk_group_log + 10;
+    let block_mask = (1 << block_bits) - 1;
+    let full_blocks = size >> block_bits;
+    let open_block = ((size & block_mask) != 0) as u64;
+    full_blocks + open_block
 }
 
 /// An u64 that defines a node in a bao tree.
@@ -488,7 +586,7 @@ impl TreeNode {
     /// Note that this will give the untruncated range, which may be larger than
     /// the actual tree. To get the exact byte range for a tree, use
     /// [BaoTree::byte_range];
-    fn byte_range(&self) -> Range<ByteNum> {
+    fn byte_range(&self) -> Range<u64> {
         let range = self.chunk_range();
         range.start.to_bytes()..range.end.to_bytes()
     }

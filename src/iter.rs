@@ -16,6 +16,7 @@ use crate::{split, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, Tr
 /// Usually this is used within an iterator, so we hope that the compiler will optimize away
 /// the redundant information.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct NodeInfo<'a> {
     /// the node
     pub node: TreeNode,
@@ -39,6 +40,7 @@ pub struct NodeInfo<'a> {
 ///
 /// This is mostly used internally
 #[derive(Debug)]
+#[cfg(test)]
 pub struct PreOrderPartialIterRef<'a> {
     /// the tree we want to traverse
     tree: BaoTree,
@@ -56,6 +58,7 @@ pub struct PreOrderPartialIterRef<'a> {
     shifted_root: TreeNode,
 }
 
+#[cfg(test)]
 impl<'a> PreOrderPartialIterRef<'a> {
     /// Create a new iterator over the tree.
     pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef, min_level: u8) -> Self {
@@ -77,6 +80,7 @@ impl<'a> PreOrderPartialIterRef<'a> {
     }
 }
 
+#[cfg(test)]
 impl<'a> Iterator for PreOrderPartialIterRef<'a> {
     type Item = NodeInfo<'a>;
 
@@ -333,7 +337,7 @@ impl<T> BaoChunk<T> {
                 format!(
                     "{}{},{},{}",
                     prefix,
-                    start_chunk.to_bytes().0,
+                    start_chunk.to_bytes(),
                     node.level(),
                     is_root
                 )
@@ -345,13 +349,7 @@ impl<T> BaoChunk<T> {
                 ..
             } => {
                 let prefix = " ".repeat(max_level);
-                format!(
-                    "{}{},{},{}",
-                    prefix,
-                    start_chunk.to_bytes().0,
-                    size,
-                    is_root
-                )
+                format!("{}{},{},{}", prefix, start_chunk.to_bytes(), size, is_root)
             }
         }
     }
@@ -442,14 +440,14 @@ impl Iterator for PostOrderChunkIter {
                     self.stack.push(BaoChunk::Leaf {
                         is_root: false,
                         start_chunk: r_start_chunk,
-                        size: (e - m).to_usize(),
+                        size: (e - m).try_into().unwrap(),
                         ranges: (),
                     });
                 };
                 break Some(BaoChunk::Leaf {
                     is_root: is_root && is_half_leaf,
                     start_chunk: l_start_chunk,
-                    size: (m - s).to_usize(),
+                    size: (m - s).try_into().unwrap(),
                     ranges: (),
                 });
             } else {
@@ -555,7 +553,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
         let is_root = shifted == self.shifted_root;
         let chunk_range = node.chunk_range();
         let byte_range = tree.byte_range(node);
-        let size = (byte_range.end - byte_range.start).to_usize();
+        let size = (byte_range.end - byte_range.start).try_into().unwrap();
         // There are three cases.
         if query_leaf {
             // The node is a query leaf, meaning that we stop descending because the
@@ -617,7 +615,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
                 if !r_ranges.is_empty() {
                     self.buffer.push(BaoChunk::Leaf {
                         start_chunk: mid_chunk,
-                        size: (byte_range.end - mid).to_usize(),
+                        size: (byte_range.end - mid).try_into().unwrap(),
                         is_root: false,
                         ranges: r_ranges,
                     });
@@ -626,7 +624,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
                 if !l_ranges.is_empty() {
                     self.buffer.push(BaoChunk::Leaf {
                         start_chunk: chunk_range.start,
-                        size: (mid - byte_range.start).to_usize(),
+                        size: (mid - byte_range.start).try_into().unwrap(),
                         is_root: false,
                         ranges: l_ranges,
                     });

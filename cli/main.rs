@@ -1,5 +1,5 @@
 use anyhow::Context;
-use bao_tree::{BaoTree, BlockSize, ByteNum};
+use bao_tree::{BaoTree, BlockSize};
 use clap::{Parser, Subcommand};
 use std::{io::Write, path::PathBuf};
 
@@ -28,7 +28,7 @@ pub enum Command {
 
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
-    let bs = BlockSize(args.block_size);
+    let bs = BlockSize::from_chunk_log(args.block_size);
     if args.block_size != 0 {
         println!("Using block size: {}", bs.bytes());
     }
@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
             let source = std::io::BufReader::with_capacity(1024 * 1024 * 16, source);
             let mut target = std::io::BufWriter::with_capacity(1024 * 1024 * 16, target);
             let t0 = std::time::Instant::now();
-            let tree = BaoTree::new(ByteNum(size), bs);
+            let tree = BaoTree::new(size, bs);
             let hash = bao_tree::io::sync::outboard_post_order(source, tree, &mut target)?;
             target.write_all(size.to_le_bytes().as_ref())?;
             let dt = t0.elapsed();

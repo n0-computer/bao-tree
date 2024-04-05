@@ -3,20 +3,20 @@
 //! The traits to perform positioned io are re-exported from
 //! [positioned-io](https://crates.io/crates/positioned-io).
 use std::{
-    io::{self, Read, Write},
+    io::{self, Read, Seek, Write},
     result,
 };
 
 use crate::{
     blake3,
-    io::error::{AnyDecodeError, EncodeError},
     io::{
+        error::EncodeError,
         outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
     iter::BaoChunk,
     rec::{encode_selected_rec, truncate_ranges},
-    BaoTree, ChunkRangesRef, TreeNode,
+    BaoTree, BlockSize, ChunkRangesRef, TreeNode,
 };
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
@@ -63,11 +63,49 @@ pub trait Outboard {
 pub trait OutboardMut: Sized {
     /// Save a hash pair for a node
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()>;
+
+    /// Sync the outboard.
+    fn sync(&mut self) -> io::Result<()>;
+}
+
+/// Convenience trait to initialize an outboard from a data source.
+///
+/// In complex real applications, you might want to do this manually.
+pub trait CreateOutboard {
+    /// Create an outboard from a data source.
+    fn create(mut data: impl Read + Seek, block_size: BlockSize) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        let size = data.seek(io::SeekFrom::End(0))?;
+        data.rewind()?;
+        Self::create_sized(data, size, block_size)
+    }
+
+    /// create an outboard from a data source. This requires the outboard to
+    /// have a default implementation, which is the case for the memory
+    /// implementations.
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
+    where
+        Self: Default + Sized;
+
+    /// Init the outboard from a data source. This will use the existing
+    /// tree and only init the data and set the root hash.
+    ///
+    /// So this can be used to initialize an outboard that does not have a default,
+    /// such as a file based one. It also does not require [Seek] on the data.
+    ///
+    /// It will however only include data up the the current tree size.
+    fn init_from(&mut self, data: impl Read) -> io::Result<()>;
 }
 
 impl<O: OutboardMut> OutboardMut for &mut O {
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         (**self).save(node, hash_pair)
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        (**self).sync()
     }
 }
 
@@ -95,13 +133,6 @@ impl<O: Outboard> Outboard for &mut O {
     }
 }
 
-impl<R: ReadAt + Size> PreOrderOutboard<R> {
-    /// Create a new outboard from a reader, root hash, and block size.
-    pub fn new(root: blake3::Hash, tree: BaoTree, data: R) -> Self {
-        Self { root, tree, data }
-    }
-}
-
 impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
     fn root(&self) -> blake3::Hash {
         self.root
@@ -122,7 +153,7 @@ impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
     }
 }
 
-impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
+impl<W: WriteAt> OutboardMut for PreOrderOutboard<W> {
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
         let Some(offset) = self.tree.pre_order_offset(node) else {
             return Ok(());
@@ -134,12 +165,75 @@ impl<W: ReadAt + WriteAt> OutboardMut for PreOrderOutboard<W> {
         self.data.write_all_at(offset, &content)?;
         Ok(())
     }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.data.flush()
+    }
 }
 
-impl<R: ReadAt + Size> PostOrderOutboard<R> {
-    /// Create a new outboard from a reader, root hash, and block size.
-    pub fn new(root: blake3::Hash, tree: BaoTree, data: R) -> Self {
-        Self { root, tree, data }
+impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        let tree = BaoTree::new(size, block_size);
+        let mut res = Self {
+            tree,
+            ..Default::default()
+        };
+        res.init_from(data)?;
+        res.sync()?;
+        Ok(res)
+    }
+
+    fn init_from(&mut self, data: impl Read) -> io::Result<()> {
+        let mut this = self;
+        let root = outboard(data, this.tree, &mut this)?;
+        this.root = root;
+        this.sync()?;
+        Ok(())
+    }
+}
+
+impl<W: WriteAt> CreateOutboard for PostOrderOutboard<W> {
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
+    where
+        Self: Default + Sized,
+    {
+        let tree = BaoTree::new(size, block_size);
+        let mut res = Self {
+            tree,
+            ..Default::default()
+        };
+        res.init_from(data)?;
+        res.sync()?;
+        Ok(res)
+    }
+
+    fn init_from(&mut self, data: impl Read) -> io::Result<()> {
+        let mut this = self;
+        let root = outboard(data, this.tree, &mut this)?;
+        this.root = root;
+        this.sync()?;
+        Ok(())
+    }
+}
+
+impl<W: WriteAt> OutboardMut for PostOrderOutboard<W> {
+    fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
+        let Some(offset) = self.tree.post_order_offset(node) else {
+            return Ok(());
+        };
+        let offset = offset.value() * 64;
+        let mut content = [0u8; 64];
+        content[0..32].copy_from_slice(hash_pair.0.as_bytes());
+        content[32..64].copy_from_slice(hash_pair.1.as_bytes());
+        self.data.write_all_at(offset, &content)?;
+        Ok(())
+    }
+
+    fn sync(&mut self) -> io::Result<()> {
+        self.data.flush()
     }
 }
 
@@ -216,7 +310,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         self.inner.tree()
     }
 
-    fn next0(&mut self) -> result::Result<Option<BaoContentItem>, AnyDecodeError> {
+    fn next0(&mut self) -> result::Result<Option<BaoContentItem>, DecodeError> {
         match self.inner.next() {
             Some(BaoChunk::Parent {
                 is_root,
@@ -230,7 +324,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 let parent_hash = self.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
                 if parent_hash != actual {
-                    return Err(AnyDecodeError::ParentHashMismatch(node));
+                    return Err(DecodeError::ParentHashMismatch(node));
                 }
                 if right {
                     self.stack.push(r_hash);
@@ -253,7 +347,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 let actual = hash_subtree(start_chunk.0, &self.buf, is_root);
                 let leaf_hash = self.stack.pop().unwrap();
                 if leaf_hash != actual {
-                    return Err(AnyDecodeError::LeafHashMismatch(start_chunk));
+                    return Err(DecodeError::LeafHashMismatch(start_chunk));
                 }
                 Ok(Some(
                     Leaf {
@@ -269,7 +363,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
 }
 
 impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
-    type Item = result::Result<BaoContentItem, AnyDecodeError>;
+    type Item = result::Result<BaoContentItem, DecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next0().transpose()
@@ -292,9 +386,9 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     let data = data;
     let mut encoded = encoded;
     let tree = outboard.tree();
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
     // write header
-    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
+    encoded.write_all(tree.size.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
@@ -307,7 +401,7 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
             } => {
                 let start = start_chunk.to_bytes();
                 let buf = &mut buffer[..size];
-                data.read_exact_at(start.0, buf)?;
+                data.read_exact_at(start, buf)?;
                 encoded.write_all(buf)?;
             }
         }
@@ -333,12 +427,12 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     let data = data;
     let mut encoded = encoded;
     let tree = outboard.tree();
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
     let mut out_buf = Vec::new();
     // canonicalize ranges
     let ranges = truncate_ranges(ranges, tree.size());
     // write header
-    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
+    encoded.write_all(tree.size.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent {
@@ -373,7 +467,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
                 let buf = &mut buffer[..size];
-                data.read_exact_at(start.0, buf)?;
+                data.read_exact_at(start, buf)?;
                 let (actual, to_write) = if !ranges.is_all() {
                     // we need to encode just a part of the data
                     //
@@ -414,7 +508,7 @@ pub fn decode_ranges<R, O, W>(
     encoded: R,
     mut target: W,
     mut outboard: O,
-) -> io::Result<()>
+) -> std::result::Result<(), DecodeError>
 where
     O: OutboardMut + Outboard,
     R: Read,
@@ -427,7 +521,7 @@ where
                 outboard.save(node, &pair)?;
             }
             BaoContentItem::Leaf(Leaf { offset, data }) => {
-                target.write_all_at(offset.0, &data)?;
+                target.write_all_at(offset, &data)?;
             }
         }
     }
@@ -443,7 +537,7 @@ pub fn outboard(
     tree: BaoTree,
     mut outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
     let hash = outboard_impl(tree, data, &mut outboard, &mut buffer)?;
     Ok(hash)
 }
@@ -457,7 +551,7 @@ fn outboard_impl(
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
+    debug_assert!(buffer.len() == tree.chunk_group_bytes().try_into().unwrap());
     for item in tree.post_order_chunks_iter() {
         match item {
             BaoChunk::Parent { is_root, node, .. } => {
@@ -496,7 +590,7 @@ pub fn outboard_post_order(
     tree: BaoTree,
     mut outboard: impl Write,
 ) -> io::Result<blake3::Hash> {
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
     let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
     Ok(hash)
 }
@@ -510,7 +604,7 @@ fn outboard_post_order_impl(
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    debug_assert!(buffer.len() == tree.chunk_group_bytes().to_usize());
+    debug_assert!(buffer.len() == tree.chunk_group_bytes().try_into().unwrap());
     for item in tree.post_order_chunks_iter() {
         match item {
             BaoChunk::Parent { is_root, .. } => {
@@ -569,8 +663,8 @@ mod validate {
     use positioned_io::ReadAt;
 
     use crate::{
-        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ByteNum,
-        ChunkNum, ChunkRangesRef, TreeNode,
+        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum,
+        ChunkRangesRef, TreeNode,
     };
 
     use super::Outboard;
@@ -614,10 +708,10 @@ mod validate {
             co: &Co<io::Result<Range<ChunkNum>>>,
         ) -> io::Result<()> {
             let tree = outboard.tree();
-            let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
-            if tree.blocks().0 == 1 {
+            let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
+            if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
-                let tmp = &mut buffer[..tree.size().to_usize()];
+                let tmp = &mut buffer[..tree.size().try_into().unwrap()];
                 data.read_exact_at(0, tmp)?;
                 let actual = hash_subtree(0, tmp, true);
                 if actual == outboard.root() {
@@ -643,19 +737,21 @@ mod validate {
 
         async fn yield_if_valid(
             &mut self,
-            range: Range<ByteNum>,
+            range: Range<u64>,
             hash: &blake3::Hash,
             is_root: bool,
         ) -> io::Result<()> {
-            let len = (range.end - range.start).to_usize();
+            let len = (range.end - range.start).try_into().unwrap();
             let tmp = &mut self.buffer[..len];
-            self.data.read_exact_at(range.start.0, tmp)?;
+            self.data.read_exact_at(range.start, tmp)?;
             // is_root is always false because the case of a single chunk group is handled before calling this function
-            let actual = hash_subtree(range.start.full_chunks().0, tmp, is_root);
+            let actual = hash_subtree(ChunkNum::full_chunks(range.start).0, tmp, is_root);
             if &actual == hash {
                 // yield the left range
                 self.co
-                    .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                    .yield_(Ok(
+                        ChunkNum::full_chunks(range.start)..ChunkNum::chunks(range.end)
+                    ))
                     .await;
             }
             io::Result::Ok(())
@@ -739,7 +835,7 @@ mod validate {
             co: &Co<io::Result<Range<ChunkNum>>>,
         ) -> io::Result<()> {
             let tree = outboard.tree();
-            if tree.blocks().0 == 1 {
+            if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
                 return Ok(());
@@ -766,9 +862,10 @@ mod validate {
             ranges: &'b ChunkRangesRef,
         ) -> LocalBoxFuture<'b, io::Result<()>> {
             Box::pin(async move {
-                let yield_node_range = |range: Range<ByteNum>| {
-                    self.co
-                        .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                let yield_node_range = |range: Range<u64>| {
+                    self.co.yield_(Ok(
+                        ChunkNum::full_chunks(range.start)..ChunkNum::chunks(range.end)
+                    ))
                 };
                 if ranges.is_empty() {
                     // this part of the tree is not of interest, so we can skip it
