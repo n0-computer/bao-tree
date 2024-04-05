@@ -137,7 +137,8 @@ pub mod iter;
 mod rec;
 mod tree;
 use iter::*;
-pub use tree::{BlockSize, ByteNum, ChunkNum};
+use tree::ByteNum;
+pub use tree::{BlockSize, ChunkNum};
 pub mod io;
 pub use iroh_blake3 as blake3;
 
@@ -193,7 +194,7 @@ fn recursive_hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BaoTree {
     /// Total number of bytes in the file
-    size: ByteNum,
+    size: u64,
     /// Log base 2 of the chunk group size
     block_size: BlockSize,
 }
@@ -219,12 +220,12 @@ impl PostOrderOffset {
 
 impl BaoTree {
     /// Create a new self contained BaoTree
-    pub fn new(size: ByteNum, block_size: BlockSize) -> Self {
+    pub fn new(size: u64, block_size: BlockSize) -> Self {
         Self { size, block_size }
     }
 
     /// The size of the blob from which this tree was constructed, in bytes
-    pub fn size(&self) -> ByteNum {
+    pub fn size(&self) -> u64 {
         self.size
     }
 
@@ -237,7 +238,7 @@ impl BaoTree {
     /// compute the root node and the number of nodes for a shifted tree.
     pub(crate) fn shifted(&self) -> (TreeNode, TreeNode) {
         let level = self.block_size.0;
-        let size = self.size.0;
+        let size = self.size;
         let shift = 10 + level;
         let mask = (1 << shift) - 1;
         // number of full blocks of size 1024 << level
@@ -257,7 +258,7 @@ impl BaoTree {
     fn byte_range(&self, node: TreeNode) -> Range<ByteNum> {
         let start = node.chunk_range().start.to_bytes();
         let end = node.chunk_range().end.to_bytes();
-        start..end.min(self.size)
+        start..end.min(ByteNum(self.size))
     }
 
     /// Compute the byte ranges for a leaf node
@@ -270,7 +271,11 @@ impl BaoTree {
         if !(start < self.size || (start == 0 && self.size == 0)) {
             debug_assert!(start < self.size || (start == 0 && self.size == 0));
         }
-        (start, mid.min(self.size), end.min(self.size))
+        (
+            start,
+            mid.min(ByteNum(self.size)),
+            end.min(ByteNum(self.size)),
+        )
     }
 
     /// Traverse the entire tree in post order as [BaoChunk]s
@@ -333,8 +338,8 @@ impl BaoTree {
     pub fn root(&self) -> TreeNode {
         let shift = 10;
         let mask = (1 << shift) - 1;
-        let full_blocks = self.size.0 >> shift;
-        let open_block = ((self.size.0 & mask) != 0) as u64;
+        let full_blocks = self.size >> shift;
+        let open_block = ((self.size & mask) != 0) as u64;
         let blocks = (full_blocks + open_block).max(1);
         let chunks = ChunkNum(blocks);
         TreeNode::root(chunks)
@@ -346,12 +351,12 @@ impl BaoTree {
     /// Even a tree with 0 bytes size has a single block
     pub fn blocks(&self) -> u64 {
         // handle the case of an empty tree having 1 block
-        self.size.blocks(self.block_size).max(1)
+        ByteNum(self.size).blocks(self.block_size).max(1)
     }
 
     /// Number of chunks in the tree
     pub fn chunks(&self) -> ChunkNum {
-        self.size.chunks()
+        ByteNum(self.size).chunks()
     }
 
     /// Number of hash pairs in the outboard
@@ -362,8 +367,8 @@ impl BaoTree {
     /// The outboard size for this tree.
     ///
     /// This is the outboard size *without* the size prefix.
-    pub fn outboard_size(&self) -> ByteNum {
-        ByteNum(self.outboard_hash_pairs() * 64)
+    pub fn outboard_size(&self) -> u64 {
+        self.outboard_hash_pairs() * 64
     }
 
     #[allow(dead_code)]
@@ -389,7 +394,7 @@ impl BaoTree {
     #[inline]
     #[cfg(test)]
     const fn is_persisted(&self, node: TreeNode) -> bool {
-        !self.is_leaf(node) || node.mid().to_bytes().0 < self.size.0
+        !self.is_leaf(node) || node.mid().to_bytes().0 < self.size
     }
 
     /// true if this is a node that is relevant for the outboard
@@ -403,7 +408,7 @@ impl BaoTree {
             // a parent node, always relevant
             true
         } else {
-            node.mid().to_bytes().0 < self.size.0
+            node.mid().to_bytes().0 < self.size
         }
     }
 

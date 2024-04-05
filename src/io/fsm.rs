@@ -30,7 +30,7 @@ use crate::{
         Leaf, Parent,
     },
     iter::BaoChunk,
-    BaoTree, BlockSize, ByteNum, TreeNode,
+    BaoTree, BlockSize, TreeNode,
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
@@ -243,7 +243,7 @@ impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
         Self: Default + Sized,
     {
         let mut res = Self::default();
-        res.tree = BaoTree::new(ByteNum(size), block_size);
+        res.tree = BaoTree::new(size, block_size);
         res.init_from(data).await?;
         Ok(res)
     }
@@ -267,7 +267,7 @@ impl<W: AsyncSliceWriter> CreateOutboard for PostOrderOutboard<W> {
         Self: Default + Sized,
     {
         let mut res = Self::default();
-        res.tree = BaoTree::new(ByteNum(size), block_size);
+        res.tree = BaoTree::new(size, block_size);
         res.init_from(data).await?;
         Ok(res)
     }
@@ -444,7 +444,7 @@ impl<R: AsyncRead + Unpin> ResponseDecoder<R> {
                     return Err(DecodeError::LeafHashMismatch(start_chunk));
                 }
                 Leaf {
-                    offset: start_chunk.to_bytes(),
+                    offset: start_chunk.to_bytes().0,
                     data: self.0.buf.split().freeze(),
                 }
                 .into()
@@ -474,7 +474,7 @@ where
     let mut encoded = encoded;
     let tree = outboard.tree();
     // write header
-    encoded.write(tree.size.0.to_le_bytes().as_slice()).await?;
+    encoded.write(tree.size.to_le_bytes().as_slice()).await?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
@@ -527,7 +527,7 @@ where
     let tree = outboard.tree();
     let ranges = truncate_ranges(ranges, tree.size());
     // write header
-    encoded.write(tree.size.0.to_le_bytes().as_slice()).await?;
+    encoded.write(tree.size.to_le_bytes().as_slice()).await?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent {
@@ -627,7 +627,7 @@ where
                 outboard.save(node, &pair).await?;
             }
             BaoContentItem::Leaf(Leaf { offset, data }) => {
-                target.write_bytes_at(offset.0, data).await?;
+                target.write_bytes_at(offset, data).await?;
             }
         }
     }
@@ -767,8 +767,8 @@ mod validate {
     use iroh_io::AsyncSliceReader;
 
     use crate::{
-        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ByteNum,
-        ChunkNum, ChunkRangesRef, TreeNode,
+        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, tree::ByteNum,
+        BaoTree, ChunkNum, ChunkRangesRef, TreeNode,
     };
 
     use super::Outboard;
@@ -814,7 +814,7 @@ mod validate {
             if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 let mut data = data;
-                let data = data.read_at(0, tree.size().to_usize()).await?;
+                let data = data.read_at(0, tree.size().try_into().unwrap()).await?;
                 let actual = hash_subtree(0, &data, true);
                 if actual == outboard.root() {
                     co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;

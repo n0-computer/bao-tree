@@ -3,7 +3,7 @@
 //! A number of implementations for the sync and async outboard traits are provided.
 //! Implementations for in-memory outboards, for outboards where the data resides on disk,
 //! and a special implementation [EmptyOutboard] that just ignores all writes.
-use crate::{blake3, BaoTree, BlockSize, ByteNum, TreeNode};
+use crate::{blake3, BaoTree, BlockSize, TreeNode};
 use std::io;
 
 /// An empty outboard, that just returns 0 hashes for all nodes.
@@ -113,7 +113,7 @@ impl<R: Default> Default for PreOrderOutboard<R> {
     fn default() -> Self {
         Self {
             root: blake3::hash(&[]),
-            tree: BaoTree::new(ByteNum(0), BlockSize(0)),
+            tree: BaoTree::new(0, BlockSize::ZERO),
             data: Default::default(),
         }
     }
@@ -138,7 +138,7 @@ impl<D: Default> Default for PostOrderOutboard<D> {
     fn default() -> Self {
         Self {
             root: blake3::hash(&[]),
-            tree: BaoTree::new(ByteNum(0), BlockSize(0)),
+            tree: BaoTree::new(0, BlockSize::ZERO),
             data: Default::default(),
         }
     }
@@ -167,7 +167,7 @@ impl<T: Default> Default for PostOrderMemOutboard<T> {
     fn default() -> Self {
         Self {
             root: blake3::hash(&[]),
-            tree: BaoTree::new(ByteNum(0), BlockSize(0)),
+            tree: BaoTree::new(0, BlockSize::ZERO),
             data: Default::default(),
         }
     }
@@ -182,8 +182,8 @@ impl PostOrderMemOutboard {
     pub fn create(data: impl AsRef<[u8]>, block_size: BlockSize) -> Self {
         let data = data.as_ref();
         let size = data.len() as u64;
-        let tree = BaoTree::new(ByteNum(size), block_size);
-        let mut outboard = Vec::with_capacity(tree.outboard_size().to_usize());
+        let tree = BaoTree::new(size, block_size);
+        let mut outboard = Vec::with_capacity(tree.outboard_size().try_into().unwrap());
         let root = crate::io::sync::outboard_post_order(data, tree, &mut outboard).unwrap();
         Self {
             root,
@@ -195,7 +195,7 @@ impl PostOrderMemOutboard {
     /// returns the outboard data, with the length suffix.
     pub fn into_inner_with_suffix(self) -> Vec<u8> {
         let mut res = self.data;
-        res.extend_from_slice(self.tree.size.0.to_le_bytes().as_slice());
+        res.extend_from_slice(self.tree.size.to_le_bytes().as_slice());
         res
     }
 }
@@ -222,7 +222,7 @@ impl<T> PostOrderMemOutboard<T> {
         let mut target = PreOrderMemOutboard {
             root: self.root,
             tree: self.tree,
-            data: vec![0; self.tree.outboard_size().to_usize()],
+            data: vec![0; self.tree.outboard_size().try_into().unwrap()],
         };
         crate::io::sync::copy(self, &mut target).unwrap();
         target
@@ -332,7 +332,7 @@ impl<T: Default> Default for PreOrderMemOutboard<T> {
     fn default() -> Self {
         Self {
             root: blake3::hash(&[]),
-            tree: BaoTree::new(ByteNum(0), BlockSize(0)),
+            tree: BaoTree::new(0, BlockSize::ZERO),
             data: Default::default(),
         }
     }
@@ -342,7 +342,7 @@ impl PreOrderMemOutboard {
     /// returns the outboard data, with the length prefix added.
     pub fn into_inner_with_prefix(self) -> Vec<u8> {
         let mut res = self.data;
-        res.splice(0..0, self.tree.size.0.to_le_bytes());
+        res.splice(0..0, self.tree.size.to_le_bytes());
         res
     }
 
@@ -352,10 +352,10 @@ impl PreOrderMemOutboard {
     pub fn create(data: impl AsRef<[u8]>, block_size: BlockSize) -> Self {
         let data = data.as_ref();
         let size = data.len() as u64;
-        let tree = BaoTree::new(ByteNum(size), block_size);
+        let tree = BaoTree::new(size, block_size);
         // the outboard impl for PreOrderMemOutboard requires just AsMut<[u8]>,
         // so the data must already be the right size.
-        let outboard = vec![0u8; tree.outboard_size().to_usize()];
+        let outboard = vec![0u8; tree.outboard_size().try_into().unwrap()];
         let mut res = Self {
             root: blake3::Hash::from([0; 32]),
             tree,
@@ -389,7 +389,7 @@ impl<T> PreOrderMemOutboard<T> {
         let mut target = PostOrderMemOutboard {
             root: self.root,
             tree: self.tree,
-            data: vec![0; self.tree.outboard_size().to_usize()],
+            data: vec![0; self.tree.outboard_size().try_into().unwrap()],
         };
         crate::io::sync::copy(self, &mut target).unwrap();
         target

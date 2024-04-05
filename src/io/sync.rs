@@ -16,7 +16,7 @@ use crate::{
     },
     iter::BaoChunk,
     rec::{encode_selected_rec, truncate_ranges},
-    BaoTree, BlockSize, ByteNum, ChunkRangesRef, TreeNode,
+    BaoTree, BlockSize, ChunkRangesRef, TreeNode,
 };
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
@@ -176,7 +176,7 @@ impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
     where
         Self: Default + Sized,
     {
-        let tree = BaoTree::new(ByteNum(size), block_size);
+        let tree = BaoTree::new(size, block_size);
         let mut res = Self {
             tree,
             ..Default::default()
@@ -200,7 +200,7 @@ impl<W: WriteAt> CreateOutboard for PostOrderOutboard<W> {
     where
         Self: Default + Sized,
     {
-        let tree = BaoTree::new(ByteNum(size), block_size);
+        let tree = BaoTree::new(size, block_size);
         let mut res = Self {
             tree,
             ..Default::default()
@@ -351,7 +351,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 }
                 Ok(Some(
                     Leaf {
-                        offset: start_chunk.to_bytes(),
+                        offset: start_chunk.to_bytes().0,
                         data: self.buf.split().freeze(),
                     }
                     .into(),
@@ -388,7 +388,7 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     let tree = outboard.tree();
     let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
     // write header
-    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
+    encoded.write_all(tree.size.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
@@ -432,7 +432,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     // canonicalize ranges
     let ranges = truncate_ranges(ranges, tree.size());
     // write header
-    encoded.write_all(tree.size.0.to_le_bytes().as_slice())?;
+    encoded.write_all(tree.size.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent {
@@ -521,7 +521,7 @@ where
                 outboard.save(node, &pair)?;
             }
             BaoContentItem::Leaf(Leaf { offset, data }) => {
-                target.write_all_at(offset.0, &data)?;
+                target.write_all_at(offset, &data)?;
             }
         }
     }
@@ -711,7 +711,7 @@ mod validate {
             let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
             if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
-                let tmp = &mut buffer[..tree.size().to_usize()];
+                let tmp = &mut buffer[..tree.size().try_into().unwrap()];
                 data.read_exact_at(0, tmp)?;
                 let actual = hash_subtree(0, tmp, true);
                 if actual == outboard.root() {

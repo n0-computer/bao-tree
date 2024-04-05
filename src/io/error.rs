@@ -54,7 +54,7 @@ impl From<DecodeError> for io::Error {
             ),
             DecodeError::LeafHashMismatch(chunk) => io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("leaf hash mismatch (offset {})", chunk.to_bytes().0),
+                format!("leaf hash mismatch (offset {})", chunk.to_bytes()),
             ),
             DecodeError::LeafNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
             DecodeError::ParentNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
@@ -130,7 +130,7 @@ impl From<EncodeError> for io::Error {
             ),
             EncodeError::LeafHashMismatch(chunk) => io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("leaf hash mismatch at {}", chunk.to_bytes().0),
+                format!("leaf hash mismatch at {}", chunk.to_bytes()),
             ),
             EncodeError::ParentWrite(node) => io::Error::new(
                 io::ErrorKind::ConnectionReset,
@@ -142,7 +142,7 @@ impl From<EncodeError> for io::Error {
             ),
             EncodeError::LeafWrite(chunk) => io::Error::new(
                 io::ErrorKind::ConnectionReset,
-                format!("leaf write failed at {}", chunk.to_bytes().0),
+                format!("leaf write failed at {}", chunk.to_bytes()),
             ),
             EncodeError::SizeMismatch => {
                 io::Error::new(io::ErrorKind::InvalidData, "size mismatch")

@@ -337,7 +337,7 @@ impl<T> BaoChunk<T> {
                 format!(
                     "{}{},{},{}",
                     prefix,
-                    start_chunk.to_bytes().0,
+                    start_chunk.to_bytes(),
                     node.level(),
                     is_root
                 )
@@ -349,13 +349,7 @@ impl<T> BaoChunk<T> {
                 ..
             } => {
                 let prefix = " ".repeat(max_level);
-                format!(
-                    "{}{},{},{}",
-                    prefix,
-                    start_chunk.to_bytes().0,
-                    size,
-                    is_root
-                )
+                format!("{}{},{},{}", prefix, start_chunk.to_bytes(), size, is_root)
             }
         }
     }
@@ -630,7 +624,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
                 if !l_ranges.is_empty() {
                     self.buffer.push(BaoChunk::Leaf {
                         start_chunk: chunk_range.start,
-                        size: (mid - byte_range.start).to_usize(),
+                        size: (mid - byte_range.start.0).to_usize(),
                         is_root: false,
                         ranges: l_ranges,
                     });

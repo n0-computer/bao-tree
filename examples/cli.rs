@@ -188,7 +188,7 @@ mod sync {
             sync::{encode_ranges_validated, DecodeResponseIter, Outboard},
             BaoContentItem, Leaf, Parent,
         },
-        BaoTree, BlockSize, ByteNum, ChunkRanges,
+        BaoTree, BlockSize, ChunkRanges,
     };
     use positioned_io::WriteAt;
 
@@ -214,11 +214,11 @@ mod sync {
         let mut reader = Cursor::new(&msg.encoded);
         let mut size = [0; 8];
         reader.read_exact(&mut size)?;
-        let size = ByteNum(u64::from_le_bytes(size));
+        let size = u64::from_le_bytes(size);
         let tree = BaoTree::new(size, block_size);
         let iter = DecodeResponseIter::new(msg.hash, tree, Cursor::new(&msg.encoded), &msg.ranges);
         let mut indent = 0;
-        target.set_len(size.0)?;
+        target.set_len(size)?;
         for response in iter {
             match response? {
                 BaoContentItem::Parent(Parent { node, pair: (l, r) }) => {
@@ -243,7 +243,7 @@ mod sync {
                         offset,
                         data.len()
                     );
-                    target.write_at(offset.0, &data)?;
+                    target.write_at(offset, &data)?;
                 }
             }
         }
@@ -254,7 +254,7 @@ mod sync {
         let mut reader = Cursor::new(&msg.encoded);
         let mut size = [0; 8];
         reader.read_exact(&mut size)?;
-        let size = ByteNum(u64::from_le_bytes(size));
+        let size = u64::from_le_bytes(size);
         let tree = BaoTree::new(size, block_size);
         let iter = DecodeResponseIter::new(msg.hash, tree, Cursor::new(&msg.encoded), &msg.ranges);
         let mut indent = 0;
@@ -347,7 +347,7 @@ mod fsm {
             fsm::{encode_ranges_validated, Outboard, ResponseDecoder, ResponseDecoderNext},
             BaoContentItem,
         },
-        BaoTree, ByteNum,
+        BaoTree,
     };
     use iroh_io::AsyncSliceWriter;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -380,7 +380,7 @@ mod fsm {
         let mut reading = ResponseDecoder::new(
             msg.hash,
             msg.ranges,
-            BaoTree::new(ByteNum(size), block_size),
+            BaoTree::new(size, block_size),
             encoded,
         );
         log!(v, "got header claiming a size of {}", size);
@@ -409,7 +409,7 @@ mod fsm {
                         offset,
                         data.len()
                     );
-                    target.write_at(offset.0, &data).await?;
+                    target.write_at(offset, &data).await?;
                 }
             }
             reading = reading1;
@@ -423,7 +423,7 @@ mod fsm {
         let mut reading = ResponseDecoder::new(
             msg.hash,
             msg.ranges,
-            BaoTree::new(ByteNum(size), block_size),
+            BaoTree::new(size, block_size),
             Cursor::new(&msg.encoded),
         );
         log!(v, "got header claiming a size of {}", size);

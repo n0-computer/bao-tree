@@ -37,7 +37,7 @@ pub struct Parent {
 #[derive(Debug)]
 pub struct Leaf {
     /// The byte offset of the leaf in the file.
-    pub offset: ByteNum,
+    pub offset: u64,
     /// The data of the leaf.
     pub data: Bytes,
 }

@@ -23,7 +23,7 @@ use crate::{blake3, split_inner, ByteNum, ChunkNum, ChunkRangesRef};
 /// 0..6, 7..10 will become 0.. (the entire blob). the last chunk will be included and the hole filled
 /// 3..6, 7..10 will become 3.. the last chunk will be included and the hole filled
 /// 0..5, 7..10 will become 0..5, 7.. (the last chunk will be included, but chunkk 5 will not be sent)
-pub fn truncate_ranges(ranges: &ChunkRangesRef, size: ByteNum) -> &ChunkRangesRef {
+pub fn truncate_ranges(ranges: &ChunkRangesRef, size: u64) -> &ChunkRangesRef {
     let bs = ranges.boundaries();
     ChunkRangesRef::new_unchecked(&bs[..truncated_len(ranges, size)])
 }
@@ -32,15 +32,15 @@ pub fn truncate_ranges(ranges: &ChunkRangesRef, size: ByteNum) -> &ChunkRangesRe
 ///
 /// This is needed for the state machines that own their ranges.
 #[cfg(feature = "tokio_fsm")]
-pub fn truncate_ranges_owned(ranges: crate::ChunkRanges, size: ByteNum) -> crate::ChunkRanges {
+pub fn truncate_ranges_owned(ranges: crate::ChunkRanges, size: u64) -> crate::ChunkRanges {
     let n = truncated_len(&ranges, size);
     let mut boundaries = ranges.into_inner();
     boundaries.truncate(n);
     crate::ChunkRanges::new_unchecked(boundaries)
 }
 
-fn truncated_len(ranges: &ChunkRangesRef, size: ByteNum) -> usize {
-    let end = size.chunks();
+fn truncated_len(ranges: &ChunkRangesRef, size: u64) -> usize {
+    let end = ByteNum(size).chunks();
     let lc = ChunkNum(end.0.saturating_sub(1));
     let bs = ranges.boundaries();
     match bs.binary_search(&lc) {
@@ -310,7 +310,7 @@ mod test_support {
         let mut res = Vec::new();
         select_nodes_rec(
             ChunkNum(0),
-            tree.size.to_usize(),
+            tree.size.try_into().unwrap(),
             true,
             ranges,
             tree.block_size.to_u32(),
@@ -327,7 +327,7 @@ mod test_support {
         let mut res = Vec::new();
         select_nodes_rec(
             ChunkNum(0),
-            tree.size.to_usize(),
+            tree.size.try_into().unwrap(),
             true,
             ranges,
             0,
@@ -424,8 +424,8 @@ mod test_support {
         block_size: BlockSize,
     ) -> (Vec<u8>, blake3::Hash) {
         let mut res = Vec::new();
-        let size = ByteNum(data.len() as u64);
-        res.extend_from_slice(&size.0.to_le_bytes());
+        let size = data.len() as u64;
+        res.extend_from_slice(&size.to_le_bytes());
         // canonicalize the ranges
         let ranges = truncate_ranges(ranges, size);
         let hash = encode_selected_rec(
