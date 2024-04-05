@@ -1,7 +1,7 @@
 //! Implementation of bao streaming for std io and tokio io
 use std::pin::Pin;
 
-use crate::{blake3, chunks, full_chunks, BlockSize, ChunkNum, ChunkRanges, TreeNode};
+use crate::{blake3, BlockSize, ChunkNum, ChunkRanges, TreeNode};
 use bytes::Bytes;
 
 mod error;
@@ -66,10 +66,12 @@ pub fn round_up_to_chunks(ranges: &RangeSetRef<u64>) -> ChunkRanges {
         // full_chunks() rounds down, chunks() rounds up
         match item {
             RangeSetRange::RangeFrom(range) => {
-                res |= ChunkRanges::from(full_chunks(*range.start)..)
+                res |= ChunkRanges::from(ChunkNum::full_chunks(*range.start)..)
             }
             RangeSetRange::Range(range) => {
-                res |= ChunkRanges::from(full_chunks(*range.start)..chunks(*range.end))
+                res |= ChunkRanges::from(
+                    ChunkNum::full_chunks(*range.start)..ChunkNum::chunks(*range.end),
+                )
             }
         }
     }

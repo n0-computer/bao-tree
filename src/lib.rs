@@ -75,11 +75,10 @@
 //! ## Simple end to end example
 //!
 //! ```no_run
-//! use bao_tree::{BlockSize, ChunkRanges};
+//! use bao_tree::{BlockSize, ChunkRanges, ByteRanges};
 //! use bao_tree::io::outboard::PreOrderOutboard;
 //! use bao_tree::io::round_up_to_chunks;
 //! use bao_tree::io::sync::{encode_ranges_validated, decode_ranges, valid_ranges, CreateOutboard};
-//! use range_collections::RangeSet2;
 //!
 //! /// Use a block size of 16 KiB, a good default for most cases
 //! const BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(4);
@@ -90,7 +89,7 @@
 //! /// Create an outboard for the file, using the current size
 //! let mut ob = PreOrderOutboard::<Vec<u8>>::create(&file, BLOCK_SIZE)?;
 //! /// Encode the first 100000 bytes of the file
-//! let ranges = RangeSet2::from(0..100000);
+//! let ranges = ByteRanges::from(0..100000);
 //! let ranges = round_up_to_chunks(&ranges);
 //! let mut encoded = vec![];
 //! encode_ranges_validated(&file, &ob, &ranges, &mut encoded)?;
@@ -147,6 +146,9 @@ mod tests2;
 
 /// A set of chunk ranges
 pub type ChunkRanges = range_collections::RangeSet2<ChunkNum>;
+
+/// A set of byte ranges
+pub type ByteRanges = range_collections::RangeSet2<u64>;
 
 /// A referenceable set of chunk ranges
 ///
@@ -350,7 +352,7 @@ impl BaoTree {
 
     /// Number of chunks in the tree
     pub fn chunks(&self) -> ChunkNum {
-        chunks(self.size)
+        ChunkNum::chunks(self.size)
     }
 
     /// Number of hash pairs in the outboard
@@ -449,35 +451,15 @@ impl BaoTree {
     }
 }
 
-/// number of chunks that this number of bytes covers
-pub const fn chunks(size: u64) -> ChunkNum {
-    let mask = (1 << 10) - 1;
-    let part = ((size & mask) != 0) as u64;
-    let whole = size >> 10;
-    ChunkNum(whole + part)
-}
-
-/// number of chunks that this number of bytes covers
-pub const fn full_chunks(size: u64) -> ChunkNum {
-    ChunkNum(size >> 10)
-}
-
 /// number of blocks that this number of bytes covers,
 /// given a block size
-pub const fn blocks(size: u64, block_size: BlockSize) -> u64 {
+pub(crate) const fn blocks(size: u64, block_size: BlockSize) -> u64 {
     let chunk_group_log = block_size.0;
     let block_bits = chunk_group_log + 10;
     let block_mask = (1 << block_bits) - 1;
     let full_blocks = size >> block_bits;
     let open_block = ((size & block_mask) != 0) as u64;
     full_blocks + open_block
-}
-
-impl ChunkNum {
-    /// number of bytes that this number of chunks covers
-    pub const fn to_bytes(&self) -> u64 {
-        self.0 << 10
-    }
 }
 
 /// An u64 that defines a node in a bao tree.

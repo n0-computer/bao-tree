@@ -2,7 +2,7 @@
 //!
 //! Encocding is used to compute hashes, decoding is only used in tests as a
 //! reference implementation.
-use crate::{blake3, chunks, split_inner, ChunkNum, ChunkRangesRef};
+use crate::{blake3, split_inner, ChunkNum, ChunkRangesRef};
 
 /// Given a set of chunk ranges, adapt them for a tree of the given size.
 ///
@@ -40,7 +40,7 @@ pub fn truncate_ranges_owned(ranges: crate::ChunkRanges, size: u64) -> crate::Ch
 }
 
 fn truncated_len(ranges: &ChunkRangesRef, size: u64) -> usize {
-    let end = chunks(size);
+    let end = ChunkNum::chunks(size);
     let lc = ChunkNum(end.0.saturating_sub(1));
     let bs = ranges.boundaries();
     match bs.binary_search(&lc) {
@@ -468,11 +468,10 @@ mod tests {
     };
 
     use crate::{
-        chunks, full_chunks,
         rec::{
             bao_encode_reference, bao_outboard_reference, encode_ranges_reference, make_test_data,
         },
-        BlockSize, ChunkRanges,
+        BlockSize, ChunkNum, ChunkRanges,
     };
     use proptest::prelude::*;
 
@@ -532,8 +531,8 @@ mod tests {
         );
         let mut expected_encoded = Vec::new();
         encoder.read_to_end(&mut expected_encoded).unwrap();
-        let chunk_start = full_chunks(start as u64);
-        let chunk_end = chunks(end as u64).max(chunk_start + 1);
+        let chunk_start = ChunkNum::full_chunks(start as u64);
+        let chunk_end = ChunkNum::chunks(end as u64).max(chunk_start + 1);
         let ranges = ChunkRanges::from(chunk_start..chunk_end);
         let actual_encoded = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
         prop_assert_eq!(expected_encoded, actual_encoded);
@@ -547,8 +546,8 @@ mod tests {
         let (size, start) = size_and_start;
         let end = start + 1;
         let data = make_test_data(size);
-        let chunk_start = full_chunks(start as u64);
-        let chunk_end = chunks(end as u64).max(chunk_start + 1);
+        let chunk_start = ChunkNum::full_chunks(start as u64);
+        let chunk_end = ChunkNum::chunks(end as u64).max(chunk_start + 1);
         let ranges = ChunkRanges::from(chunk_start..chunk_end);
         let (encoded, hash) = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
         let bao_hash = bao::Hash::from(*hash.as_bytes());

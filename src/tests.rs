@@ -9,7 +9,7 @@ use proptest::prelude::*;
 use range_collections::RangeSet2;
 
 use crate::{
-    assert_tuple_eq, blake3, chunks,
+    assert_tuple_eq, blake3,
     io::{full_chunk_groups, outboard::PreOrderMemOutboard, sync::Outboard, BaoContentItem, Leaf},
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
     prop_assert_tuple_eq,
@@ -95,7 +95,7 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     assert_eq!(expected.len(), actual.len());
     assert_eq!(expected, actual);
 
-    let content_range = ChunkRanges::from(..chunks(data.len() as u64));
+    let content_range = ChunkRanges::from(..ChunkNum::chunks(data.len() as u64));
     if !content_range.is_superset(&ranges) {
         // the behaviour of bao/abao and us is different in this case.
         // if the query ranges are non empty outside the content range, we will return
@@ -593,7 +593,7 @@ fn iterate_part_preorder_reference<'a>(
 
 fn size_and_slice_overlapping() -> impl Strategy<Value = (u64, ChunkNum, ChunkNum)> {
     (0..32768u64).prop_flat_map(|len| {
-        let chunks = chunks(len);
+        let chunks = ChunkNum::chunks(len);
         let slice_start = 0..=chunks.0.saturating_sub(1);
         let slice_len = 1..=(chunks.0 + 1);
         (
@@ -607,7 +607,7 @@ fn size_and_slice_overlapping() -> impl Strategy<Value = (u64, ChunkNum, ChunkNu
 fn size_and_slice() -> impl Strategy<Value = (u64, ChunkNum, ChunkNum)> {
     (0..32768u64).prop_flat_map(|len| {
         let len = len;
-        let chunks = chunks(len);
+        let chunks = ChunkNum::chunks(len);
         let slice_start = 0..=chunks.0;
         let slice_len = 0..=chunks.0;
         (
@@ -773,8 +773,8 @@ fn encode_last_chunk_impl(size: u64, block_size: u8) -> (Vec<u8>, Vec<u8>) {
     encode_ranges_validated(&data, &outboard, &range, &mut encoded1).unwrap();
 
     let lc = last_chunk(size);
-    let sc = chunks(lc.start);
-    let ec = chunks(lc.end);
+    let sc = ChunkNum::chunks(lc.start);
+    let ec = ChunkNum::chunks(lc.end);
     let range = ChunkRanges::from(sc..ec);
     let mut encoded2 = Vec::new();
     encode_ranges_validated(&data, &outboard, &range, &mut encoded2).unwrap();

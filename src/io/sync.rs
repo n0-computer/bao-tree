@@ -663,8 +663,8 @@ mod validate {
     use positioned_io::ReadAt;
 
     use crate::{
-        blake3, chunks, full_chunks, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split,
-        BaoTree, ChunkNum, ChunkRangesRef, TreeNode,
+        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum,
+        ChunkRangesRef, TreeNode,
     };
 
     use super::Outboard;
@@ -745,11 +745,13 @@ mod validate {
             let tmp = &mut self.buffer[..len];
             self.data.read_exact_at(range.start, tmp)?;
             // is_root is always false because the case of a single chunk group is handled before calling this function
-            let actual = hash_subtree(full_chunks(range.start).0, tmp, is_root);
+            let actual = hash_subtree(ChunkNum::full_chunks(range.start).0, tmp, is_root);
             if &actual == hash {
                 // yield the left range
                 self.co
-                    .yield_(Ok(full_chunks(range.start)..chunks(range.end)))
+                    .yield_(Ok(
+                        ChunkNum::full_chunks(range.start)..ChunkNum::chunks(range.end)
+                    ))
                     .await;
             }
             io::Result::Ok(())
@@ -861,8 +863,9 @@ mod validate {
         ) -> LocalBoxFuture<'b, io::Result<()>> {
             Box::pin(async move {
                 let yield_node_range = |range: Range<u64>| {
-                    self.co
-                        .yield_(Ok(full_chunks(range.start)..chunks(range.end)))
+                    self.co.yield_(Ok(
+                        ChunkNum::full_chunks(range.start)..ChunkNum::chunks(range.end)
+                    ))
                 };
                 if ranges.is_empty() {
                     // this part of the tree is not of interest, so we can skip it

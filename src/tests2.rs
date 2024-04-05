@@ -243,7 +243,6 @@ fn mem_outboard_flip_proptest(#[strategy(tree())] tree: BaoTree) {
 
 #[cfg(feature = "validate")]
 mod validate {
-    use crate::chunks;
 
     use super::*;
 
@@ -466,7 +465,7 @@ mod validate {
     fn validate_bug() {
         let data = Bytes::from(make_test_data(19308432));
         let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
-        let expected = ChunkRanges::from(..chunks(data.len() as u64));
+        let expected = ChunkRanges::from(..ChunkNum::chunks(data.len() as u64));
         let actual = valid_ranges_fsm(outboard, data.clone());
         assert_eq!(expected, actual);
     }

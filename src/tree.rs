@@ -78,3 +78,27 @@ impl BlockSize {
         self.0 as u32
     }
 }
+
+impl ChunkNum {
+    /// number of chunks that this number of bytes covers
+    ///
+    /// E.g. 1024 bytes is 1 chunk, 1025 bytes is 2 chunks
+    pub const fn chunks(size: u64) -> ChunkNum {
+        let mask = (1 << 10) - 1;
+        let part = ((size & mask) != 0) as u64;
+        let whole = size >> 10;
+        ChunkNum(whole + part)
+    }
+
+    /// number of chunks that this number of bytes covers
+    ///
+    /// E.g. 1024 bytes is 1 chunk, 1025 bytes is still 1 chunk
+    pub const fn full_chunks(size: u64) -> ChunkNum {
+        ChunkNum(size >> 10)
+    }
+
+    /// number of bytes that this number of chunks covers
+    pub const fn to_bytes(&self) -> u64 {
+        self.0 << 10
+    }
+}
