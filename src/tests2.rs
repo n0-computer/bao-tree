@@ -26,7 +26,7 @@ use crate::{
     io::{fsm::ResponseDecoderNext, outboard::PostOrderMemOutboard, sync::Outboard, Leaf, Parent},
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
     rec::{encode_selected_rec, select_nodes_rec},
-    BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
+    BaoTree, BlockSize, ChunkNum, TreeNode,
 };
 
 fn read_len(mut from: impl std::io::Read) -> std::io::Result<u64> {
@@ -138,7 +138,7 @@ fn post_traversal_chunks_iter_impl(tree: BaoTree) {
     let chunks = tree.post_order_chunks_iter();
     let ranges = get_leaf_ranges(chunks);
     let union = range_union(ranges).unwrap();
-    assert_eq!(union, RangeSet2::from(..ByteNum(tree.size)));
+    assert_eq!(union, RangeSet2::from(..tree.size));
 }
 
 #[proptest]
@@ -243,6 +243,8 @@ fn mem_outboard_flip_proptest(#[strategy(tree())] tree: BaoTree) {
 
 #[cfg(feature = "validate")]
 mod validate {
+    use crate::chunks;
+
     use super::*;
 
     /// range is a range of chunks. Just using u64 for convenience in tests
@@ -464,7 +466,7 @@ mod validate {
     fn validate_bug() {
         let data = Bytes::from(make_test_data(19308432));
         let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
-        let expected = ChunkRanges::from(..ByteNum(data.len() as u64).chunks());
+        let expected = ChunkRanges::from(..chunks(data.len() as u64));
         let actual = valid_ranges_fsm(outboard, data.clone());
         assert_eq!(expected, actual);
     }

@@ -136,7 +136,6 @@ pub mod iter;
 mod rec;
 mod tree;
 use iter::*;
-use tree::ByteNum;
 pub use tree::{BlockSize, ChunkNum};
 pub mod io;
 pub use iroh_blake3 as blake3;
@@ -264,17 +263,13 @@ impl BaoTree {
     ///
     /// Returns two ranges, the first is the left range, the second is the right range
     /// If the leaf is partially contained in the tree, the right range will be empty
-    fn leaf_byte_ranges3(&self, leaf: TreeNode) -> (ByteNum, ByteNum, ByteNum) {
+    fn leaf_byte_ranges3(&self, leaf: TreeNode) -> (u64, u64, u64) {
         let Range { start, end } = leaf.byte_range();
         let mid = leaf.mid().to_bytes();
         if !(start < self.size || (start == 0 && self.size == 0)) {
             debug_assert!(start < self.size || (start == 0 && self.size == 0));
         }
-        (
-            start,
-            ByteNum(mid.min(self.size)),
-            end.min(ByteNum(self.size)),
-        )
+        (start, mid.min(self.size), end.min(self.size))
     }
 
     /// Traverse the entire tree in post order as [BaoChunk]s
@@ -350,12 +345,12 @@ impl BaoTree {
     /// Even a tree with 0 bytes size has a single block
     pub fn blocks(&self) -> u64 {
         // handle the case of an empty tree having 1 block
-        ByteNum(self.size).blocks(self.block_size).max(1)
+        blocks(self.size, self.block_size).max(1)
     }
 
     /// Number of chunks in the tree
     pub fn chunks(&self) -> ChunkNum {
-        ByteNum(self.size).chunks()
+        chunks(self.size)
     }
 
     /// Number of hash pairs in the outboard
@@ -454,31 +449,28 @@ impl BaoTree {
     }
 }
 
-impl ByteNum {
-    /// number of chunks that this number of bytes covers
-    pub const fn chunks(&self) -> ChunkNum {
-        let mask = (1 << 10) - 1;
-        let part = ((self.0 & mask) != 0) as u64;
-        let whole = self.0 >> 10;
-        ChunkNum(whole + part)
-    }
+/// number of chunks that this number of bytes covers
+pub const fn chunks(size: u64) -> ChunkNum {
+    let mask = (1 << 10) - 1;
+    let part = ((size & mask) != 0) as u64;
+    let whole = size >> 10;
+    ChunkNum(whole + part)
+}
 
-    /// number of chunks that this number of bytes covers
-    pub const fn full_chunks(&self) -> ChunkNum {
-        ChunkNum(self.0 >> 10)
-    }
+/// number of chunks that this number of bytes covers
+pub const fn full_chunks(size: u64) -> ChunkNum {
+    ChunkNum(size >> 10)
+}
 
-    /// number of blocks that this number of bytes covers,
-    /// given a block size
-    pub const fn blocks(&self, block_size: BlockSize) -> u64 {
-        let chunk_group_log = block_size.0;
-        let size = self.0;
-        let block_bits = chunk_group_log + 10;
-        let block_mask = (1 << block_bits) - 1;
-        let full_blocks = size >> block_bits;
-        let open_block = ((size & block_mask) != 0) as u64;
-        full_blocks + open_block
-    }
+/// number of blocks that this number of bytes covers,
+/// given a block size
+pub const fn blocks(size: u64, block_size: BlockSize) -> u64 {
+    let chunk_group_log = block_size.0;
+    let block_bits = chunk_group_log + 10;
+    let block_mask = (1 << block_bits) - 1;
+    let full_blocks = size >> block_bits;
+    let open_block = ((size & block_mask) != 0) as u64;
+    full_blocks + open_block
 }
 
 impl ChunkNum {
@@ -600,9 +592,9 @@ impl TreeNode {
     /// Note that this will give the untruncated range, which may be larger than
     /// the actual tree. To get the exact byte range for a tree, use
     /// [BaoTree::byte_range];
-    fn byte_range(&self) -> Range<ByteNum> {
+    fn byte_range(&self) -> Range<u64> {
         let range = self.chunk_range();
-        ByteNum(range.start.to_bytes())..ByteNum(range.end.to_bytes())
+        range.start.to_bytes()..range.end.to_bytes()
     }
 
     /// Number of nodes below this node, excluding this node.

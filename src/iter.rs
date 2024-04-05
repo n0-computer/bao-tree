@@ -440,14 +440,14 @@ impl Iterator for PostOrderChunkIter {
                     self.stack.push(BaoChunk::Leaf {
                         is_root: false,
                         start_chunk: r_start_chunk,
-                        size: (e - m).to_usize(),
+                        size: (e - m).try_into().unwrap(),
                         ranges: (),
                     });
                 };
                 break Some(BaoChunk::Leaf {
                     is_root: is_root && is_half_leaf,
                     start_chunk: l_start_chunk,
-                    size: (m - s).to_usize(),
+                    size: (m - s).try_into().unwrap(),
                     ranges: (),
                 });
             } else {

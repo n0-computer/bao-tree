@@ -2,7 +2,7 @@
 //!
 //! Encocding is used to compute hashes, decoding is only used in tests as a
 //! reference implementation.
-use crate::{blake3, split_inner, ByteNum, ChunkNum, ChunkRangesRef};
+use crate::{blake3, chunks, split_inner, ChunkNum, ChunkRangesRef};
 
 /// Given a set of chunk ranges, adapt them for a tree of the given size.
 ///
@@ -40,7 +40,7 @@ pub fn truncate_ranges_owned(ranges: crate::ChunkRanges, size: u64) -> crate::Ch
 }
 
 fn truncated_len(ranges: &ChunkRangesRef, size: u64) -> usize {
-    let end = ByteNum(size).chunks();
+    let end = chunks(size);
     let lc = ChunkNum(end.0.saturating_sub(1));
     let bs = ranges.boundaries();
     match bs.binary_search(&lc) {
@@ -174,7 +174,7 @@ mod test_support {
         std::ops::Range,
     };
 
-    use crate::{BaoChunk, BaoTree, BlockSize, ByteNum, ChunkNum, ChunkRanges, ChunkRangesRef};
+    use crate::{BaoChunk, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef};
 
     use super::{encode_selected_rec, truncate_ranges};
 
@@ -403,13 +403,13 @@ mod test_support {
     #[cfg(feature = "tokio_fsm")]
     pub fn get_leaf_ranges<R>(
         iter: impl IntoIterator<Item = BaoChunk<R>>,
-    ) -> impl Iterator<Item = Range<ByteNum>> {
+    ) -> impl Iterator<Item = Range<u64>> {
         iter.into_iter().filter_map(|e| {
             if let BaoChunk::Leaf {
                 start_chunk, size, ..
             } = e
             {
-                let start = ByteNum(start_chunk.to_bytes());
+                let start = start_chunk.to_bytes();
                 let end = start + (size as u64);
                 Some(start..end)
             } else {
@@ -468,10 +468,11 @@ mod tests {
     };
 
     use crate::{
+        chunks, full_chunks,
         rec::{
             bao_encode_reference, bao_outboard_reference, encode_ranges_reference, make_test_data,
         },
-        BlockSize, ByteNum, ChunkRanges,
+        BlockSize, ChunkRanges,
     };
     use proptest::prelude::*;
 
@@ -531,8 +532,8 @@ mod tests {
         );
         let mut expected_encoded = Vec::new();
         encoder.read_to_end(&mut expected_encoded).unwrap();
-        let chunk_start = ByteNum(start as u64).full_chunks();
-        let chunk_end = ByteNum(end as u64).chunks().max(chunk_start + 1);
+        let chunk_start = full_chunks(start as u64);
+        let chunk_end = chunks(end as u64).max(chunk_start + 1);
         let ranges = ChunkRanges::from(chunk_start..chunk_end);
         let actual_encoded = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
         prop_assert_eq!(expected_encoded, actual_encoded);
@@ -546,8 +547,8 @@ mod tests {
         let (size, start) = size_and_start;
         let end = start + 1;
         let data = make_test_data(size);
-        let chunk_start = ByteNum(start as u64).full_chunks();
-        let chunk_end = ByteNum(end as u64).chunks().max(chunk_start + 1);
+        let chunk_start = full_chunks(start as u64);
+        let chunk_end = chunks(end as u64).max(chunk_start + 1);
         let ranges = ChunkRanges::from(chunk_start..chunk_end);
         let (encoded, hash) = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
         let bao_hash = bao::Hash::from(*hash.as_bytes());

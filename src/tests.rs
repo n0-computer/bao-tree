@@ -9,7 +9,7 @@ use proptest::prelude::*;
 use range_collections::RangeSet2;
 
 use crate::{
-    assert_tuple_eq, blake3,
+    assert_tuple_eq, blake3, chunks,
     io::{full_chunk_groups, outboard::PreOrderMemOutboard, sync::Outboard, BaoContentItem, Leaf},
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
     prop_assert_tuple_eq,
@@ -25,7 +25,7 @@ use super::{
     io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
     iter::{BaoChunk, NodeInfo},
     pre_order_offset_loop,
-    tree::{ByteNum, ChunkNum},
+    tree::ChunkNum,
     BaoTree, BlockSize, TreeNode,
 };
 
@@ -95,7 +95,7 @@ fn bao_tree_encode_slice_comparison_impl(data: Vec<u8>, mut range: Range<ChunkNu
     assert_eq!(expected.len(), actual.len());
     assert_eq!(expected, actual);
 
-    let content_range = ChunkRanges::from(..ByteNum(data.len() as u64).chunks());
+    let content_range = ChunkRanges::from(..chunks(data.len() as u64));
     if !content_range.is_superset(&ranges) {
         // the behaviour of bao/abao and us is different in this case.
         // if the query ranges are non empty outside the content range, we will return
@@ -216,7 +216,7 @@ fn bao_tree_outboard_levels() {
         let outboard = ob.into_inner_with_suffix();
         assert_eq!(expected, hash);
         assert_eq!(
-            ByteNum(outboard.len() as u64),
+            outboard.len() as u64,
             BaoTree::new(td.len() as u64, block_size).outboard_size() + 8
         );
     }
@@ -232,16 +232,15 @@ fn bao_tree_slice_roundtrip_test(data: Vec<u8>, mut range: Range<ChunkNum>, bloc
     };
     let encoded = encode_ranges_reference(&data, &ChunkRanges::from(range.clone()), block_size).0;
     let expected = data.clone();
-    let mut all_ranges: range_collections::RangeSet<[ByteNum; 2]> = RangeSet2::empty();
+    let mut all_ranges: range_collections::RangeSet<[u64; 2]> = RangeSet2::empty();
     let mut ec = Cursor::new(encoded);
     for item in
         decode_ranges_into_chunks(root, block_size, &mut ec, &ChunkRanges::from(range)).unwrap()
     {
         let (pos, slice) = item.unwrap();
-        let pos = ByteNum(pos);
         // compute all data ranges
         all_ranges |= RangeSet2::from(pos..pos + (slice.len() as u64));
-        let pos = pos.to_usize();
+        let pos = pos.try_into().unwrap();
         assert_eq!(expected[pos..pos + slice.len()], *slice);
     }
 }
@@ -594,7 +593,7 @@ fn iterate_part_preorder_reference<'a>(
 
 fn size_and_slice_overlapping() -> impl Strategy<Value = (u64, ChunkNum, ChunkNum)> {
     (0..32768u64).prop_flat_map(|len| {
-        let chunks = ByteNum(len).chunks();
+        let chunks = chunks(len);
         let slice_start = 0..=chunks.0.saturating_sub(1);
         let slice_len = 1..=(chunks.0 + 1);
         (
@@ -605,10 +604,10 @@ fn size_and_slice_overlapping() -> impl Strategy<Value = (u64, ChunkNum, ChunkNu
     })
 }
 
-fn size_and_slice() -> impl Strategy<Value = (ByteNum, ChunkNum, ChunkNum)> {
+fn size_and_slice() -> impl Strategy<Value = (u64, ChunkNum, ChunkNum)> {
     (0..32768u64).prop_flat_map(|len| {
-        let len = ByteNum(len);
-        let chunks = len.chunks();
+        let len = len;
+        let chunks = chunks(len);
         let slice_start = 0..=chunks.0;
         let slice_len = 0..=chunks.0;
         (
@@ -774,8 +773,8 @@ fn encode_last_chunk_impl(size: u64, block_size: u8) -> (Vec<u8>, Vec<u8>) {
     encode_ranges_validated(&data, &outboard, &range, &mut encoded1).unwrap();
 
     let lc = last_chunk(size);
-    let sc = ByteNum(lc.start).chunks();
-    let ec = ByteNum(lc.end).chunks();
+    let sc = chunks(lc.start);
+    let ec = chunks(lc.end);
     let range = ChunkRanges::from(sc..ec);
     let mut encoded2 = Vec::new();
     encode_ranges_validated(&data, &outboard, &range, &mut encoded2).unwrap();
@@ -1059,7 +1058,7 @@ proptest! {
 
     #[test]
     fn bao_tree_encode_slice_part_any((len, start, size) in size_and_slice()) {
-        let data = make_test_data(len.to_usize());
+        let data = make_test_data(len.try_into().unwrap());
         let chunk_range = start .. start + size;
         bao_tree_encode_slice_comparison_impl(data, chunk_range);
     }

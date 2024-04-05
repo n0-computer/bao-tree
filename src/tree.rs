@@ -18,14 +18,6 @@ index_newtype! {
 
 pub(crate) const BLAKE3_CHUNK_SIZE: usize = 1024;
 
-index_newtype! {
-    /// A number of bytes.
-    ///
-    /// This is a newtype for u64. It does not distinguish between an absolute
-    /// number of bytes or a difference between two numbers of bytes.
-    pub struct ByteNum(pub u64);
-}
-
 /// A block size.
 ///
 /// Block sizes are powers of 2, with the smallest being 1024 bytes.

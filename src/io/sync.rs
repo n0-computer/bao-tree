@@ -663,8 +663,8 @@ mod validate {
     use positioned_io::ReadAt;
 
     use crate::{
-        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ByteNum,
-        ChunkNum, ChunkRangesRef, TreeNode,
+        blake3, chunks, full_chunks, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split,
+        BaoTree, ChunkNum, ChunkRangesRef, TreeNode,
     };
 
     use super::Outboard;
@@ -737,19 +737,19 @@ mod validate {
 
         async fn yield_if_valid(
             &mut self,
-            range: Range<ByteNum>,
+            range: Range<u64>,
             hash: &blake3::Hash,
             is_root: bool,
         ) -> io::Result<()> {
-            let len = (range.end - range.start).to_usize();
+            let len = (range.end - range.start).try_into().unwrap();
             let tmp = &mut self.buffer[..len];
-            self.data.read_exact_at(range.start.0, tmp)?;
+            self.data.read_exact_at(range.start, tmp)?;
             // is_root is always false because the case of a single chunk group is handled before calling this function
-            let actual = hash_subtree(range.start.full_chunks().0, tmp, is_root);
+            let actual = hash_subtree(full_chunks(range.start).0, tmp, is_root);
             if &actual == hash {
                 // yield the left range
                 self.co
-                    .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                    .yield_(Ok(full_chunks(range.start)..chunks(range.end)))
                     .await;
             }
             io::Result::Ok(())
@@ -860,9 +860,9 @@ mod validate {
             ranges: &'b ChunkRangesRef,
         ) -> LocalBoxFuture<'b, io::Result<()>> {
             Box::pin(async move {
-                let yield_node_range = |range: Range<ByteNum>| {
+                let yield_node_range = |range: Range<u64>| {
                     self.co
-                        .yield_(Ok(range.start.full_chunks()..range.end.chunks()))
+                        .yield_(Ok(full_chunks(range.start)..chunks(range.end)))
                 };
                 if ranges.is_empty() {
                     // this part of the tree is not of interest, so we can skip it

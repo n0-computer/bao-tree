@@ -1,7 +1,7 @@
 //! Implementation of bao streaming for std io and tokio io
 use std::pin::Pin;
 
-use crate::{blake3, BlockSize, ByteNum, ChunkNum, ChunkRanges, TreeNode};
+use crate::{blake3, chunks, full_chunks, BlockSize, ChunkNum, ChunkRanges, TreeNode};
 use bytes::Bytes;
 
 mod error;
@@ -13,16 +13,6 @@ use std::future::Future;
 pub mod fsm;
 pub mod outboard;
 pub mod sync;
-
-/// A bao header, containing the size of the file.
-#[derive(Debug)]
-pub struct Header {
-    /// The size of the file.
-    ///
-    /// This is not the size of the data you are being sent, but the oveall size
-    /// of the file.
-    pub size: ByteNum,
-}
 
 /// A parent hash pair.
 #[derive(Debug)]
@@ -76,12 +66,10 @@ pub fn round_up_to_chunks(ranges: &RangeSetRef<u64>) -> ChunkRanges {
         // full_chunks() rounds down, chunks() rounds up
         match item {
             RangeSetRange::RangeFrom(range) => {
-                res |= ChunkRanges::from(ByteNum(*range.start).full_chunks()..)
+                res |= ChunkRanges::from(full_chunks(*range.start)..)
             }
             RangeSetRange::Range(range) => {
-                res |= ChunkRanges::from(
-                    ByteNum(*range.start).full_chunks()..ByteNum(*range.end).chunks(),
-                )
+                res |= ChunkRanges::from(full_chunks(*range.start)..chunks(*range.end))
             }
         }
     }
