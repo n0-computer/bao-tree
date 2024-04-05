@@ -19,23 +19,6 @@ index_newtype! {
 pub(crate) const BLAKE3_CHUNK_SIZE: usize = 1024;
 
 index_newtype! {
-    /// A block number.
-    ///
-    /// This is a newtype for u64.
-    pub struct BlockNum(pub u64);
-}
-
-impl BlockNum {
-    pub fn to_chunks(self, block_level: BlockSize) -> ChunkNum {
-        ChunkNum(self.0 << block_level.0)
-    }
-
-    pub fn to_bytes(self, block_level: BlockSize) -> ByteNum {
-        ByteNum(self.0 << (block_level.0 + 10))
-    }
-}
-
-index_newtype! {
     /// A number of bytes.
     ///
     /// This is a newtype for u64. It does not distinguish between an absolute

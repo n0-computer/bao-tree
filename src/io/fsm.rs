@@ -811,7 +811,7 @@ mod validate {
             co: &Co<io::Result<Range<ChunkNum>>>,
         ) -> io::Result<()> {
             let tree = outboard.tree();
-            if tree.blocks().0 == 1 {
+            if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 let mut data = data;
                 let data = data.read_at(0, tree.size().to_usize()).await?;
@@ -934,7 +934,7 @@ mod validate {
             co: &Co<io::Result<Range<ChunkNum>>>,
         ) -> io::Result<()> {
             let tree = outboard.tree();
-            if tree.blocks().0 == 1 {
+            if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
                 return Ok(());

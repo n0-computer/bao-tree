@@ -709,7 +709,7 @@ mod validate {
         ) -> io::Result<()> {
             let tree = outboard.tree();
             let mut buffer = vec![0u8; tree.chunk_group_bytes().to_usize()];
-            if tree.blocks().0 == 1 {
+            if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 let tmp = &mut buffer[..tree.size().to_usize()];
                 data.read_exact_at(0, tmp)?;
@@ -833,7 +833,7 @@ mod validate {
             co: &Co<io::Result<Range<ChunkNum>>>,
         ) -> io::Result<()> {
             let tree = outboard.tree();
-            if tree.blocks().0 == 1 {
+            if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
                 return Ok(());

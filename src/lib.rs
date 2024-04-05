@@ -137,7 +137,6 @@ pub mod iter;
 mod rec;
 mod tree;
 use iter::*;
-use tree::BlockNum;
 pub use tree::{BlockSize, ByteNum, ChunkNum};
 pub mod io;
 pub use iroh_blake3 as blake3;
@@ -345,9 +344,9 @@ impl BaoTree {
     ///
     /// At chunk group size 1, this is the same as the number of chunks
     /// Even a tree with 0 bytes size has a single block
-    pub fn blocks(&self) -> BlockNum {
+    pub fn blocks(&self) -> u64 {
         // handle the case of an empty tree having 1 block
-        self.size.blocks(self.block_size).max(BlockNum(1))
+        self.size.blocks(self.block_size).max(1)
     }
 
     /// Number of chunks in the tree
@@ -357,7 +356,7 @@ impl BaoTree {
 
     /// Number of hash pairs in the outboard
     fn outboard_hash_pairs(&self) -> u64 {
-        self.blocks().0 - 1
+        self.blocks() - 1
     }
 
     /// The outboard size for this tree.
@@ -467,14 +466,14 @@ impl ByteNum {
 
     /// number of blocks that this number of bytes covers,
     /// given a block size
-    pub const fn blocks(&self, block_size: BlockSize) -> BlockNum {
+    pub const fn blocks(&self, block_size: BlockSize) -> u64 {
         let chunk_group_log = block_size.0;
         let size = self.0;
         let block_bits = chunk_group_log + 10;
         let block_mask = (1 << block_bits) - 1;
         let full_blocks = size >> block_bits;
         let open_block = ((size & block_mask) != 0) as u64;
-        BlockNum(full_blocks + open_block)
+        full_blocks + open_block
     }
 }
 
