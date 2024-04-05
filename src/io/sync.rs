@@ -10,7 +10,7 @@ use std::{
 use crate::{
     blake3,
     io::{
-        error::{AnyDecodeError, EncodeError},
+        error::EncodeError,
         outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
@@ -310,7 +310,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         self.inner.tree()
     }
 
-    fn next0(&mut self) -> result::Result<Option<BaoContentItem>, AnyDecodeError> {
+    fn next0(&mut self) -> result::Result<Option<BaoContentItem>, DecodeError> {
         match self.inner.next() {
             Some(BaoChunk::Parent {
                 is_root,
@@ -324,7 +324,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 let parent_hash = self.stack.pop().unwrap();
                 let actual = parent_cv(&l_hash, &r_hash, is_root);
                 if parent_hash != actual {
-                    return Err(AnyDecodeError::ParentHashMismatch(node));
+                    return Err(DecodeError::ParentHashMismatch(node));
                 }
                 if right {
                     self.stack.push(r_hash);
@@ -347,7 +347,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 let actual = hash_subtree(start_chunk.0, &self.buf, is_root);
                 let leaf_hash = self.stack.pop().unwrap();
                 if leaf_hash != actual {
-                    return Err(AnyDecodeError::LeafHashMismatch(start_chunk));
+                    return Err(DecodeError::LeafHashMismatch(start_chunk));
                 }
                 Ok(Some(
                     Leaf {
@@ -363,7 +363,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
 }
 
 impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
-    type Item = result::Result<BaoContentItem, AnyDecodeError>;
+    type Item = result::Result<BaoContentItem, DecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.next0().transpose()
@@ -508,7 +508,7 @@ pub fn decode_ranges<R, O, W>(
     encoded: R,
     mut target: W,
     mut outboard: O,
-) -> io::Result<()>
+) -> std::result::Result<(), DecodeError>
 where
     O: OutboardMut + Outboard,
     R: Read,

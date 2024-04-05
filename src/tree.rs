@@ -54,7 +54,7 @@ index_newtype! {
 /// The actual size in bytes can be computed with [BlockSize::bytes].
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BlockSize(pub u8);
+pub struct BlockSize(pub(crate) u8);
 
 impl fmt::Display for BlockSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -63,6 +63,18 @@ impl fmt::Display for BlockSize {
 }
 
 impl BlockSize {
+    /// Create a block size from the log2 of the size in bytes / 1024
+    ///
+    /// 0 is 1024 bytes, 1 is 2048 bytes, etc.
+    pub const fn from_chunk_log(chunk_log: u8) -> Self {
+        Self(chunk_log)
+    }
+
+    /// Get the log2 of the number of 1 KiB blocks in a chunk.
+    pub const fn chunk_log(self) -> u8 {
+        self.0
+    }
+
     /// The default block size, 1024 bytes
     ///
     /// This means that blocks and blake3 chunks are the same size.

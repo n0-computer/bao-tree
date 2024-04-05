@@ -83,7 +83,7 @@
 //! use range_collections::RangeSet2;
 //!
 //! /// Use a block size of 16 KiB, a good default for most cases
-//! const BLOCK_SIZE: BlockSize = BlockSize(4);
+//! const BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(4);
 //!
 //! # fn main() -> std::io::Result<()> {
 //! /// The file we want to serve

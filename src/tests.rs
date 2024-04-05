@@ -131,6 +131,8 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
 
 #[cfg(feature = "tokio_fsm")]
 mod fsm_tests {
+    use tokio::io::AsyncReadExt;
+
     use super::*;
     use crate::{io::fsm::*, rec::make_test_data};
 
@@ -140,10 +142,15 @@ mod fsm_tests {
         let (encoded, root) = encode_slice_reference(&data, range.clone());
         let expected = data;
         let ranges = ChunkRanges::from(range);
-        let mut ec = Cursor::new(encoded);
-        let at_start = ResponseDecoderStart::new(root, ranges, BlockSize::ZERO, &mut ec);
-        let (mut reading, _size) = at_start.next().await.unwrap();
-        while let ResponseDecoderReadingNext::More((next_state, item)) = reading.next().await {
+        let mut encoded = Cursor::new(encoded);
+        let size = encoded.read_u64_le().await.unwrap();
+        let mut reading = ResponseDecoder::new(
+            root,
+            ranges,
+            BaoTree::new(ByteNum(size), BlockSize::ZERO),
+            encoded,
+        );
+        while let ResponseDecoderNext::More((next_state, item)) = reading.next().await {
             if let BaoContentItem::Leaf(Leaf { offset, data }) = item.unwrap() {
                 let pos = offset.to_usize();
                 assert_eq!(expected[pos..pos + data.len()], *data);

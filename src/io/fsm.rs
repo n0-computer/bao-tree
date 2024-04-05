@@ -34,7 +34,7 @@ use crate::{
 };
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 
-use super::{combine_hash_pair, DecodeError, StartDecodeError};
+use super::{combine_hash_pair, DecodeError};
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///
@@ -316,77 +316,15 @@ pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::H
     Ok((l_hash, r_hash))
 }
 
-/// Response decoder state machine, at the start of a stream
 #[derive(Debug)]
-pub struct ResponseDecoderStart<R> {
-    ranges: ChunkRanges,
-    block_size: BlockSize,
-    hash: blake3::Hash,
-    encoded: R,
-}
-
-impl<'a, R: AsyncRead + Unpin> ResponseDecoderStart<R> {
-    /// Create a new response decoder state machine, at the start of a stream
-    /// where you don't yet know the size.
-    pub fn new(hash: blake3::Hash, ranges: ChunkRanges, block_size: BlockSize, encoded: R) -> Self {
-        Self {
-            ranges,
-            block_size,
-            hash,
-            encoded,
-        }
-    }
-
-    /// Immediately finish decoding the stream, returning the underlying reader
-    pub fn finish(self) -> R {
-        self.encoded
-    }
-
-    /// Read the size and go into the next state
-    ///
-    /// The only thing that can go wrong here is an io error when reading the size.
-    pub async fn next(
-        self,
-    ) -> std::result::Result<(ResponseDecoderReading<R>, u64), StartDecodeError> {
-        let Self {
-            ranges,
-            block_size,
-            hash,
-            mut encoded,
-        } = self;
-        let size = ByteNum(
-            encoded
-                .read_u64_le()
-                .await
-                .map_err(StartDecodeError::maybe_not_found)?,
-        );
-        let tree = BaoTree::new(size, block_size);
-        let state = ResponseDecoderReading(Box::new(ResponseDecoderReadingInner::new(
-            tree, hash, ranges, encoded,
-        )));
-        Ok((state, size.0))
-    }
-
-    /// Hash of the blob we are currently getting
-    pub fn hash(&self) -> &blake3::Hash {
-        &self.hash
-    }
-
-    /// The ranges we requested
-    pub fn ranges(&self) -> &ChunkRanges {
-        &self.ranges
-    }
-}
-
-#[derive(Debug)]
-struct ResponseDecoderReadingInner<R> {
+struct ResponseDecoderInner<R> {
     iter: ResponseIter,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
     buf: BytesMut,
 }
 
-impl<R> ResponseDecoderReadingInner<R> {
+impl<R> ResponseDecoderInner<R> {
     fn new(tree: BaoTree, hash: blake3::Hash, ranges: ChunkRanges, encoded: R) -> Self {
         // now that we know the size, we can canonicalize the ranges
         let ranges = truncate_ranges_owned(ranges, tree.size());
@@ -403,15 +341,15 @@ impl<R> ResponseDecoderReadingInner<R> {
 
 /// Response decoder state machine, after reading the size
 #[derive(Debug)]
-pub struct ResponseDecoderReading<R>(Box<ResponseDecoderReadingInner<R>>);
+pub struct ResponseDecoder<R>(Box<ResponseDecoderInner<R>>);
 
 /// Next type for ResponseDecoderReading.
 #[derive(Debug)]
-pub enum ResponseDecoderReadingNext<R> {
+pub enum ResponseDecoderNext<R> {
     /// One more item, and you get back the state machine in the next state
     More(
         (
-            ResponseDecoderReading<R>,
+            ResponseDecoder<R>,
             std::result::Result<BaoContentItem, DecodeError>,
         ),
     ),
@@ -419,28 +357,23 @@ pub enum ResponseDecoderReadingNext<R> {
     Done(R),
 }
 
-impl<R: AsyncRead + Unpin> ResponseDecoderReading<R> {
+impl<R: AsyncRead + Unpin> ResponseDecoder<R> {
     /// Create a new response decoder state machine, when you have already read the size.
     ///
     /// The size as well as the chunk size is given in the `tree` parameter.
     pub fn new(hash: blake3::Hash, ranges: ChunkRanges, tree: BaoTree, encoded: R) -> Self {
-        let mut stack = SmallVec::new();
-        stack.push(hash);
-        Self(Box::new(ResponseDecoderReadingInner {
-            iter: ResponseIter::new(tree, ranges),
-            stack,
-            encoded,
-            buf: BytesMut::new(),
-        }))
+        Self(Box::new(ResponseDecoderInner::new(
+            tree, hash, ranges, encoded,
+        )))
     }
 
     /// Proceed to the next state by reading the next chunk from the stream.
-    pub async fn next(mut self) -> ResponseDecoderReadingNext<R> {
+    pub async fn next(mut self) -> ResponseDecoderNext<R> {
         if let Some(chunk) = self.0.iter.next() {
             let item = self.next0(chunk).await;
-            ResponseDecoderReadingNext::More((self, item))
+            ResponseDecoderNext::More((self, item))
         } else {
-            ResponseDecoderReadingNext::Done(self.0.encoded)
+            ResponseDecoderNext::Done(self.0.encoded)
         }
     }
 
@@ -674,18 +607,17 @@ pub async fn decode_ranges<R, O, W>(
     ranges: ChunkRanges,
     mut target: W,
     mut outboard: O,
-) -> io::Result<()>
+) -> std::result::Result<(), DecodeError>
 where
     O: OutboardMut + Outboard,
     R: AsyncRead + Unpin,
     W: AsyncSliceWriter,
 {
-    let mut reading =
-        ResponseDecoderReading::new(outboard.root(), ranges, outboard.tree(), encoded);
+    let mut reading = ResponseDecoder::new(outboard.root(), ranges, outboard.tree(), encoded);
     loop {
         let item = match reading.next().await {
-            ResponseDecoderReadingNext::Done(_reader) => break,
-            ResponseDecoderReadingNext::More((next, item)) => {
+            ResponseDecoderNext::Done(_reader) => break,
+            ResponseDecoderNext::More((next, item)) => {
                 reading = next;
                 item?
             }

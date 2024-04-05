@@ -23,10 +23,7 @@ use crate::rec::{
 use crate::{assert_tuple_eq, prop_assert_tuple_eq, ChunkRanges, ChunkRangesRef};
 use crate::{
     blake3, hash_subtree,
-    io::{
-        fsm::ResponseDecoderReadingNext, outboard::PostOrderMemOutboard, sync::Outboard, Leaf,
-        Parent,
-    },
+    io::{fsm::ResponseDecoderNext, outboard::PostOrderMemOutboard, sync::Outboard, Leaf, Parent},
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
     rec::{encode_selected_rec, select_nodes_rec},
     BaoTree, BlockSize, ByteNum, ChunkNum, TreeNode,
@@ -598,18 +595,18 @@ async fn encode_decode_partial_fsm_impl(
     .await
     .unwrap();
     let expected_data = data;
-    let encoded_read = std::io::Cursor::new(encoded);
-    let initial = crate::io::fsm::ResponseDecoderStart::new(
+    let mut encoded_read = std::io::Cursor::new(encoded);
+    let size = encoded_read.read_u64_le().await.unwrap();
+    let mut reading = crate::io::fsm::ResponseDecoder::new(
         outboard.root,
         ranges,
-        outboard.tree.block_size,
+        BaoTree::new(ByteNum(size), outboard.tree.block_size),
         encoded_read,
     );
-    let (mut reading, size) = initial.next().await.unwrap();
     if size != outboard.tree.size {
         return false;
     }
-    while let ResponseDecoderReadingNext::More((reading1, result)) = reading.next().await {
+    while let ResponseDecoderNext::More((reading1, result)) = reading.next().await {
         let item = match result {
             Ok(item) => item,
             Err(_) => {

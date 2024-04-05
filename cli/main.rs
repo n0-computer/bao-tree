@@ -28,7 +28,7 @@ pub enum Command {
 
 fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
-    let bs = BlockSize(args.block_size);
+    let bs = BlockSize::from_chunk_log(args.block_size);
     if args.block_size != 0 {
         println!("Using block size: {}", bs.bytes());
     }

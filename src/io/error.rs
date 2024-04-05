@@ -4,128 +4,6 @@
 use crate::{ChunkNum, TreeNode};
 use std::{fmt, io};
 
-/// Error when starting to decode from a reader
-#[derive(Debug)]
-pub enum StartDecodeError {
-    /// We got an EOF when reading the size, indicating that the remote end does not have the blob
-    NotFound,
-    /// A generic io error
-    Io(io::Error),
-}
-
-impl fmt::Display for StartDecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}
-
-impl std::error::Error for StartDecodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<StartDecodeError> for io::Error {
-    fn from(e: StartDecodeError) -> Self {
-        use StartDecodeError::*;
-        match e {
-            Io(e) => e,
-            NotFound => io::Error::new(io::ErrorKind::UnexpectedEof, e),
-        }
-    }
-}
-
-impl StartDecodeError {
-    pub(crate) fn maybe_not_found(e: io::Error) -> Self {
-        if e.kind() == io::ErrorKind::UnexpectedEof {
-            Self::NotFound
-        } else {
-            Self::Io(e)
-        }
-    }
-}
-
-/// Error when decoding from a reader, both when reading the size and after
-///
-/// This is an union of [`StartDecodeError`] and [`DecodeError`] for convenience.
-#[derive(Debug)]
-pub enum AnyDecodeError {
-    /// We got an EOF when reading the size, indicating that the remote end does not have the blob
-    NotFound,
-    /// We got an EOF while reading a parent hash pair, indicating that the remote end does not have the outboard
-    ParentNotFound(TreeNode),
-    /// We got an EOF while reading a chunk, indicating that the remote end does not have the data
-    LeafNotFound(ChunkNum),
-    /// The hash of a parent did not match the expected hash
-    ParentHashMismatch(TreeNode),
-    /// The hash of a leaf did not match the expected hash
-    LeafHashMismatch(ChunkNum),
-    /// There was an error reading from the underlying io
-    Io(io::Error),
-}
-
-impl From<DecodeError> for AnyDecodeError {
-    fn from(e: DecodeError) -> Self {
-        match e {
-            DecodeError::Io(e) => Self::Io(e),
-            DecodeError::ParentHashMismatch(node) => Self::ParentHashMismatch(node),
-            DecodeError::LeafHashMismatch(chunk) => Self::LeafHashMismatch(chunk),
-            DecodeError::LeafNotFound(chunk) => Self::LeafNotFound(chunk),
-            DecodeError::ParentNotFound(node) => Self::ParentNotFound(node),
-        }
-    }
-}
-
-impl From<StartDecodeError> for AnyDecodeError {
-    fn from(e: StartDecodeError) -> Self {
-        match e {
-            StartDecodeError::Io(e) => Self::Io(e),
-            StartDecodeError::NotFound => Self::NotFound,
-        }
-    }
-}
-
-impl fmt::Display for AnyDecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}
-
-impl std::error::Error for AnyDecodeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<AnyDecodeError> for io::Error {
-    fn from(e: AnyDecodeError) -> Self {
-        match e {
-            AnyDecodeError::Io(e) => e,
-            AnyDecodeError::ParentHashMismatch(node) => io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "parent hash mismatch (level {}, block {})",
-                    node.level(),
-                    node.mid().0
-                ),
-            ),
-            AnyDecodeError::LeafHashMismatch(chunk) => io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("leaf hash mismatch (offset {})", chunk.to_bytes().0),
-            ),
-            AnyDecodeError::LeafNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
-            AnyDecodeError::ParentNotFound(_) => io::Error::new(io::ErrorKind::UnexpectedEof, e),
-            AnyDecodeError::NotFound => io::Error::new(io::ErrorKind::UnexpectedEof, e),
-        }
-    }
-}
-
 /// Error when decoding from a reader, after the size has been read
 #[derive(Debug)]
 pub enum DecodeError {
@@ -153,6 +31,12 @@ impl std::error::Error for DecodeError {
             Self::Io(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+impl From<io::Error> for DecodeError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
     }
 }
 
