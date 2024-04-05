@@ -242,8 +242,10 @@ impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
     where
         Self: Default + Sized,
     {
-        let mut res = Self::default();
-        res.tree = BaoTree::new(size, block_size);
+        let mut res = Self {
+            tree: BaoTree::new(size, block_size),
+            ..Self::default()
+        };
         res.init_from(data).await?;
         Ok(res)
     }
@@ -266,8 +268,10 @@ impl<W: AsyncSliceWriter> CreateOutboard for PostOrderOutboard<W> {
     where
         Self: Default + Sized,
     {
-        let mut res = Self::default();
-        res.tree = BaoTree::new(size, block_size);
+        let mut res = Self {
+            tree: BaoTree::new(size, block_size),
+            ..Self::default()
+        };
         res.init_from(data).await?;
         Ok(res)
     }

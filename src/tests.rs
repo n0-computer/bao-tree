@@ -606,7 +606,6 @@ fn size_and_slice_overlapping() -> impl Strategy<Value = (u64, ChunkNum, ChunkNu
 
 fn size_and_slice() -> impl Strategy<Value = (u64, ChunkNum, ChunkNum)> {
     (0..32768u64).prop_flat_map(|len| {
-        let len = len;
         let chunks = ChunkNum::chunks(len);
         let slice_start = 0..=chunks.0;
         let slice_len = 0..=chunks.0;
