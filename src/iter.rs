@@ -553,7 +553,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
         let is_root = shifted == self.shifted_root;
         let chunk_range = node.chunk_range();
         let byte_range = tree.byte_range(node);
-        let size = (byte_range.end - byte_range.start).to_usize();
+        let size = (byte_range.end - byte_range.start).try_into().unwrap();
         // There are three cases.
         if query_leaf {
             // The node is a query leaf, meaning that we stop descending because the
@@ -615,7 +615,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
                 if !r_ranges.is_empty() {
                     self.buffer.push(BaoChunk::Leaf {
                         start_chunk: mid_chunk,
-                        size: (byte_range.end - mid).to_usize(),
+                        size: (byte_range.end - mid).try_into().unwrap(),
                         is_root: false,
                         ranges: r_ranges,
                     });
@@ -624,7 +624,7 @@ impl<'a> Iterator for PreOrderPartialChunkIterRef<'a> {
                 if !l_ranges.is_empty() {
                     self.buffer.push(BaoChunk::Leaf {
                         start_chunk: chunk_range.start,
-                        size: (mid - byte_range.start.0).to_usize(),
+                        size: (mid - byte_range.start).try_into().unwrap(),
                         is_root: false,
                         ranges: l_ranges,
                     });

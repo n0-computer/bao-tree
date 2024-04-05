@@ -409,7 +409,7 @@ mod test_support {
                 start_chunk, size, ..
             } = e
             {
-                let start = start_chunk.to_bytes();
+                let start = ByteNum(start_chunk.to_bytes());
                 let end = start + (size as u64);
                 Some(start..end)
             } else {

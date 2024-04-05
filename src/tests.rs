@@ -69,8 +69,8 @@ fn post_order_outboard_reference(data: &[u8]) -> PostOrderMemOutboard {
 
 fn encode_slice_reference(data: &[u8], chunk_range: Range<ChunkNum>) -> (Vec<u8>, blake3::Hash) {
     let (outboard, hash) = bao::encode::outboard(data);
-    let slice_start = chunk_range.start.to_bytes().0;
-    let slice_len = (chunk_range.end - chunk_range.start).to_bytes().0;
+    let slice_start = chunk_range.start.to_bytes();
+    let slice_len = (chunk_range.end - chunk_range.start).to_bytes();
     let mut encoder = bao::encode::SliceExtractor::new_outboard(
         Cursor::new(&data),
         Cursor::new(&outboard),
@@ -630,7 +630,7 @@ fn get_leaf_ranges(
                 start_chunk, size, ..
             } = e
             {
-                let start = start_chunk.to_bytes().0;
+                let start = start_chunk.to_bytes();
                 let end = start + (size as u64);
                 Some(start..end)
             } else {
@@ -755,7 +755,7 @@ fn select_last_chunk_impl(size: u64, block_size: u8) -> (Vec<Range<u64>>, Vec<Ra
             BaoChunk::Leaf {
                 start_chunk, size, ..
             } => {
-                let start = start_chunk.to_bytes().0;
+                let start = start_chunk.to_bytes();
                 let end = start + (size as u64);
                 Some(start..end)
             }

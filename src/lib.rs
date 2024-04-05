@@ -12,7 +12,6 @@
 //!
 //! There are newtypes for the different kinds of integers used in the
 //! tree:
-//! [ByteNum] is an u64 number of bytes,
 //! [ChunkNum] is an u64 number of chunks,
 //! [TreeNode] is an u64 tree node identifier,
 //! and [BlockSize] is the log base 2 of the chunk group size.
@@ -255,10 +254,10 @@ impl BaoTree {
         (TreeNode(root), TreeNode(filled_size))
     }
 
-    fn byte_range(&self, node: TreeNode) -> Range<ByteNum> {
+    fn byte_range(&self, node: TreeNode) -> Range<u64> {
         let start = node.chunk_range().start.to_bytes();
         let end = node.chunk_range().end.to_bytes();
-        start..end.min(ByteNum(self.size))
+        start..end.min(self.size)
     }
 
     /// Compute the byte ranges for a leaf node
@@ -273,7 +272,7 @@ impl BaoTree {
         }
         (
             start,
-            mid.min(ByteNum(self.size)),
+            ByteNum(mid.min(self.size)),
             end.min(ByteNum(self.size)),
         )
     }
@@ -394,7 +393,7 @@ impl BaoTree {
     #[inline]
     #[cfg(test)]
     const fn is_persisted(&self, node: TreeNode) -> bool {
-        !self.is_leaf(node) || node.mid().to_bytes().0 < self.size
+        !self.is_leaf(node) || node.mid().to_bytes() < self.size
     }
 
     /// true if this is a node that is relevant for the outboard
@@ -408,7 +407,7 @@ impl BaoTree {
             // a parent node, always relevant
             true
         } else {
-            node.mid().to_bytes().0 < self.size
+            node.mid().to_bytes() < self.size
         }
     }
 
@@ -450,7 +449,7 @@ impl BaoTree {
         ChunkNum(1 << self.block_size.0)
     }
 
-    const fn chunk_group_bytes(&self) -> ByteNum {
+    const fn chunk_group_bytes(&self) -> u64 {
         self.chunk_group_chunks().to_bytes()
     }
 }
@@ -484,8 +483,8 @@ impl ByteNum {
 
 impl ChunkNum {
     /// number of bytes that this number of chunks covers
-    pub const fn to_bytes(&self) -> ByteNum {
-        ByteNum(self.0 << 10)
+    pub const fn to_bytes(&self) -> u64 {
+        self.0 << 10
     }
 }
 
@@ -603,7 +602,7 @@ impl TreeNode {
     /// [BaoTree::byte_range];
     fn byte_range(&self) -> Range<ByteNum> {
         let range = self.chunk_range();
-        range.start.to_bytes()..range.end.to_bytes()
+        ByteNum(range.start.to_bytes())..ByteNum(range.end.to_bytes())
     }
 
     /// Number of nodes below this node, excluding this node.
