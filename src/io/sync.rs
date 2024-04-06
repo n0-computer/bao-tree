@@ -386,7 +386,7 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     let data = data;
     let mut encoded = encoded;
     let tree = outboard.tree();
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes()];
     // write header
     encoded.write_all(tree.size.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
@@ -427,7 +427,7 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     let data = data;
     let mut encoded = encoded;
     let tree = outboard.tree();
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes()];
     let mut out_buf = Vec::new();
     // canonicalize ranges
     let ranges = truncate_ranges(ranges, tree.size());
@@ -537,7 +537,7 @@ pub fn outboard(
     tree: BaoTree,
     mut outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes()];
     let hash = outboard_impl(tree, data, &mut outboard, &mut buffer)?;
     Ok(hash)
 }
@@ -551,7 +551,7 @@ fn outboard_impl(
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    debug_assert!(buffer.len() == tree.chunk_group_bytes().try_into().unwrap());
+    debug_assert!(buffer.len() == tree.chunk_group_bytes());
     for item in tree.post_order_chunks_iter() {
         match item {
             BaoChunk::Parent { is_root, node, .. } => {
@@ -590,7 +590,7 @@ pub fn outboard_post_order(
     tree: BaoTree,
     mut outboard: impl Write,
 ) -> io::Result<blake3::Hash> {
-    let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
+    let mut buffer = vec![0u8; tree.chunk_group_bytes()];
     let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
     Ok(hash)
 }
@@ -604,7 +604,7 @@ fn outboard_post_order_impl(
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    debug_assert!(buffer.len() == tree.chunk_group_bytes().try_into().unwrap());
+    debug_assert!(buffer.len() == tree.chunk_group_bytes());
     for item in tree.post_order_chunks_iter() {
         match item {
             BaoChunk::Parent { is_root, .. } => {
@@ -708,7 +708,7 @@ mod validate {
             co: &Co<io::Result<Range<ChunkNum>>>,
         ) -> io::Result<()> {
             let tree = outboard.tree();
-            let mut buffer = vec![0u8; tree.chunk_group_bytes().try_into().unwrap()];
+            let mut buffer = vec![0u8; tree.chunk_group_bytes()];
             if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 let tmp = &mut buffer[..tree.size().try_into().unwrap()];

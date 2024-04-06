@@ -1,4 +1,4 @@
-//! # The tree for the bao file format
+//! # Efficient BLAKE3 based verified streaming
 //!
 //! This crate is similar to the [bao crate](https://crates.io/crates/bao), but
 //! takes a slightly different approach.
@@ -122,9 +122,8 @@
 //! for range in valid_ranges(&ob, &decoded, &ChunkRanges::all()) {
 //!     println!("{:?}", range);
 //! }
-//! #Ok(())
-//! #}
-
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Compatibility with the [bao crate](https://crates.io/crates/bao)
@@ -458,8 +457,8 @@ impl BaoTree {
         ChunkNum(1 << self.block_size.0)
     }
 
-    const fn chunk_group_bytes(&self) -> u64 {
-        self.chunk_group_chunks().to_bytes()
+    fn chunk_group_bytes(&self) -> usize {
+        self.chunk_group_chunks().to_bytes().try_into().unwrap()
     }
 }
 
