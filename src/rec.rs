@@ -425,7 +425,6 @@ mod test_support {
     ) -> (Vec<u8>, blake3::Hash) {
         let mut res = Vec::new();
         let size = data.len() as u64;
-        res.extend_from_slice(&size.to_le_bytes());
         // canonicalize the ranges
         let ranges = truncate_ranges(ranges, size);
         let hash = encode_selected_rec(
@@ -534,7 +533,8 @@ mod tests {
         let chunk_start = ChunkNum::full_chunks(start as u64);
         let chunk_end = ChunkNum::chunks(end as u64).max(chunk_start + 1);
         let ranges = ChunkRanges::from(chunk_start..chunk_end);
-        let actual_encoded = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
+        let mut actual_encoded = encode_ranges_reference(&data, &ranges, BlockSize::ZERO).0;
+        actual_encoded.splice(..0, size.to_le_bytes().into_iter());
         prop_assert_eq!(expected_encoded, actual_encoded);
     }
 
@@ -549,7 +549,8 @@ mod tests {
         let chunk_start = ChunkNum::full_chunks(start as u64);
         let chunk_end = ChunkNum::chunks(end as u64).max(chunk_start + 1);
         let ranges = ChunkRanges::from(chunk_start..chunk_end);
-        let (encoded, hash) = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
+        let (mut encoded, hash) = encode_ranges_reference(&data, &ranges, BlockSize::ZERO);
+        encoded.splice(..0, size.to_le_bytes().into_iter());
         let bao_hash = bao::Hash::from(*hash.as_bytes());
         let mut decoder =
             bao::decode::SliceDecoder::new(Cursor::new(&encoded), &bao_hash, start as u64, 1);

@@ -65,12 +65,11 @@
 //! knowledge of the tree geometry (total data size and block size). A common
 //! way to get this information is to have the block size as a common parameter
 //! of both sides, and send the total data size as a prefix of the encoded data.
+//! E.g. the original bao crate uses a little endian u64 as the prefix.
 //!
 //! This function will perform validation in any case, there is no variant
 //! that skips validation since that would defeat the purpose of verified
 //! streaming.
-//!
-//! The original bao crate uses a little endian u64 as the prefix.
 //!
 //! ## Simple end to end example
 //!
@@ -112,7 +111,7 @@
 //!     root,
 //!     data: vec![],
 //! };
-//! decode_ranges(&ranges, from_server, &mut decoded, &mut ob)?;
+//! decode_ranges(from_server, &ranges, &mut decoded, &mut ob)?;
 //!
 //! // the first 100000 bytes of the file should now be in `decoded`
 //! // in addition, the required part of the tree to validate that the data is
