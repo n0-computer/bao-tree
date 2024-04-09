@@ -127,9 +127,9 @@ pub trait CreateOutboard {
     /// tree and only init the data and set the root hash.
     ///
     /// So this can be used to initialize an outboard that does not have a default,
-    /// such as a file based one. It also does not require [AsyncSeek] on the data.
+    /// such as a file based one.
     ///
-    /// It will however only include data up the the current tree size.
+    /// It will only include data up the the current tree size.
     fn init_from(&mut self, data: impl AsyncSliceReader) -> impl Future<Output = io::Result<()>>;
 }
 
@@ -338,11 +338,11 @@ impl<R> ResponseDecoderInner<R> {
     }
 }
 
-/// Response decoder state machine, after reading the size
+/// Response decoder
 #[derive(Debug)]
 pub struct ResponseDecoder<R>(Box<ResponseDecoderInner<R>>);
 
-/// Next type for ResponseDecoderReading.
+/// Next type for ResponseDecoder.
 #[derive(Debug)]
 pub enum ResponseDecoderNext<R> {
     /// One more item, and you get back the state machine in the next state

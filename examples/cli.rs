@@ -344,7 +344,7 @@ mod sync {
 mod fsm {
     use bao_tree::{
         io::{
-            fsm::{encode_ranges_validated, Outboard, ResponseDecoder, ResponseDecoderNext},
+            tokio::{encode_ranges_validated, Outboard, ResponseDecoder, ResponseDecoderNext},
             BaoContentItem,
         },
         BaoTree,

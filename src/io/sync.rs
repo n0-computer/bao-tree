@@ -97,9 +97,9 @@ pub trait CreateOutboard {
     /// tree and only init the data and set the root hash.
     ///
     /// So this can be used to initialize an outboard that does not have a default,
-    /// such as a file based one. It also does not require [Seek] on the data.
+    /// such as a file based one.
     ///
-    /// It will however only include data up the the current tree size.
+    /// It will only include data up the the current tree size.
     fn init_from(&mut self, data: impl ReadAt) -> io::Result<()>;
 }
 
