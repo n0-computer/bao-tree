@@ -160,7 +160,7 @@
 //! let ranges = ByteRanges::from(0..100000);
 //! let ranges = round_up_to_chunks(&ranges);
 //! // Stream of data to client. Needs to implement `io::Write`. We just use a vec here.
-//! let mut to_client = BytesMut::new();
+//! let mut to_client = Vec::new();
 //! // convert into iroh-io file to allow fast random access
 //! let file = iroh_io::File::from_std(file.into_std().await);
 //! encode_ranges_validated(file, &mut ob, &ranges, &mut to_client).await?;

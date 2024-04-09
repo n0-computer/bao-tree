@@ -22,7 +22,6 @@ use crate::{
 };
 use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
-use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
@@ -476,7 +475,7 @@ pub async fn encode_ranges<D, O, W>(
 where
     D: AsyncSliceReader,
     O: Outboard,
-    W: AsyncStreamWriter,
+    W: AsyncWrite + Unpin,
 {
     let mut encoded = encoded;
     let tree = outboard.tree();
@@ -496,7 +495,7 @@ where
                 let start = start_chunk.to_bytes();
                 let bytes = data.read_at(start, size).await?;
                 encoded
-                    .write_bytes(bytes)
+                    .write_all(&bytes)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
@@ -521,10 +520,11 @@ pub async fn encode_ranges_validated<D, O, W>(
 where
     D: AsyncSliceReader,
     O: Outboard,
-    W: AsyncStreamWriter,
+    W: AsyncWrite + Unpin,
 {
     // buffer for writing incomplete subtrees.
     // for queries that don't have incomplete subtrees, this will never be used.
+    let mut out_buf = Vec::new();
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
     let mut encoded = encoded;
@@ -572,7 +572,7 @@ where
                     //
                     // write into an out buffer to ensure we detect mismatches
                     // before writing to the output.
-                    let mut out_buf = Vec::new();
+                    out_buf.clear();
                     let actual = encode_selected_rec(
                         start_chunk,
                         &bytes,
@@ -582,16 +582,16 @@ where
                         true,
                         &mut out_buf,
                     );
-                    (actual, out_buf.into())
+                    (actual, out_buf.as_slice())
                 } else {
                     let actual = hash_subtree(start_chunk.0, &bytes, is_root);
-                    (actual, bytes)
+                    (actual, bytes.as_ref())
                 };
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
                 encoded
-                    .write_bytes(to_write)
+                    .write_all(to_write)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
@@ -682,7 +682,7 @@ async fn outboard_impl(
             } => {
                 let buf = &mut buffer[..size];
                 data.read_exact(buf).await?;
-                let hash = hash_subtree(start_chunk.0, &buf, is_root);
+                let hash = hash_subtree(start_chunk.0, buf, is_root);
                 stack.push(hash);
             }
         }
