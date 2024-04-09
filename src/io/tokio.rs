@@ -8,7 +8,11 @@
 //!
 //! The traits to perform async positioned io are re-exported from
 //! [iroh-io](https://crates.io/crates/iroh-io).
-use std::{future::Future, io, result};
+use std::{
+    future::Future,
+    io::{self, SeekFrom},
+    result,
+};
 
 use crate::{
     blake3, hash_subtree,
@@ -20,7 +24,7 @@ use blake3::guts::parent_cv;
 use bytes::{Bytes, BytesMut};
 use iroh_io::AsyncStreamWriter;
 use smallvec::SmallVec;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 pub use super::BaoContentItem;
 use crate::{
@@ -104,11 +108,15 @@ pub trait CreateOutboard {
     /// This requires the outboard to have a default implementation, which is
     /// the case for the memory implementations.
     #[allow(async_fn_in_trait)]
-    async fn create(mut data: impl AsyncSliceReader, block_size: BlockSize) -> io::Result<Self>
+    async fn create(
+        mut data: impl AsyncRead + AsyncSeek + Unpin,
+        block_size: BlockSize,
+    ) -> io::Result<Self>
     where
         Self: Default + Sized,
     {
-        let size = data.len().await?;
+        let size = data.seek(SeekFrom::End(0)).await?;
+        data.rewind().await?;
         Self::create_sized(data, size, block_size).await
     }
 
@@ -116,7 +124,7 @@ pub trait CreateOutboard {
     /// have a default implementation, which is the case for the memory
     /// implementations.
     fn create_sized(
-        data: impl AsyncSliceReader,
+        data: impl AsyncRead + Unpin,
         size: u64,
         block_size: BlockSize,
     ) -> impl Future<Output = io::Result<Self>>
@@ -130,7 +138,7 @@ pub trait CreateOutboard {
     /// such as a file based one.
     ///
     /// It will only include data up the the current tree size.
-    fn init_from(&mut self, data: impl AsyncSliceReader) -> impl Future<Output = io::Result<()>>;
+    fn init_from(&mut self, data: impl AsyncRead + Unpin) -> impl Future<Output = io::Result<()>>;
 }
 
 impl<'b, O: Outboard> Outboard for &'b mut O {
@@ -230,7 +238,7 @@ impl<W: AsyncSliceWriter> OutboardMut for PostOrderOutboard<W> {
 
 impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
     async fn create_sized(
-        data: impl AsyncSliceReader,
+        data: impl AsyncRead + Unpin,
         size: u64,
         block_size: BlockSize,
     ) -> io::Result<Self>
@@ -245,7 +253,7 @@ impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
         Ok(res)
     }
 
-    async fn init_from(&mut self, data: impl AsyncSliceReader) -> io::Result<()> {
+    async fn init_from(&mut self, data: impl AsyncRead + Unpin) -> io::Result<()> {
         let mut this = self;
         let root = outboard(data, this.tree, &mut this).await?;
         this.root = root;
@@ -256,7 +264,7 @@ impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
 
 impl<W: AsyncSliceWriter> CreateOutboard for PostOrderOutboard<W> {
     async fn create_sized(
-        data: impl AsyncSliceReader,
+        data: impl AsyncRead + Unpin,
         size: u64,
         block_size: BlockSize,
     ) -> io::Result<Self>
@@ -271,7 +279,7 @@ impl<W: AsyncSliceWriter> CreateOutboard for PostOrderOutboard<W> {
         Ok(res)
     }
 
-    async fn init_from(&mut self, data: impl AsyncSliceReader) -> io::Result<()> {
+    async fn init_from(&mut self, data: impl AsyncRead + Unpin) -> io::Result<()> {
         let mut this = self;
         let root = outboard(data, this.tree, &mut this).await?;
         this.root = root;
@@ -488,7 +496,7 @@ where
                 let start = start_chunk.to_bytes();
                 let bytes = data.read_at(start, size).await?;
                 encoded
-                    .write(&bytes)
+                    .write_bytes(bytes)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
@@ -517,7 +525,6 @@ where
 {
     // buffer for writing incomplete subtrees.
     // for queries that don't have incomplete subtrees, this will never be used.
-    let mut out_buf = Vec::new();
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
     let mut encoded = encoded;
@@ -565,7 +572,7 @@ where
                     //
                     // write into an out buffer to ensure we detect mismatches
                     // before writing to the output.
-                    out_buf.clear();
+                    let mut out_buf = Vec::new();
                     let actual = encode_selected_rec(
                         start_chunk,
                         &bytes,
@@ -575,16 +582,16 @@ where
                         true,
                         &mut out_buf,
                     );
-                    (actual, &out_buf[..])
+                    (actual, out_buf.into())
                 } else {
                     let actual = hash_subtree(start_chunk.0, &bytes, is_root);
-                    (actual, &bytes[..])
+                    (actual, bytes)
                 };
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
                 encoded
-                    .write(to_write)
+                    .write_bytes(to_write)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
@@ -639,7 +646,7 @@ fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
 /// Unlike [outboard_post_order], this will work with any outboard
 /// implementation, but it is not guaranteed that writes are sequential.
 pub async fn outboard(
-    data: impl AsyncSliceReader,
+    data: impl AsyncRead + Unpin,
     tree: BaoTree,
     mut outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
@@ -651,12 +658,11 @@ pub async fn outboard(
 /// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
 async fn outboard_impl(
     tree: BaoTree,
-    mut data: impl AsyncSliceReader,
+    mut data: impl AsyncRead + Unpin,
     mut outboard: impl OutboardMut,
     buffer: &mut [u8],
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
-    let mut offset: u64 = 0;
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     debug_assert!(buffer.len() == tree.chunk_group_bytes());
     for item in tree.post_order_chunks_iter() {
@@ -674,8 +680,8 @@ async fn outboard_impl(
                 start_chunk,
                 ..
             } => {
-                let buf = data.read_at(offset, size).await?;
-                offset += size as u64;
+                let buf = &mut buffer[..size];
+                data.read_exact(buf).await?;
                 let hash = hash_subtree(start_chunk.0, &buf, is_root);
                 stack.push(hash);
             }

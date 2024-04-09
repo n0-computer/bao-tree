@@ -3,7 +3,7 @@
 //! The traits to perform positioned io are re-exported from
 //! [positioned-io](https://crates.io/crates/positioned-io).
 use std::{
-    io::{self, Read, Write},
+    io::{self, Read, Seek, Write},
     result,
 };
 
@@ -73,23 +73,19 @@ pub trait OutboardMut: Sized {
 /// In complex real applications, you might want to do this manually.
 pub trait CreateOutboard {
     /// Create an outboard from a data source.
-    fn create(data: impl ReadAt + Size, block_size: BlockSize) -> io::Result<Self>
+    fn create(mut data: impl Read + Seek, block_size: BlockSize) -> io::Result<Self>
     where
         Self: Default + Sized,
     {
-        let Some(size) = data.size()? else {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "unable to measure the size",
-            ));
-        };
+        let size = data.seek(io::SeekFrom::End(0))?;
+        data.rewind()?;
         Self::create_sized(data, size, block_size)
     }
 
     /// create an outboard from a data source. This requires the outboard to
     /// have a default implementation, which is the case for the memory
     /// implementations.
-    fn create_sized(data: impl ReadAt, size: u64, block_size: BlockSize) -> io::Result<Self>
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
     where
         Self: Default + Sized;
 
@@ -100,7 +96,7 @@ pub trait CreateOutboard {
     /// such as a file based one.
     ///
     /// It will only include data up the the current tree size.
-    fn init_from(&mut self, data: impl ReadAt) -> io::Result<()>;
+    fn init_from(&mut self, data: impl Read) -> io::Result<()>;
 }
 
 impl<O: OutboardMut> OutboardMut for &mut O {
@@ -176,7 +172,7 @@ impl<W: WriteAt> OutboardMut for PreOrderOutboard<W> {
 }
 
 impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
-    fn create_sized(data: impl ReadAt, size: u64, block_size: BlockSize) -> io::Result<Self>
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
     where
         Self: Default + Sized,
     {
@@ -190,7 +186,7 @@ impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
         Ok(res)
     }
 
-    fn init_from(&mut self, data: impl ReadAt) -> io::Result<()> {
+    fn init_from(&mut self, data: impl Read) -> io::Result<()> {
         let mut this = self;
         let root = outboard(data, this.tree, &mut this)?;
         this.root = root;
@@ -200,7 +196,7 @@ impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
 }
 
 impl<W: WriteAt> CreateOutboard for PostOrderOutboard<W> {
-    fn create_sized(data: impl ReadAt, size: u64, block_size: BlockSize) -> io::Result<Self>
+    fn create_sized(data: impl Read, size: u64, block_size: BlockSize) -> io::Result<Self>
     where
         Self: Default + Sized,
     {
@@ -214,7 +210,7 @@ impl<W: WriteAt> CreateOutboard for PostOrderOutboard<W> {
         Ok(res)
     }
 
-    fn init_from(&mut self, data: impl ReadAt) -> io::Result<()> {
+    fn init_from(&mut self, data: impl Read) -> io::Result<()> {
         let mut this = self;
         let root = outboard(data, this.tree, &mut this)?;
         this.root = root;
@@ -533,7 +529,7 @@ where
 /// Unlike [outboard_post_order], this will work with any outboard
 /// implementation, but it is not guaranteed that writes are sequential.
 pub fn outboard(
-    data: impl ReadAt,
+    data: impl Read,
     tree: BaoTree,
     mut outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
@@ -545,13 +541,12 @@ pub fn outboard(
 /// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
 fn outboard_impl(
     tree: BaoTree,
-    data: impl ReadAt,
+    mut data: impl Read,
     mut outboard: impl OutboardMut,
     buffer: &mut [u8],
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
-    let mut offset = 0;
     debug_assert!(buffer.len() == tree.chunk_group_bytes());
     for item in tree.post_order_chunks_iter() {
         match item {
@@ -569,8 +564,7 @@ fn outboard_impl(
                 ..
             } => {
                 let buf = &mut buffer[..size];
-                data.read_exact_at(offset, buf)?;
-                offset += size as u64;
+                data.read_exact(buf)?;
                 let hash = hash_subtree(start_chunk.0, buf, is_root);
                 stack.push(hash);
             }

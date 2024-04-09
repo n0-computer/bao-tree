@@ -153,7 +153,7 @@
 //!# #[tokio::main]
 //!# async fn main() -> io::Result<()> {
 //! // The file we want to serve
-//! let mut file = iroh_io::File::open("video.mp4".into()).await?;
+//! let mut file = tokio::fs::File::open("video.mp4").await?;
 //! // Create an outboard for the file, using the current size
 //! let mut ob = PreOrderOutboard::<BytesMut>::create(&mut file, BLOCK_SIZE).await?;
 //! // Encode the first 100000 bytes of the file
@@ -161,6 +161,8 @@
 //! let ranges = round_up_to_chunks(&ranges);
 //! // Stream of data to client. Needs to implement `io::Write`. We just use a vec here.
 //! let mut to_client = BytesMut::new();
+//! // convert into iroh-io file to allow fast random access
+//! let file = iroh_io::File::from_std(file.into_std().await);
 //! encode_ranges_validated(file, &mut ob, &ranges, &mut to_client).await?;
 //!
 //! // Stream of data from client. Needs to implement `io::Read`. We just wrap the vec in a cursor.
