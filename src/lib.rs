@@ -139,7 +139,7 @@
 //!     io::{
 //!         outboard::PreOrderOutboard,
 //!         round_up_to_chunks,
-//!         tokio::{decode_ranges, encode_ranges_validated, valid_ranges, CreateOutboard},
+//!         fsm::{decode_ranges, encode_ranges_validated, valid_ranges, CreateOutboard},
 //!     },
 //!     BlockSize, ByteRanges, ChunkRanges,
 //! };
