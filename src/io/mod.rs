@@ -9,10 +9,10 @@ pub use error::*;
 use range_collections::{range_set::RangeSetRange, RangeSetRef};
 use std::future::Future;
 
+#[cfg(feature = "tokio_fsm")]
+pub mod fsm;
 pub mod outboard;
 pub mod sync;
-#[cfg(feature = "tokio_fsm")]
-pub mod tokio;
 
 /// A parent hash pair.
 #[derive(Debug)]

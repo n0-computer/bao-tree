@@ -1,8 +1,8 @@
 use bao_tree::{
     io::{
+        fsm::{decode_ranges, encode_ranges_validated, valid_ranges, CreateOutboard},
         outboard::PreOrderOutboard,
         round_up_to_chunks,
-        tokio::{decode_ranges, encode_ranges_validated, valid_ranges, CreateOutboard},
     },
     BlockSize, ByteRanges, ChunkRanges,
 };
@@ -16,7 +16,7 @@ const BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(4);
 #[tokio::main]
 async fn main() -> io::Result<()> {
     // The file we want to serve
-    let mut file = tokio::fs::File::open("video.mp4").await?;
+    let mut file = iroh_io::File::open("video.mp4".into()).await?;
     // Create an outboard for the file, using the current size
     let mut ob = PreOrderOutboard::<BytesMut>::create(&mut file, BLOCK_SIZE).await?;
     // Encode the first 100000 bytes of the file
@@ -24,11 +24,10 @@ async fn main() -> io::Result<()> {
     let ranges = round_up_to_chunks(&ranges);
     // Stream of data to client. Needs to implement `io::Write`. We just use a vec here.
     let mut to_client = Vec::new();
-    let file = iroh_io::File::from_std(file.into_std().await);
     encode_ranges_validated(file, &mut ob, &ranges, &mut to_client).await?;
 
     // Stream of data from client. Needs to implement `io::Read`. We just wrap the vec in a cursor.
-    let from_server = io::Cursor::new(to_client);
+    let from_server = io::Cursor::new(to_client.as_slice());
     let root = ob.root;
     let tree = ob.tree;
 

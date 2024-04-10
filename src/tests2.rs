@@ -22,9 +22,7 @@ use crate::rec::{
 use crate::{assert_tuple_eq, prop_assert_tuple_eq, ChunkRanges, ChunkRangesRef};
 use crate::{
     blake3, hash_subtree,
-    io::{
-        outboard::PostOrderMemOutboard, sync::Outboard, tokio::ResponseDecoderNext, Leaf, Parent,
-    },
+    io::{fsm::ResponseDecoderNext, outboard::PostOrderMemOutboard, sync::Outboard, Leaf, Parent},
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
     rec::{encode_selected_rec, select_nodes_rec},
     BaoTree, BlockSize, ChunkNum, TreeNode,
@@ -161,7 +159,7 @@ fn outboard_test_sync(data: &[u8], outboard: impl crate::io::sync::Outboard) {
 }
 
 /// Brute force test for an outboard that just computes the expected hash for each pair
-async fn outboard_test_fsm(data: &[u8], mut outboard: impl crate::io::tokio::Outboard) {
+async fn outboard_test_fsm(data: &[u8], mut outboard: impl crate::io::fsm::Outboard) {
     let tree = outboard.tree();
     let nodes = tree
         .pre_order_nodes_iter()
@@ -252,10 +250,10 @@ mod validate {
     }
 
     /// range is a range of chunks. Just using u64 for convenience in tests
-    fn valid_ranges_fsm(outboard: impl crate::io::tokio::Outboard, data: Bytes) -> ChunkRanges {
+    fn valid_ranges_fsm(outboard: impl crate::io::fsm::Outboard, data: Bytes) -> ChunkRanges {
         run_blocking(async move {
             let ranges = ChunkRanges::all();
-            let mut stream = crate::io::tokio::valid_ranges(outboard, data, &ranges);
+            let mut stream = crate::io::fsm::valid_ranges(outboard, data, &ranges);
             let mut res = ChunkRanges::empty();
             while let Some(item) = stream.next().await {
                 let item = item?;
@@ -282,7 +280,7 @@ mod validate {
     fn valid_outboard_ranges_fsm(outboard: &mut PostOrderMemOutboard) -> ChunkRanges {
         run_blocking(async move {
             let ranges = ChunkRanges::all();
-            let mut stream = crate::io::tokio::valid_outboard_ranges(outboard, &ranges);
+            let mut stream = crate::io::fsm::valid_outboard_ranges(outboard, &ranges);
             let mut res = ChunkRanges::empty();
             while let Some(item) = stream.next().await {
                 let item = item?;
@@ -506,7 +504,7 @@ async fn encode_decode_full_fsm_impl(
     let mut outboard = outboard;
     let ranges = ChunkRanges::all();
     let mut encoded = Vec::new();
-    crate::io::tokio::encode_ranges_validated(
+    crate::io::fsm::encode_ranges_validated(
         Bytes::from(data.clone()),
         &mut outboard,
         &ranges,
@@ -515,7 +513,7 @@ async fn encode_decode_full_fsm_impl(
     .await
     .unwrap();
 
-    let read_encoded = std::io::Cursor::new(encoded);
+    let read_encoded = std::io::Cursor::new(encoded.as_slice());
     let mut ob_res = {
         let tree = BaoTree::new(size, outboard.tree().block_size());
         let root = outboard.root();
@@ -528,7 +526,7 @@ async fn encode_decode_full_fsm_impl(
         }
     };
     let mut decoded = BytesMut::new();
-    crate::io::tokio::decode_ranges(read_encoded, ranges, &mut decoded, &mut ob_res)
+    crate::io::fsm::decode_ranges(read_encoded, ranges, &mut decoded, &mut ob_res)
         .await
         .unwrap();
     ((data, outboard), (decoded.to_vec(), ob_res))
@@ -582,7 +580,7 @@ async fn encode_decode_partial_fsm_impl(
     let size = outboard.tree.size;
     let mut encoded = Vec::new();
     let mut outboard = outboard;
-    crate::io::tokio::encode_ranges_validated(
+    crate::io::fsm::encode_ranges_validated(
         Bytes::from(data.to_vec()),
         &mut outboard,
         &ranges,
@@ -591,8 +589,8 @@ async fn encode_decode_partial_fsm_impl(
     .await
     .unwrap();
     let expected_data = data;
-    let encoded_read = std::io::Cursor::new(encoded);
-    let mut reading = crate::io::tokio::ResponseDecoder::new(
+    let encoded_read = std::io::Cursor::new(encoded.as_slice());
+    let mut reading = crate::io::fsm::ResponseDecoder::new(
         outboard.root,
         ranges,
         BaoTree::new(size, outboard.tree.block_size),

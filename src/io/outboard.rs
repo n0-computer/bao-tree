@@ -35,7 +35,7 @@ impl crate::io::sync::Outboard for EmptyOutboard {
 }
 
 #[cfg(feature = "tokio_fsm")]
-impl crate::io::tokio::Outboard for EmptyOutboard {
+impl crate::io::fsm::Outboard for EmptyOutboard {
     fn root(&self) -> blake3::Hash {
         self.root
     }
@@ -70,7 +70,7 @@ impl crate::io::sync::OutboardMut for EmptyOutboard {
 }
 
 #[cfg(feature = "tokio_fsm")]
-impl crate::io::tokio::OutboardMut for EmptyOutboard {
+impl crate::io::fsm::OutboardMut for EmptyOutboard {
     async fn save(
         &mut self,
         node: TreeNode,
@@ -242,7 +242,7 @@ impl<T: AsRef<[u8]>> crate::io::sync::Outboard for PostOrderMemOutboard<T> {
 }
 
 #[cfg(feature = "tokio_fsm")]
-impl<T: AsRef<[u8]>> crate::io::tokio::Outboard for PostOrderMemOutboard<T> {
+impl<T: AsRef<[u8]>> crate::io::fsm::Outboard for PostOrderMemOutboard<T> {
     fn root(&self) -> blake3::Hash {
         self.root
     }
@@ -277,7 +277,7 @@ impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PostOrderMemOutboard<T> {
 }
 
 #[cfg(feature = "tokio_fsm")]
-impl<T: AsMut<[u8]>> crate::io::tokio::OutboardMut for PostOrderMemOutboard<T> {
+impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PostOrderMemOutboard<T> {
     async fn save(
         &mut self,
         node: TreeNode,
@@ -432,7 +432,7 @@ impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PreOrderMemOutboard<T> {
 }
 
 #[cfg(feature = "tokio_fsm")]
-impl<T: AsRef<[u8]>> crate::io::tokio::Outboard for PreOrderMemOutboard<T> {
+impl<T: AsRef<[u8]>> crate::io::fsm::Outboard for PreOrderMemOutboard<T> {
     fn root(&self) -> blake3::Hash {
         self.root
     }
@@ -445,7 +445,7 @@ impl<T: AsRef<[u8]>> crate::io::tokio::Outboard for PreOrderMemOutboard<T> {
 }
 
 #[cfg(feature = "tokio_fsm")]
-impl<T: AsMut<[u8]>> crate::io::tokio::OutboardMut for PreOrderMemOutboard<T> {
+impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PreOrderMemOutboard<T> {
     async fn save(
         &mut self,
         node: TreeNode,

@@ -21,12 +21,12 @@ bytes = { version = "1" }
 tokio = { version = "1", features = ["io-util", "rt"], optional = true }
 futures-lite = { version = "2.3", optional = true }
 self_cell = { version = "1" }
-iroh-io = { version = "0.5.0", features = ["tokio-io"], default_features = false, optional = true }
+iroh-io = { path = "../iroh-io", version = "0.5.0", features = ["tokio-io"], default_features = false, optional = true }
 positioned-io = { version = "0.3.1", default_features = false }
 genawaiter = { version = "0.99.1", features = ["futures03"], optional = true }
 
 [features]
-tokio_fsm = ["dep:tokio", "dep:futures-lite", "dep:iroh-io"]
+tokio_fsm = ["dep:futures-lite", "dep:iroh-io"]
 validate = ["dep:genawaiter"]
 default = ["tokio_fsm", "validate"]
 

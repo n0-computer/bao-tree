@@ -129,7 +129,7 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
 mod fsm_tests {
 
     use super::*;
-    use crate::{io::tokio::*, rec::make_test_data};
+    use crate::{io::fsm::*, rec::make_test_data};
 
     /// range is a range of chunks. Just using u64 for convenience in tests
     async fn bao_tree_decode_slice_fsm_impl(data: Vec<u8>, range: Range<u64>) {
@@ -138,7 +138,7 @@ mod fsm_tests {
         let (encoded, root) = encode_slice_bao(&data, range.clone());
         let expected = data;
         let ranges = ChunkRanges::from(range);
-        let encoded = Cursor::new(encoded);
+        let encoded = Cursor::new(encoded.as_slice());
         let mut reading = ResponseDecoder::new(root, ranges, tree, encoded);
         while let ResponseDecoderNext::More((next_state, item)) = reading.next().await {
             if let BaoContentItem::Leaf(Leaf { offset, data }) = item.unwrap() {
@@ -983,7 +983,7 @@ proptest! {
         let mut expected_encoded = Vec::new();
         let outboard = PostOrderMemOutboard::create(&data, block_size);
         let data: Bytes = data.into();
-        tokio::runtime::Runtime::new().unwrap().block_on(crate::io::tokio::encode_ranges_validated(
+        tokio::runtime::Runtime::new().unwrap().block_on(crate::io::fsm::encode_ranges_validated(
             data,
             outboard,
             &ranges,

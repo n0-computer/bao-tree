@@ -211,12 +211,12 @@ mod sync {
         block_size: BlockSize,
         v: bool,
     ) -> io::Result<()> {
-        let mut reader = Cursor::new(&msg.encoded);
+        let mut reader = Cursor::new(msg.encoded.as_slice());
         let mut size = [0; 8];
         reader.read_exact(&mut size)?;
         let size = u64::from_le_bytes(size);
         let tree = BaoTree::new(size, block_size);
-        let iter = DecodeResponseIter::new(msg.hash, tree, Cursor::new(&msg.encoded), &msg.ranges);
+        let iter = DecodeResponseIter::new(msg.hash, tree, reader, &msg.ranges);
         let mut indent = 0;
         target.set_len(size)?;
         for response in iter {
@@ -344,7 +344,7 @@ mod sync {
 mod fsm {
     use bao_tree::{
         io::{
-            tokio::{encode_ranges_validated, Outboard, ResponseDecoder, ResponseDecoderNext},
+            fsm::{encode_ranges_validated, Outboard, ResponseDecoder, ResponseDecoderNext},
             BaoContentItem,
         },
         BaoTree,
@@ -375,7 +375,7 @@ mod fsm {
         block_size: BlockSize,
         v: bool,
     ) -> io::Result<()> {
-        let mut encoded = Cursor::new(&msg.encoded);
+        let mut encoded = Cursor::new(msg.encoded.as_slice());
         let size = encoded.read_u64_le().await?;
         let mut reading = ResponseDecoder::new(
             msg.hash,
@@ -418,13 +418,13 @@ mod fsm {
     }
 
     async fn decode_to_stdout(msg: Message, block_size: BlockSize, v: bool) -> io::Result<()> {
-        let mut encoded = Cursor::new(&msg.encoded);
+        let mut encoded = Cursor::new(msg.encoded.as_slice());
         let size = encoded.read_u64_le().await?;
         let mut reading = ResponseDecoder::new(
             msg.hash,
             msg.ranges,
             BaoTree::new(size, block_size),
-            Cursor::new(&msg.encoded),
+            encoded,
         );
         log!(v, "got header claiming a size of {}", size);
         let mut indent = 0;
