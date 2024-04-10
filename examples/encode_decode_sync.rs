@@ -35,7 +35,7 @@ fn main() -> io::Result<()> {
         root,
         data: vec![],
     };
-    decode_ranges(&ranges, from_server, &mut decoded, &mut ob)?;
+    decode_ranges(from_server, &ranges, &mut decoded, &mut ob)?;
 
     // the first 100000 bytes of the file should now be in `decoded`
     // in addition, the required part of the tree to validate that the data is

@@ -93,9 +93,9 @@ pub trait CreateOutboard {
     /// tree and only init the data and set the root hash.
     ///
     /// So this can be used to initialize an outboard that does not have a default,
-    /// such as a file based one. It also does not require [Seek] on the data.
+    /// such as a file based one.
     ///
-    /// It will however only include data up the the current tree size.
+    /// It will only include data up the the current tree size.
     fn init_from(&mut self, data: impl Read) -> io::Result<()>;
 }
 
@@ -387,8 +387,6 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     let mut encoded = encoded;
     let tree = outboard.tree();
     let mut buffer = vec![0u8; tree.chunk_group_bytes()];
-    // write header
-    encoded.write_all(tree.size.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
@@ -431,8 +429,6 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
     let mut out_buf = Vec::new();
     // canonicalize ranges
     let ranges = truncate_ranges(ranges, tree.size());
-    // write header
-    encoded.write_all(tree.size.to_le_bytes().as_slice())?;
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent {
@@ -504,8 +500,8 @@ pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
 /// If you do not want to update an outboard, use [super::outboard::EmptyOutboard] as
 /// the outboard.
 pub fn decode_ranges<R, O, W>(
-    ranges: &ChunkRangesRef,
     encoded: R,
+    ranges: &ChunkRangesRef,
     mut target: W,
     mut outboard: O,
 ) -> std::result::Result<(), DecodeError>

@@ -12,7 +12,6 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use std::ops::Range;
 use test_strategy::proptest;
-use tokio::io::AsyncReadExt;
 
 use crate::io::outboard::PreOrderMemOutboard;
 use crate::io::BaoContentItem;
@@ -28,13 +27,6 @@ use crate::{
     rec::{encode_selected_rec, select_nodes_rec},
     BaoTree, BlockSize, ChunkNum, TreeNode,
 };
-
-fn read_len(mut from: impl std::io::Read) -> std::io::Result<u64> {
-    let mut buf = [0; 8];
-    from.read_exact(&mut buf)?;
-    let len = u64::from_le_bytes(buf);
-    Ok(len)
-}
 
 #[cfg(feature = "validate")]
 use futures_lite::StreamExt;
@@ -482,11 +474,11 @@ fn encode_decode_full_sync_impl(
     (Vec<u8>, PostOrderMemOutboard),
 ) {
     let ranges = ChunkRanges::all();
+    let size = outboard.tree.size;
     let mut encoded = Vec::new();
     crate::io::sync::encode_ranges_validated(data, &outboard, &ChunkRanges::all(), &mut encoded)
         .unwrap();
-    let mut encoded_read = std::io::Cursor::new(encoded);
-    let size = read_len(&mut encoded_read).unwrap();
+    let encoded_read = std::io::Cursor::new(encoded);
     let tree = BaoTree::new(size, outboard.tree().block_size());
     let mut decoded = Vec::new();
     let mut ob_res = PostOrderMemOutboard {
@@ -494,7 +486,7 @@ fn encode_decode_full_sync_impl(
         tree,
         data: vec![0; tree.outboard_size().try_into().unwrap()],
     };
-    crate::io::sync::decode_ranges(&ranges, encoded_read, &mut decoded, &mut ob_res).unwrap();
+    crate::io::sync::decode_ranges(encoded_read, &ranges, &mut decoded, &mut ob_res).unwrap();
     ((decoded, ob_res), (data.to_vec(), outboard))
 }
 
@@ -508,6 +500,7 @@ async fn encode_decode_full_fsm_impl(
     (Vec<u8>, PostOrderMemOutboard),
     (Vec<u8>, PostOrderMemOutboard),
 ) {
+    let size = outboard.tree.size;
     let mut outboard = outboard;
     let ranges = ChunkRanges::all();
     let mut encoded = Vec::new();
@@ -520,8 +513,7 @@ async fn encode_decode_full_fsm_impl(
     .await
     .unwrap();
 
-    let mut read_encoded = std::io::Cursor::new(encoded);
-    let size = read_encoded.read_u64_le().await.unwrap();
+    let read_encoded = std::io::Cursor::new(encoded.as_slice());
     let mut ob_res = {
         let tree = BaoTree::new(size, outboard.tree().block_size());
         let root = outboard.root();
@@ -546,10 +538,10 @@ fn encode_decode_partial_sync_impl(
     ranges: &ChunkRangesRef,
 ) -> bool {
     let mut encoded = Vec::new();
+    let size = outboard.tree.size;
     crate::io::sync::encode_ranges_validated(data, &outboard, ranges, &mut encoded).unwrap();
     let expected_data = data;
-    let mut encoded_read = std::io::Cursor::new(encoded);
-    let size = read_len(&mut encoded_read).unwrap();
+    let encoded_read = std::io::Cursor::new(encoded);
     let tree = BaoTree::new(size, outboard.tree.block_size);
     let iter = crate::io::sync::DecodeResponseIter::new(outboard.root, tree, encoded_read, ranges);
     for item in iter {
@@ -585,6 +577,7 @@ async fn encode_decode_partial_fsm_impl(
     outboard: PostOrderMemOutboard,
     ranges: ChunkRanges,
 ) -> bool {
+    let size = outboard.tree.size;
     let mut encoded = Vec::new();
     let mut outboard = outboard;
     crate::io::fsm::encode_ranges_validated(
@@ -596,8 +589,7 @@ async fn encode_decode_partial_fsm_impl(
     .await
     .unwrap();
     let expected_data = data;
-    let mut encoded_read = std::io::Cursor::new(encoded);
-    let size = encoded_read.read_u64_le().await.unwrap();
+    let encoded_read = std::io::Cursor::new(encoded.as_slice());
     let mut reading = crate::io::fsm::ResponseDecoder::new(
         outboard.root,
         ranges,
