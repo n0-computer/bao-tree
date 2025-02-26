@@ -7,6 +7,7 @@ use std::{
     result,
 };
 
+pub use crate::rec::truncate_ranges;
 use crate::{
     blake3,
     io::{
@@ -15,7 +16,7 @@ use crate::{
         Leaf, Parent,
     },
     iter::BaoChunk,
-    rec::{encode_selected_rec, truncate_ranges},
+    rec::encode_selected_rec,
     BaoTree, BlockSize, ChunkRangesRef, TreeNode,
 };
 use blake3::guts::parent_cv;
@@ -414,12 +415,15 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
+pub fn encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError> {
+    if ranges.is_empty() {
+        return Ok(());
+    }
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
     let data = data;

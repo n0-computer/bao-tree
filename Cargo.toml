@@ -23,6 +23,7 @@ self_cell = { version = "1" }
 iroh-io = { version = "0.6.0", default_features = false, optional = true }
 positioned-io = { version = "0.3.1", default_features = false }
 genawaiter = { version = "0.99.1", features = ["futures03"], optional = true }
+tokio = "1"
 
 [features]
 tokio_fsm = ["dep:futures-lite", "dep:iroh-io"]

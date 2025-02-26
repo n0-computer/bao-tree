@@ -11,6 +11,7 @@ use std::future::Future;
 
 #[cfg(feature = "tokio_fsm")]
 pub mod fsm;
+pub mod mixed;
 pub mod outboard;
 pub mod sync;
 
@@ -53,6 +54,19 @@ impl From<Parent> for BaoContentItem {
 impl From<Leaf> for BaoContentItem {
     fn from(l: Leaf) -> Self {
         Self::Leaf(l)
+    }
+}
+
+impl BaoContentItem {
+
+    /// True if this is a leaf node.
+    pub fn is_leaf(&self) -> bool {
+        matches!(self, BaoContentItem::Leaf(_))
+    }
+
+    /// True if this is a parent node.
+    pub fn is_parent(&self) -> bool {
+        matches!(self, BaoContentItem::Parent(_))
     }
 }
 
