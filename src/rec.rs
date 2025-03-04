@@ -436,6 +436,7 @@ mod test_support {
         (res, hash)
     }
 
+    /// Check that l and r of a 2-tuple are equal
     #[macro_export]
     macro_rules! assert_tuple_eq {
         ($tuple:expr) => {
@@ -443,6 +444,7 @@ mod test_support {
         };
     }
 
+    /// Check that l and r of a 2-tuple are equal
     #[macro_export]
     macro_rules! prop_assert_tuple_eq {
         ($tuple:expr) => {

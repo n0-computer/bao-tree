@@ -91,7 +91,7 @@ impl ChunkNum {
         let mask = (1 << block_size.0) - 1;
         let part = ((end.0 & mask) != 0) as u64;
         let whole = end.0 >> block_size.0;
-        ChunkNum(whole + part)
+        ChunkNum((whole + part) << block_size.0)
     }
 
     /// number of chunks that this number of bytes covers

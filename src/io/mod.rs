@@ -171,6 +171,10 @@ mod tests {
         let bs = BlockSize(4);
         assert_eq!(ChunkNum::chunk_group_start(ChunkNum(0), bs), ChunkNum(0));
         assert_eq!(ChunkNum::chunk_group_start(ChunkNum(1), bs), ChunkNum(0));
-        assert_eq!(ChunkNum::chunk_group_start(ChunkNum(16), bs), ChunkNum(1));
+        assert_eq!(ChunkNum::chunk_group_start(ChunkNum(16), bs), ChunkNum(16));
+        assert_eq!(ChunkNum::chunk_group_end(ChunkNum(0), bs), ChunkNum(0));
+        assert_eq!(ChunkNum::chunk_group_end(ChunkNum(1), bs), ChunkNum(16));
+        assert_eq!(ChunkNum::chunk_group_end(ChunkNum(16), bs), ChunkNum(16));
+        assert_eq!(ChunkNum::chunk_group_end(ChunkNum(17), bs), ChunkNum(32));
     }
 }
