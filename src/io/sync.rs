@@ -7,25 +7,24 @@ use std::{
     result,
 };
 
-pub use crate::rec::truncate_ranges;
-use crate::{
-    blake3,
-    io::{
-        error::EncodeError,
-        outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
-        Leaf, Parent,
-    },
-    iter::BaoChunk,
-    rec::encode_selected_rec,
-    BaoTree, BlockSize, ChunkRangesRef, TreeNode,
-};
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
 use smallvec::SmallVec;
 
 use super::{combine_hash_pair, BaoContentItem, DecodeError};
-use crate::{hash_subtree, iter::ResponseIterRef};
+pub use crate::rec::truncate_ranges;
+use crate::{
+    blake3, hash_subtree,
+    io::{
+        error::EncodeError,
+        outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
+        Leaf, Parent,
+    },
+    iter::{BaoChunk, ResponseIterRef},
+    rec::encode_selected_rec,
+    BaoTree, BlockSize, ChunkRangesRef, TreeNode,
+};
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///
@@ -662,12 +661,11 @@ mod validate {
     use genawaiter::sync::{Co, Gen};
     use positioned_io::ReadAt;
 
+    use super::Outboard;
     use crate::{
         blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum,
         ChunkRangesRef, TreeNode,
     };
-
-    use super::Outboard;
 
     /// Given a data file and an outboard, compute all valid ranges.
     ///

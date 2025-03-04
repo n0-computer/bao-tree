@@ -1,16 +1,17 @@
 //! Read from sync, send to tokio sender
-use bytes::Bytes;
-use positioned_io::ReadAt;
-use smallvec::SmallVec;
 use std::result;
 
-use crate::{hash_subtree, iter::BaoChunk, rec::truncate_ranges, ChunkRangesRef};
-use crate::{split_inner, ChunkNum, TreeNode};
-
-use super::{sync::Outboard, EncodeError};
-use super::{Leaf, Parent};
+use bytes::Bytes;
 use iroh_blake3 as blake3;
 use iroh_blake3::guts::parent_cv;
+use positioned_io::ReadAt;
+use smallvec::SmallVec;
+
+use super::{sync::Outboard, EncodeError, Leaf, Parent};
+use crate::{
+    hash_subtree, iter::BaoChunk, rec::truncate_ranges, split_inner, ChunkNum, ChunkRangesRef,
+    TreeNode,
+};
 
 /// A content item for the bao streaming protocol.
 #[derive(Debug)]
@@ -36,6 +37,12 @@ impl From<Leaf> for EncodedItem {
 impl From<Parent> for EncodedItem {
     fn from(p: Parent) -> Self {
         Self::Parent(p)
+    }
+}
+
+impl From<EncodeError> for EncodedItem {
+    fn from(e: EncodeError) -> Self {
+        Self::Error(e)
     }
 }
 

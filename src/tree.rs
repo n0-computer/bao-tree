@@ -80,6 +80,20 @@ impl BlockSize {
 }
 
 impl ChunkNum {
+
+    /// Start (inclusive) of the chunk group that this chunk is in
+    pub const fn chunk_group_start(start: ChunkNum, block_size: BlockSize) -> ChunkNum {
+        ChunkNum((start.0 >> block_size.0) << block_size.0)
+    }
+
+    /// End (exclusive) of the chunk group that this chunk the end for
+    pub const fn chunk_group_end(end: ChunkNum, block_size: BlockSize) -> ChunkNum {
+        let mask = (1 << block_size.0) - 1;
+        let part = ((end.0 & mask) != 0) as u64;
+        let whole = end.0 >> block_size.0;
+        ChunkNum(whole + part)
+    }
+
     /// number of chunks that this number of bytes covers
     ///
     /// E.g. 1024 bytes is 1 chunk, 1025 bytes is 2 chunks

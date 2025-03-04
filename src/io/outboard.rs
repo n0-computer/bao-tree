@@ -3,8 +3,9 @@
 //! A number of implementations for the sync and async outboard traits are provided.
 //! Implementations for in-memory outboards, for outboards where the data resides on disk,
 //! and a special implementation [EmptyOutboard] that just ignores all writes.
-use crate::{blake3, BaoTree, BlockSize, TreeNode};
 use std::io;
+
+use crate::{blake3, BaoTree, BlockSize, TreeNode};
 
 /// An empty outboard, that just returns 0 hashes for all nodes.
 ///

@@ -1,13 +1,15 @@
 //! Implementation of bao streaming for std io and tokio io
 use std::pin::Pin;
 
-use crate::{blake3, BlockSize, ChunkNum, ChunkRanges, TreeNode};
 use bytes::Bytes;
 
+use crate::{blake3, BlockSize, ChunkNum, ChunkRanges, TreeNode};
+
 mod error;
+use std::future::Future;
+
 pub use error::*;
 use range_collections::{range_set::RangeSetRange, RangeSetRef};
-use std::future::Future;
 
 #[cfg(feature = "tokio_fsm")]
 pub mod fsm;
@@ -25,12 +27,20 @@ pub struct Parent {
 }
 
 /// A leaf node.
-#[derive(Debug)]
 pub struct Leaf {
     /// The byte offset of the leaf in the file.
     pub offset: u64,
     /// The data of the leaf.
     pub data: Bytes,
+}
+
+impl std::fmt::Debug for Leaf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Leaf")
+            .field("offset", &self.offset)
+            .field("data", &self.data.len())
+            .finish()
+    }
 }
 
 /// A content item for the bao streaming protocol.
@@ -58,7 +68,6 @@ impl From<Leaf> for BaoContentItem {
 }
 
 impl BaoContentItem {
-
     /// True if this is a leaf node.
     pub fn is_leaf(&self) -> bool {
         matches!(self, BaoContentItem::Leaf(_))
@@ -86,6 +95,25 @@ pub fn round_up_to_chunks(ranges: &RangeSetRef<u64>) -> ChunkRanges {
                 res |= ChunkRanges::from(
                     ChunkNum::full_chunks(*range.start)..ChunkNum::chunks(*range.end),
                 )
+            }
+        }
+    }
+    res
+}
+
+/// Given a range set of chunk ranges, round up to chunk groups of the given size.
+pub fn round_up_to_chunks_groups(ranges: ChunkRanges, chunk_size: BlockSize) -> ChunkRanges {
+    let mut res = ChunkRanges::empty();
+    for range in ranges.iter() {
+        res |= match range {
+            RangeSetRange::RangeFrom(range) => {
+                let start = ChunkNum::chunk_group_start(*range.start, chunk_size);
+                ChunkRanges::from(start..)
+            }
+            RangeSetRange::Range(range) => {
+                let start = ChunkNum::chunk_group_start(*range.start, chunk_size);
+                let end = ChunkNum::chunk_group_end(*range.end, chunk_size);
+                ChunkRanges::from(start..end)
             }
         }
     }
@@ -133,3 +161,16 @@ pub(crate) fn combine_hash_pair(l: &blake3::Hash, r: &blake3::Hash) -> [u8; 64] 
 }
 
 pub(crate) type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+#[cfg(test)]
+mod tests {
+    use crate::{BlockSize, ChunkNum};
+
+    #[test]
+    fn test_chunk_group_start() {
+        let bs = BlockSize(4);
+        assert_eq!(ChunkNum::chunk_group_start(ChunkNum(0), bs), ChunkNum(0));
+        assert_eq!(ChunkNum::chunk_group_start(ChunkNum(1), bs), ChunkNum(0));
+        assert_eq!(ChunkNum::chunk_group_start(ChunkNum(16), bs), ChunkNum(1));
+    }
+}

@@ -14,30 +14,25 @@ use std::{
     result,
 };
 
-use crate::{
-    blake3, hash_subtree,
-    iter::ResponseIter,
-    rec::{encode_selected_rec, truncate_ranges, truncate_ranges_owned},
-    ChunkRanges, ChunkRangesRef,
-};
 use blake3::guts::parent_cv;
 use bytes::Bytes;
+pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 use iroh_io::{AsyncStreamReader, AsyncStreamWriter};
 use smallvec::SmallVec;
 
 pub use super::BaoContentItem;
+use super::{combine_hash_pair, DecodeError};
 use crate::{
+    blake3, hash_subtree,
     io::{
         error::EncodeError,
         outboard::{PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
-    iter::BaoChunk,
-    BaoTree, BlockSize, TreeNode,
+    iter::{BaoChunk, ResponseIter},
+    rec::{encode_selected_rec, truncate_ranges, truncate_ranges_owned},
+    BaoTree, BlockSize, ChunkRanges, ChunkRangesRef, TreeNode,
 };
-pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
-
-use super::{combine_hash_pair, DecodeError};
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///
@@ -760,12 +755,11 @@ mod validate {
     use genawaiter::sync::{Co, Gen};
     use iroh_io::AsyncSliceReader;
 
+    use super::Outboard;
     use crate::{
         blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum,
         ChunkRangesRef, TreeNode,
     };
-
-    use super::Outboard;
 
     /// Given a data file and an outboard, compute all valid ranges.
     ///
