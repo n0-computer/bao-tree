@@ -327,7 +327,6 @@ pub enum BaoChunk<R = ()> {
 }
 
 impl<T> BaoChunk<T> {
-
     /// Produce a nice debug string for the chunk
     #[cfg(test)]
     pub fn to_debug_string(&self, max_level: usize) -> String {

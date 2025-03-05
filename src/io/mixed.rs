@@ -4,7 +4,6 @@ use std::result;
 use bytes::Bytes;
 use iroh_blake3 as blake3;
 use iroh_blake3::guts::parent_cv;
-use positioned_io::ReadAt;
 use smallvec::SmallVec;
 
 use super::{sync::Outboard, EncodeError, Leaf, Parent};
@@ -53,7 +52,7 @@ impl From<EncodeError> for EncodedItem {
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-pub async fn traverse_ranges_validated<D: ReadAt, O: Outboard>(
+pub async fn traverse_ranges_validated<D: ReadBytesAt, O: Outboard>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
@@ -77,7 +76,7 @@ pub async fn traverse_ranges_validated<D: ReadAt, O: Outboard>(
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-async fn traverse_ranges_validated_impl<D: ReadAt, O: Outboard>(
+async fn traverse_ranges_validated_impl<D: ReadBytesAt, O: Outboard>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
@@ -133,9 +132,7 @@ async fn traverse_ranges_validated_impl<D: ReadAt, O: Outboard>(
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
-                let mut buffer = vec![0u8; size as usize];
-                data.read_exact_at(start, &mut buffer)?;
-                let buffer = buffer.into();
+                let buffer = data.read_bytes_at(start, size as usize)?;
                 if !ranges.is_all() {
                     // we need to encode just a part of the data
                     //
@@ -321,4 +318,59 @@ mod tests {
         let encoded2 = flatten(res);
         assert_eq!(encoded, encoded2);
     }
+}
+
+/// Trait identical to `ReadAt` but returning `Bytes` instead of reading into a buffer.
+///
+/// This forwards to the underlying `ReadAt` implementation except for `Bytes`
+pub trait ReadBytesAt {
+    /// Version of `ReadAt::read_exact_at` that returns a `Bytes` instead of reading into a buffer.
+    fn read_bytes_at(&self, offset: u64, size: usize) -> std::io::Result<Bytes>;
+}
+
+mod impls {
+    use std::io;
+
+    use bytes::Bytes;
+
+    use super::ReadBytesAt;
+
+    // Macro for generic implementations (allocating with copy_from_slice)
+    macro_rules! impl_read_bytes_at_generic {
+    ($($t:ty),*) => {
+        $(
+            impl ReadBytesAt for $t {
+                fn read_bytes_at(&self, offset: u64, size: usize) -> io::Result<Bytes> {
+                    let mut buf = vec![0; size];
+                    ::positioned_io::ReadAt::read_exact_at(self, offset, &mut buf)?;
+                    Ok(buf.into())
+                }
+            }
+        )*
+    };
+}
+
+    // Macro for special implementations (non-allocating with slice)
+    macro_rules! impl_read_bytes_at_special {
+    ($($t:ty),*) => {
+        $(
+            impl ReadBytesAt for $t {
+                fn read_bytes_at(&self, offset: u64, size: usize) -> io::Result<Bytes> {
+                    let offset = offset as usize;
+                    if offset + size > self.len() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "Read past end of buffer",
+                        ));
+                    }
+                    Ok(self.slice(offset..offset + size))
+                }
+            }
+        )*
+    };
+}
+
+    // Apply the macros
+    impl_read_bytes_at_generic!(&[u8], Vec<u8>, std::fs::File);
+    impl_read_bytes_at_special!(Bytes, &Bytes);
 }

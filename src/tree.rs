@@ -80,7 +80,6 @@ impl BlockSize {
 }
 
 impl ChunkNum {
-
     /// Start (inclusive) of the chunk group that this chunk is in
     pub const fn chunk_group_start(start: ChunkNum, block_size: BlockSize) -> ChunkNum {
         ChunkNum((start.0 >> block_size.0) << block_size.0)
