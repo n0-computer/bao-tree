@@ -317,7 +317,7 @@ mod tests {
 
 /// Trait identical to `ReadAt` but returning `Bytes` instead of reading into a buffer.
 ///
-/// This forwards to the underlying `ReadAt` implementation except for `Bytes`
+/// This forwards to the underlying `ReadAt` implementation except for `Bytes`, `&Bytes`, `&mut Bytes`.
 pub trait ReadBytesAt {
     /// Version of `ReadAt::read_exact_at` that returns a `Bytes` instead of reading into a buffer.
     fn read_bytes_at(&self, offset: u64, size: usize) -> std::io::Result<Bytes>;
@@ -367,5 +367,5 @@ mod impls {
 
     // Apply the macros
     impl_read_bytes_at_generic!(&[u8], Vec<u8>, std::fs::File);
-    impl_read_bytes_at_special!(Bytes, &Bytes);
+    impl_read_bytes_at_special!(Bytes, &Bytes, &mut Bytes);
 }
