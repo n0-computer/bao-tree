@@ -20,13 +20,15 @@ smallvec = "1"
 bytes = { version = "1" }
 futures-lite = { version = "2.3", optional = true }
 self_cell = { version = "1" }
-iroh-io = { version = "0.6.0", default_features = false, optional = true }
-positioned-io = { version = "0.3.1", default_features = false }
+iroh-io = { version = "0.6.0", default-features = false, optional = true }
+positioned-io = { version = "0.3.1", default-features = false }
 genawaiter = { version = "0.99.1", features = ["futures03"], optional = true }
+tokio = { version = "1", features = ["sync"], default-features = false, optional = true }
 
 [features]
 tokio_fsm = ["dep:futures-lite", "dep:iroh-io"]
 validate = ["dep:genawaiter"]
+experimental-mixed = ["dep:tokio"]
 default = ["tokio_fsm", "validate"]
 
 [dev-dependencies]

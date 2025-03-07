@@ -8,6 +8,16 @@ use bytes::Bytes;
 use proptest::prelude::*;
 use range_collections::RangeSet2;
 
+use super::{
+    io::{
+        outboard::PostOrderMemOutboard,
+        sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
+    },
+    iter::{BaoChunk, NodeInfo},
+    pre_order_offset_loop,
+    tree::ChunkNum,
+    BaoTree, BlockSize, TreeNode,
+};
 use crate::{
     assert_tuple_eq, blake3,
     io::{full_chunk_groups, outboard::PreOrderMemOutboard, sync::Outboard, BaoContentItem, Leaf},
@@ -18,15 +28,6 @@ use crate::{
         ReferencePreOrderPartialChunkIterRef,
     },
     recursive_hash_subtree, split, ChunkRanges, ChunkRangesRef, ResponseIter,
-};
-
-use super::{
-    io::outboard::PostOrderMemOutboard,
-    io::sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter},
-    iter::{BaoChunk, NodeInfo},
-    pre_order_offset_loop,
-    tree::ChunkNum,
-    BaoTree, BlockSize, TreeNode,
 };
 
 /// Compute the blake3 hash for the given data,

@@ -74,6 +74,8 @@
 //! ## Simple end to end example
 //!
 //! ```no_run
+//! use std::io;
+//!
 //! use bao_tree::{
 //!     io::{
 //!         outboard::PreOrderOutboard,
@@ -82,7 +84,6 @@
 //!     },
 //!     BlockSize, ByteRanges, ChunkRanges,
 //! };
-//! use std::io;
 //!
 //! /// Use a block size of 16 KiB, a good default for most cases
 //! const BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(4);
@@ -135,23 +136,24 @@
 //! We use [futures_lite] crate, but using the normal futures crate will also work.
 //!
 //! ```no_run
+//! use std::io;
+//!
 //! use bao_tree::{
 //!     io::{
+//!         fsm::{decode_ranges, encode_ranges_validated, valid_ranges, CreateOutboard},
 //!         outboard::PreOrderOutboard,
 //!         round_up_to_chunks,
-//!         fsm::{decode_ranges, encode_ranges_validated, valid_ranges, CreateOutboard},
 //!     },
 //!     BlockSize, ByteRanges, ChunkRanges,
 //! };
 //! use bytes::BytesMut;
 //! use futures_lite::StreamExt;
-//! use std::io;
 //!
 //! /// Use a block size of 16 KiB, a good default for most cases
 //! const BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(4);
 //!
-//!# #[tokio::main]
-//!# async fn main() -> io::Result<()> {
+//! # #[tokio::main]
+//! # async fn main() -> io::Result<()> {
 //! // The file we want to serve
 //! let mut file = iroh_io::File::open("video.mp4".into()).await?;
 //! // Create an outboard for the file, using the current size
@@ -187,8 +189,8 @@
 //! while let Some(range) = stream.next().await {
 //!     println!("{:?}", range);
 //! }
-//!# Ok(())
-//!# }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Compatibility with the [bao crate](https://crates.io/crates/bao)
@@ -200,11 +202,12 @@
 //! - use a little endian u64 as the prefix for the encoded data
 //! - use only a single range
 #![deny(missing_docs)]
-use range_collections::RangeSetRef;
 use std::{
     fmt::{self, Debug},
     ops::Range,
 };
+
+use range_collections::RangeSetRef;
 #[macro_use]
 mod macros;
 pub mod iter;

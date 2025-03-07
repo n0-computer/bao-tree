@@ -1,7 +1,8 @@
+use std::{io::Write, path::PathBuf};
+
 use anyhow::Context;
 use bao_tree::{BaoTree, BlockSize};
 use clap::{Parser, Subcommand};
-use std::{io::Write, path::PathBuf};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(version)]

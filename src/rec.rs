@@ -165,8 +165,6 @@ pub(crate) fn encode_selected_rec(
 
 #[cfg(test)]
 mod test_support {
-    use crate::blake3;
-
     #[cfg(feature = "tokio_fsm")]
     use {
         crate::{split_inner, TreeNode},
@@ -174,9 +172,8 @@ mod test_support {
         std::ops::Range,
     };
 
-    use crate::{BaoChunk, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef};
-
     use super::{encode_selected_rec, truncate_ranges};
+    use crate::{blake3, BaoChunk, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef};
 
     /// Select nodes relevant to a query
     ///
@@ -439,6 +436,7 @@ mod test_support {
         (res, hash)
     }
 
+    /// Check that l and r of a 2-tuple are equal
     #[macro_export]
     macro_rules! assert_tuple_eq {
         ($tuple:expr) => {
@@ -446,6 +444,7 @@ mod test_support {
         };
     }
 
+    /// Check that l and r of a 2-tuple are equal
     #[macro_export]
     macro_rules! prop_assert_tuple_eq {
         ($tuple:expr) => {
@@ -466,13 +465,14 @@ mod tests {
         ops::Range,
     };
 
+    use proptest::prelude::*;
+
     use crate::{
         rec::{
             bao_encode_reference, bao_outboard_reference, encode_ranges_reference, make_test_data,
         },
         BlockSize, ChunkNum, ChunkRanges,
     };
-    use proptest::prelude::*;
 
     fn size_and_slice() -> impl Strategy<Value = (usize, Range<usize>)> {
         (1..100000usize)

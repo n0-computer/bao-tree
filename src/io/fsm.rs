@@ -14,30 +14,25 @@ use std::{
     result,
 };
 
-use crate::{
-    blake3, hash_subtree,
-    iter::ResponseIter,
-    rec::{encode_selected_rec, truncate_ranges, truncate_ranges_owned},
-    ChunkRanges, ChunkRangesRef,
-};
 use blake3::guts::parent_cv;
 use bytes::Bytes;
+pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 use iroh_io::{AsyncStreamReader, AsyncStreamWriter};
 use smallvec::SmallVec;
 
 pub use super::BaoContentItem;
+use super::{combine_hash_pair, DecodeError};
 use crate::{
+    blake3, hash_subtree,
     io::{
         error::EncodeError,
         outboard::{PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
-    iter::BaoChunk,
-    BaoTree, BlockSize, TreeNode,
+    iter::{BaoChunk, ResponseIter},
+    rec::{encode_selected_rec, truncate_ranges, truncate_ranges_owned},
+    BaoTree, BlockSize, ChunkRanges, ChunkRangesRef, TreeNode,
 };
-pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
-
-use super::{combine_hash_pair, DecodeError};
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///
@@ -136,7 +131,7 @@ pub trait CreateOutboard {
     fn init_from(&mut self, data: impl AsyncStreamReader) -> impl Future<Output = io::Result<()>>;
 }
 
-impl<'b, O: Outboard> Outboard for &'b mut O {
+impl<O: Outboard> Outboard for &mut O {
     fn root(&self) -> blake3::Hash {
         (**self).root()
     }
@@ -173,7 +168,7 @@ impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
     }
 }
 
-impl<'b, O: OutboardMut> OutboardMut for &'b mut O {
+impl<O: OutboardMut> OutboardMut for &mut O {
     async fn save(
         &mut self,
         node: TreeNode,
@@ -760,12 +755,11 @@ mod validate {
     use genawaiter::sync::{Co, Gen};
     use iroh_io::AsyncSliceReader;
 
+    use super::Outboard;
     use crate::{
         blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum,
         ChunkRangesRef, TreeNode,
     };
-
-    use super::Outboard;
 
     /// Given a data file and an outboard, compute all valid ranges.
     ///
@@ -797,7 +791,7 @@ mod validate {
         co: &'a Co<io::Result<Range<ChunkNum>>>,
     }
 
-    impl<'a, O: Outboard, D: AsyncSliceReader> RecursiveDataValidator<'a, O, D> {
+    impl<O: Outboard, D: AsyncSliceReader> RecursiveDataValidator<'_, O, D> {
         async fn validate(
             outboard: O,
             data: D,
@@ -923,7 +917,7 @@ mod validate {
         co: &'a Co<io::Result<Range<ChunkNum>>>,
     }
 
-    impl<'a, O: Outboard> RecursiveOutboardValidator<'a, O> {
+    impl<O: Outboard> RecursiveOutboardValidator<'_, O> {
         async fn validate(
             outboard: O,
             ranges: &ChunkRangesRef,

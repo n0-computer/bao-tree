@@ -1,3 +1,5 @@
+use std::io;
+
 use bao_tree::{
     io::{
         outboard::PreOrderOutboard,
@@ -6,7 +8,6 @@ use bao_tree::{
     },
     BlockSize, ByteRanges, ChunkRanges,
 };
-use std::io;
 
 /// Use a block size of 16 KiB, a good default for most cases
 const BLOCK_SIZE: BlockSize = BlockSize::from_chunk_log(4);

@@ -7,24 +7,24 @@ use std::{
     result,
 };
 
-use crate::{
-    blake3,
-    io::{
-        error::EncodeError,
-        outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
-        Leaf, Parent,
-    },
-    iter::BaoChunk,
-    rec::{encode_selected_rec, truncate_ranges},
-    BaoTree, BlockSize, ChunkRangesRef, TreeNode,
-};
 use blake3::guts::parent_cv;
 use bytes::BytesMut;
 pub use positioned_io::{ReadAt, Size, WriteAt};
 use smallvec::SmallVec;
 
 use super::{combine_hash_pair, BaoContentItem, DecodeError};
-use crate::{hash_subtree, iter::ResponseIterRef};
+pub use crate::rec::truncate_ranges;
+use crate::{
+    blake3, hash_subtree,
+    io::{
+        error::EncodeError,
+        outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
+        Leaf, Parent,
+    },
+    iter::{BaoChunk, ResponseIterRef},
+    rec::encode_selected_rec,
+    BaoTree, BlockSize, ChunkRangesRef, TreeNode,
+};
 
 /// A binary merkle tree for blake3 hashes of a blob.
 ///
@@ -362,7 +362,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     }
 }
 
-impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
+impl<R: Read> Iterator for DecodeResponseIter<'_, R> {
     type Item = result::Result<BaoContentItem, DecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -414,12 +414,15 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-pub fn encode_ranges_validated<D: ReadAt + Size, O: Outboard, W: Write>(
+pub fn encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError> {
+    if ranges.is_empty() {
+        return Ok(());
+    }
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
     let data = data;
@@ -658,12 +661,11 @@ mod validate {
     use genawaiter::sync::{Co, Gen};
     use positioned_io::ReadAt;
 
+    use super::Outboard;
     use crate::{
         blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum,
         ChunkRangesRef, TreeNode,
     };
-
-    use super::Outboard;
 
     /// Given a data file and an outboard, compute all valid ranges.
     ///
@@ -696,7 +698,7 @@ mod validate {
         co: &'a Co<io::Result<Range<ChunkNum>>>,
     }
 
-    impl<'a, O: Outboard, D: ReadAt> RecursiveDataValidator<'a, O, D> {
+    impl<O: Outboard, D: ReadAt> RecursiveDataValidator<'_, O, D> {
         async fn validate(
             outboard: O,
             data: D,
@@ -824,7 +826,7 @@ mod validate {
         co: &'a Co<io::Result<Range<ChunkNum>>>,
     }
 
-    impl<'a, O: Outboard> RecursiveOutboardValidator<'a, O> {
+    impl<O: Outboard> RecursiveOutboardValidator<'_, O> {
         async fn validate(
             outboard: O,
             ranges: &ChunkRangesRef,

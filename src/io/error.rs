@@ -1,8 +1,9 @@
 //! Errors when encoding or decoding
 //!
 //! These erros contain more specific information about e.g. where a hash mismatch occured
-use crate::{ChunkNum, TreeNode};
 use std::{fmt, io};
+
+use crate::{ChunkNum, TreeNode};
 
 /// Error when decoding from a reader, after the size has been read
 #[derive(Debug)]

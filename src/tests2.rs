@@ -6,30 +6,33 @@
 //! There is a proptest called <testname>_proptest that calls the test multiple times with random data.
 //! There is a test called <testname>_cases that calls the test with a few hardcoded values, either
 //! handcrafted or from a previous failure of a proptest.
+use std::ops::Range;
+
 use bytes::{Bytes, BytesMut};
+#[cfg(feature = "validate")]
+use futures_lite::StreamExt;
 use proptest::prelude::*;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
-use std::ops::Range;
 use test_strategy::proptest;
 
-use crate::io::outboard::PreOrderMemOutboard;
-use crate::io::BaoContentItem;
-use crate::rec::{
-    get_leaf_ranges, make_test_data, partial_chunk_iter_reference, range_union,
-    response_iter_reference, truncate_ranges, ReferencePreOrderPartialChunkIterRef,
-};
-use crate::{assert_tuple_eq, prop_assert_tuple_eq, ChunkRanges, ChunkRangesRef};
 use crate::{
-    blake3, hash_subtree,
-    io::{fsm::ResponseDecoderNext, outboard::PostOrderMemOutboard, sync::Outboard, Leaf, Parent},
+    assert_tuple_eq, blake3, hash_subtree,
+    io::{
+        fsm::ResponseDecoderNext,
+        outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
+        sync::Outboard,
+        BaoContentItem, Leaf, Parent,
+    },
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
-    rec::{encode_selected_rec, select_nodes_rec},
-    BaoTree, BlockSize, ChunkNum, TreeNode,
+    prop_assert_tuple_eq,
+    rec::{
+        encode_selected_rec, get_leaf_ranges, make_test_data, partial_chunk_iter_reference,
+        range_union, response_iter_reference, select_nodes_rec, truncate_ranges,
+        ReferencePreOrderPartialChunkIterRef,
+    },
+    BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, TreeNode,
 };
-
-#[cfg(feature = "validate")]
-use futures_lite::StreamExt;
 
 fn tree() -> impl Strategy<Value = BaoTree> {
     (0u64..100000, 0u8..5).prop_map(|(size, block_size)| {
