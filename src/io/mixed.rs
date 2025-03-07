@@ -160,16 +160,11 @@ async fn traverse_ranges_validated_impl<D: ReadBytesAt, O: Outboard>(
                     if actual != expected {
                         return Err(EncodeError::LeafHashMismatch(start_chunk));
                     }
-                    encoded
-                        .send(
-                            Leaf {
-                                data: buffer,
-                                offset: start_chunk.to_bytes(),
-                            }
-                            .into(),
-                        )
-                        .await
-                        .ok();
+                    let item = Leaf {
+                        data: buffer,
+                        offset: start_chunk.to_bytes(),
+                    };
+                    encoded.send(item.into()).await.ok();
                 };
             }
         }

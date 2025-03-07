@@ -13,6 +13,7 @@ use range_collections::{range_set::RangeSetRange, RangeSetRef};
 
 #[cfg(feature = "tokio_fsm")]
 pub mod fsm;
+#[cfg(feature = "experimental-mixed")]
 pub mod mixed;
 pub mod outboard;
 pub mod sync;
