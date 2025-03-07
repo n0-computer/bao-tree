@@ -23,7 +23,7 @@ pub enum EncodedItem {
     Leaf(Leaf),
     /// an error, will be the last item
     Error(EncodeError),
-    ///
+    /// done, will be the last item
     Done,
 }
 
@@ -132,7 +132,7 @@ async fn traverse_ranges_validated_impl<D: ReadBytesAt, O: Outboard>(
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
-                let buffer = data.read_bytes_at(start, size as usize)?;
+                let buffer = data.read_bytes_at(start, size)?;
                 if !ranges.is_all() {
                     // we need to encode just a part of the data
                     //
@@ -298,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn smoke() {
         let data = [0u8; 100000];
-        let outboard = PreOrderMemOutboard::create(&data, BlockSize::from_chunk_log(4));
+        let outboard = PreOrderMemOutboard::create(data, BlockSize::from_chunk_log(4));
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let mut encoded = Vec::new();
         encode_ranges_validated(&data[..], &outboard, &ChunkRanges::empty(), &mut encoded).unwrap();

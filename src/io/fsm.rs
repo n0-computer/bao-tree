@@ -131,7 +131,7 @@ pub trait CreateOutboard {
     fn init_from(&mut self, data: impl AsyncStreamReader) -> impl Future<Output = io::Result<()>>;
 }
 
-impl<'b, O: Outboard> Outboard for &'b mut O {
+impl<O: Outboard> Outboard for &mut O {
     fn root(&self) -> blake3::Hash {
         (**self).root()
     }
@@ -168,7 +168,7 @@ impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
     }
 }
 
-impl<'b, O: OutboardMut> OutboardMut for &'b mut O {
+impl<O: OutboardMut> OutboardMut for &mut O {
     async fn save(
         &mut self,
         node: TreeNode,
@@ -791,7 +791,7 @@ mod validate {
         co: &'a Co<io::Result<Range<ChunkNum>>>,
     }
 
-    impl<'a, O: Outboard, D: AsyncSliceReader> RecursiveDataValidator<'a, O, D> {
+    impl<O: Outboard, D: AsyncSliceReader> RecursiveDataValidator<'_, O, D> {
         async fn validate(
             outboard: O,
             data: D,
@@ -917,7 +917,7 @@ mod validate {
         co: &'a Co<io::Result<Range<ChunkNum>>>,
     }
 
-    impl<'a, O: Outboard> RecursiveOutboardValidator<'a, O> {
+    impl<O: Outboard> RecursiveOutboardValidator<'_, O> {
         async fn validate(
             outboard: O,
             ranges: &ChunkRangesRef,

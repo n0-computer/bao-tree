@@ -362,7 +362,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     }
 }
 
-impl<'a, R: Read> Iterator for DecodeResponseIter<'a, R> {
+impl<R: Read> Iterator for DecodeResponseIter<'_, R> {
     type Item = result::Result<BaoContentItem, DecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -698,7 +698,7 @@ mod validate {
         co: &'a Co<io::Result<Range<ChunkNum>>>,
     }
 
-    impl<'a, O: Outboard, D: ReadAt> RecursiveDataValidator<'a, O, D> {
+    impl<O: Outboard, D: ReadAt> RecursiveDataValidator<'_, O, D> {
         async fn validate(
             outboard: O,
             data: D,
@@ -826,7 +826,7 @@ mod validate {
         co: &'a Co<io::Result<Range<ChunkNum>>>,
     }
 
-    impl<'a, O: Outboard> RecursiveOutboardValidator<'a, O> {
+    impl<O: Outboard> RecursiveOutboardValidator<'_, O> {
         async fn validate(
             outboard: O,
             ranges: &ChunkRangesRef,

@@ -671,7 +671,7 @@ impl<'a> ResponseIterRef<'a> {
     }
 }
 
-impl<'a> Iterator for ResponseIterRef<'a> {
+impl Iterator for ResponseIterRef<'_> {
     type Item = BaoChunk;
 
     fn next(&mut self) -> Option<Self::Item> {
