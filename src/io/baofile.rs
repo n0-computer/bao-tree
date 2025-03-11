@@ -194,8 +194,10 @@ pub fn traverse_selected_rec(
 
 /// A wrapper around a data reader and an outboard that supports ReadAt.
 pub struct BaoFile<D, O> {
-    data: D,
-    outboard: PreOrderOutboard<O>,
+    /// The data
+    pub data: D,
+    /// The outboard
+    pub outboard: PreOrderOutboard<O>,
 }
 
 impl<D: ReadBytesAt, O: ReadAt> ReadAt for BaoFile<D, O> {
