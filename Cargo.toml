@@ -47,6 +47,7 @@ serde = "1"
 clap = { version = "4", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 anyhow = "1.0.75"
+testresult = "0.4.1"
 
 [[bench]]
 name = "tree_bench"

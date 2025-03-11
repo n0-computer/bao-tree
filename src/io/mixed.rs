@@ -87,7 +87,6 @@ async fn traverse_ranges_validated_impl<D: ReadBytesAt, O: Outboard>(
     }
     let mut stack: SmallVec<[_; 10]> = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
-    let data = data;
     let tree = outboard.tree();
     // canonicalize ranges
     let ranges = truncate_ranges(ranges, tree.size());
