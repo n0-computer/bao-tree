@@ -68,7 +68,6 @@ async fn iter_ranges_validated_impl<'a, D: ReadBytesAt, O: Outboard>(
     }
     let mut stack: SmallVec<[_; 10]> = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
-    let data = data;
     let tree = outboard.tree();
     // canonicalize ranges
     let ranges = truncate_ranges(ranges, tree.size());
@@ -113,14 +112,8 @@ async fn iter_ranges_validated_impl<'a, D: ReadBytesAt, O: Outboard>(
                     //
                     // use a smallvec here?
                     let mut out_buf = Vec::new();
-                    let actual = traverse_selected_rec(
-                        start_chunk,
-                        buffer,
-                        is_root,
-                        ranges,
-                        tree.block_size.to_u32(),
-                        &mut out_buf,
-                    );
+                    let actual =
+                        traverse_selected_rec(start_chunk, buffer, is_root, ranges, &mut out_buf);
                     if actual != expected {
                         return Err(EncodeError::LeafHashMismatch(start_chunk));
                     }
@@ -168,7 +161,6 @@ pub fn traverse_selected_rec(
     data: Bytes,
     is_root: bool,
     query: &ChunkRangesRef,
-    min_level: u32,
     res: &mut Vec<EncodedItem>,
 ) -> blake3::Hash {
     use blake3::guts::{ChunkState, CHUNK_LEN};
@@ -193,22 +185,9 @@ pub fn traverse_selected_rec(
         let mid_chunk = start_chunk + (mid as u64);
         let (l_ranges, r_ranges) = split_inner(query, start_chunk, mid_chunk);
         // recurse to the left and right to compute the hashes and emit data
-        let left = traverse_selected_rec(
-            start_chunk,
-            data.slice(..mid_bytes),
-            false,
-            l_ranges,
-            min_level,
-            res,
-        );
-        let right = traverse_selected_rec(
-            mid_chunk,
-            data.slice(mid_bytes..),
-            false,
-            r_ranges,
-            min_level,
-            res,
-        );
+        let left =
+            traverse_selected_rec(start_chunk, data.slice(..mid_bytes), false, l_ranges, res);
+        let right = traverse_selected_rec(mid_chunk, data.slice(mid_bytes..), false, r_ranges, res);
         parent_cv(&left, &right, is_root)
     }
 }
@@ -462,15 +441,14 @@ mod tests {
         let outboard = PreOrderOutboard {
             tree: outboard.tree,
             root: outboard.root,
-            data: outboard.data.into(),
+            data: outboard.data,
         };
         let file = BaoFile { data, outboard };
-        let file = ReadAtCursor {
+        ReadAtCursor {
             size: file.outboard.tree.size,
             inner: file,
             position: 0,
-        };
-        file
+        }
     }
 
     fn test_file(size: usize) -> ReadAtCursor<BaoFile<Vec<u8>, Vec<u8>>> {
@@ -479,7 +457,7 @@ mod tests {
 
     #[test]
     fn smoke() -> TestResult<()> {
-        for size in [10000] {
+        for size in [10000, 20000] {
             let actual = test_file(size);
             let data = actual.inner.data.clone();
             // let mut expected = tempfile::tempfile()?;
@@ -581,8 +559,8 @@ mod tests {
         // Test 6: Verify position after seek
         file1.seek(SeekFrom::End(0)).unwrap();
         file2.seek(SeekFrom::End(0)).unwrap();
-        let pos1 = file1.seek(SeekFrom::Current(0)).unwrap(); // Get current position
-        let pos2 = file2.seek(SeekFrom::Current(0)).unwrap();
+        let pos1 = file1.stream_position().unwrap(); // Get current position
+        let pos2 = file2.stream_position().unwrap();
         assert_eq!(pos1, size as u64, "Position mismatch at end for file1");
         assert_eq!(pos2, size as u64, "Position mismatch at end for file2");
     }
