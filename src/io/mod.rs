@@ -2,6 +2,7 @@
 use std::pin::Pin;
 
 use bytes::Bytes;
+use serde::{ser::SerializeSeq, Deserialize, Serialize};
 
 use crate::{blake3, BlockSize, ChunkNum, ChunkRanges, TreeNode};
 
@@ -27,7 +28,52 @@ pub struct Parent {
     pub pair: (blake3::Hash, blake3::Hash),
 }
 
+impl Serialize for Parent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let (l, r) = self.pair;
+        let mut seq = serializer.serialize_seq(Some(2))?;
+        seq.serialize_element(&self.node)?;
+        seq.serialize_element(l.as_bytes())?;
+        seq.serialize_element(r.as_bytes())?;
+        seq.end()
+    }
+}
+
+impl<'a> Deserialize<'a> for Parent {
+    fn deserialize<D: serde::Deserializer<'a>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ParentVisitor;
+        impl<'de> serde::de::Visitor<'de> for ParentVisitor {
+            type Value = Parent;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a parent node")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let node = seq.next_element::<TreeNode>()?.ok_or_else(|| {
+                    serde::de::Error::invalid_length(0, &"a parent node with 3 elements")
+                })?;
+                let l = seq.next_element::<[u8; 32]>()?.ok_or_else(|| {
+                    serde::de::Error::invalid_length(1, &"a parent node with 3 elements")
+                })?;
+                let r = seq.next_element::<[u8; 32]>()?.ok_or_else(|| {
+                    serde::de::Error::invalid_length(2, &"a parent node with 3 elements")
+                })?;
+                Ok(Parent {
+                    node,
+                    pair: (blake3::Hash::from(l), blake3::Hash::from(r)),
+                })
+            }
+        }
+        deserializer.deserialize_seq(ParentVisitor)
+    }
+}
+
 /// A leaf node.
+#[derive(Serialize, Deserialize)]
 pub struct Leaf {
     /// The byte offset of the leaf in the file.
     pub offset: u64,
@@ -48,7 +94,7 @@ impl std::fmt::Debug for Leaf {
 ///
 /// After reading the initial header, the only possible items are `Parent` and
 /// `Leaf`.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum BaoContentItem {
     /// a parent node, to update the outboard
     Parent(Parent),
