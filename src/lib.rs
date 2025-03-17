@@ -868,3 +868,45 @@ pub(crate) fn split_inner(
     }
     (a, b)
 }
+
+// Module that handles io::Error serialization/deserialization
+mod io_error_serde {
+    use std::io;
+    use serde::{Serializer, Deserializer};
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    pub fn serialize<S>(error: &io::Error, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize the error kind and message
+        serializer.serialize_str(&format!("{:?}:{}", error.kind(), error))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<io::Error, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IoErrorVisitor;
+
+        impl<'de> Visitor<'de> for IoErrorVisitor {
+            type Value = io::Error;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an io::Error string representation")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                // For simplicity, create a generic error
+                // In a real app, you might want to parse the kind from the string
+                Ok(io::Error::new(io::ErrorKind::Other, value))
+            }
+        }
+
+        deserializer.deserialize_str(IoErrorVisitor)
+    }
+}

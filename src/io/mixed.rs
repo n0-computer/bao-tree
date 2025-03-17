@@ -4,6 +4,7 @@ use std::result;
 use bytes::Bytes;
 use iroh_blake3 as blake3;
 use iroh_blake3::guts::parent_cv;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use super::{sync::Outboard, EncodeError, Leaf, Parent};
@@ -13,7 +14,7 @@ use crate::{
 };
 
 /// A content item for the bao streaming protocol.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum EncodedItem {
     /// total data size, will be the first item
     Size(u64),
