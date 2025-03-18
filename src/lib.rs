@@ -871,10 +871,12 @@ pub(crate) fn split_inner(
 
 // Module that handles io::Error serialization/deserialization
 mod io_error_serde {
-    use std::io;
-    use serde::{Serializer, Deserializer};
-    use serde::de::{self, Visitor};
-    use std::fmt;
+    use std::{fmt, io};
+
+    use serde::{
+        de::{self, Visitor},
+        Deserializer, Serializer,
+    };
 
     pub fn serialize<S>(error: &io::Error, serializer: S) -> Result<S::Ok, S::Error>
     where
