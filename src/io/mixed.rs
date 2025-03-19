@@ -1,5 +1,5 @@
 //! Read from sync, send to tokio sender
-use std::result;
+use std::{future::Future, result};
 
 use bytes::Bytes;
 use iroh_blake3 as blake3;
@@ -46,6 +46,27 @@ impl From<EncodeError> for EncodedItem {
     }
 }
 
+/// Abstract sender trait for sending encoded items
+pub trait Sender {
+    /// Error type
+    type Error;
+    /// Send an item
+    fn send(
+        &mut self,
+        item: EncodedItem,
+    ) -> impl Future<Output = std::result::Result<(), Self::Error>> + '_;
+}
+
+impl Sender for tokio::sync::mpsc::Sender<EncodedItem> {
+    type Error = tokio::sync::mpsc::error::SendError<EncodedItem>;
+    fn send(
+        &mut self,
+        item: EncodedItem,
+    ) -> impl Future<Output = std::result::Result<(), Self::Error>> + '_ {
+        tokio::sync::mpsc::Sender::send(self, item)
+    }
+}
+
 /// Traverse ranges relevant to a query from a reader and outboard to a stream
 ///
 /// This function validates the data before writing.
@@ -53,25 +74,24 @@ impl From<EncodeError> for EncodedItem {
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-pub async fn traverse_ranges_validated<D, O, F, Fut, E>(
+pub async fn traverse_ranges_validated<'a, D, O, F>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
     send: &mut F,
-) -> std::result::Result<(), E>
+) -> std::result::Result<(), F::Error>
 where
     D: ReadBytesAt,
     O: Outboard,
-    F: FnMut(EncodedItem) -> Fut,
-    Fut: std::future::Future<Output = std::result::Result<(), E>>,
+    F: Sender,
 {
-    send(EncodedItem::Size(outboard.tree().size())).await?;
+    send.send(EncodedItem::Size(outboard.tree().size())).await?;
     let res = match traverse_ranges_validated_impl(data, outboard, ranges, send).await {
         Ok(Ok(())) => EncodedItem::Done,
         Err(cause) => EncodedItem::Error(cause),
         Ok(Err(err)) => return Err(err),
     };
-    send(res).await
+    send.send(res).await
 }
 
 /// Encode ranges relevant to a query from a reader and outboard to a writer
@@ -81,17 +101,16 @@ where
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-async fn traverse_ranges_validated_impl<D, O, F, Fut, E>(
+async fn traverse_ranges_validated_impl<D, O, F>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
     send: &mut F,
-) -> result::Result<std::result::Result<(), E>, EncodeError>
+) -> result::Result<std::result::Result<(), F::Error>, EncodeError>
 where
     D: ReadBytesAt,
     O: Outboard,
-    F: FnMut(EncodedItem) -> Fut,
-    Fut: std::future::Future<Output = std::result::Result<(), E>>,
+    F: Sender,
 {
     if ranges.is_empty() {
         return Ok(Ok(()));
@@ -127,7 +146,7 @@ where
                     node,
                     pair: (l_hash, r_hash),
                 };
-                if let Err(e) = send(item.into()).await {
+                if let Err(e) = send.send(item.into()).await {
                     return Ok(Err(e));
                 }
             }
@@ -160,7 +179,7 @@ where
                         return Err(EncodeError::LeafHashMismatch(start_chunk));
                     }
                     for item in out_buf.into_iter() {
-                        if let Err(e) = send(item.into()).await {
+                        if let Err(e) = send.send(item.into()).await {
                             return Ok(Err(e));
                         }
                     }
@@ -174,7 +193,7 @@ where
                         data: buffer,
                         offset: start_chunk.to_bytes(),
                     };
-                    if let Err(e) = send(item.into()).await {
+                    if let Err(e) = send.send(item.into()).await {
                         return Ok(Err(e));
                     }
                 };
@@ -311,12 +330,11 @@ mod tests {
     async fn smoke() {
         let data = [0u8; 100000];
         let outboard = PreOrderMemOutboard::create(data, BlockSize::from_chunk_log(4));
-        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let (mut tx, mut rx) = tokio::sync::mpsc::channel(10);
         let mut encoded = Vec::new();
         encode_ranges_validated(&data[..], &outboard, &ChunkRanges::empty(), &mut encoded).unwrap();
         tokio::spawn(async move {
-            let mut send = |item| async { tx.send(item).await };
-            traverse_ranges_validated(&data[..], &outboard, &ChunkRanges::empty(), &mut send)
+            traverse_ranges_validated(&data[..], &outboard, &ChunkRanges::empty(), &mut tx)
                 .await
                 .unwrap();
         });
