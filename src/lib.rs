@@ -235,7 +235,12 @@ pub type ByteRanges = range_collections::RangeSet2<u64>;
 /// [ChunkRanges] implements [`AsRef<ChunkRangesRef>`].
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
-fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
+/// Quickly hash a subtree
+///
+/// This is a wrapper that passes through to the blake3::guts implementation if the size is a power of 2, and
+/// falls back to a recursive implementation if it is not. There is a bug in the guts implementation that
+/// requires this workaround.
+pub fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     if data.len().is_power_of_two() {
         blake3::guts::hash_subtree(start_chunk, data, is_root)
     } else {
