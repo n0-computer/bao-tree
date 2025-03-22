@@ -234,7 +234,7 @@ dependencies = [
 [[package]]
 name = "blake3"
 version = "1.7.0"
-source = "git+https://github.com/BLAKE3-team/BLAKE3?branch=new_guts#2f5860fea751447900f164690bdc83fef7694332"
+source = "git+https://github.com/BLAKE3-team/BLAKE3?branch=new_guts#33ba22cf5aad9f6a4526ea10ae6776da9b466b5f"
 dependencies = [
  "arrayref",
  "arrayvec",

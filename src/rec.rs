@@ -2,7 +2,7 @@
 //!
 //! Encocding is used to compute hashes, decoding is only used in tests as a
 //! reference implementation.
-use crate::{blake3, split_inner, ChunkNum, ChunkRangesRef};
+use crate::{blake3, hash_subtree, parent_cv, split_inner, ChunkNum, ChunkRangesRef};
 
 /// Given a set of chunk ranges, adapt them for a tree of the given size.
 ///
@@ -105,14 +105,12 @@ pub(crate) fn encode_selected_rec(
     emit_data: bool,
     res: &mut Vec<u8>,
 ) -> blake3::Hash {
-    use blake3::guts::{ChunkState, CHUNK_LEN};
+    use blake3::guts::CHUNK_LEN;
     if data.len() <= CHUNK_LEN {
         if emit_data && !query.is_empty() {
             res.extend_from_slice(data);
         }
-        let mut hasher = ChunkState::new(start_chunk.0);
-        hasher.update(data);
-        hasher.finalize(is_root)
+        hash_subtree(start_chunk.0, data, is_root)
     } else {
         let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
@@ -159,7 +157,7 @@ pub(crate) fn encode_selected_rec(
             res[o..o + 32].copy_from_slice(left.as_bytes());
             res[o + 32..o + 64].copy_from_slice(right.as_bytes());
         }
-        blake3::guts::parent_cv(&left, &right, is_root)
+        parent_cv(&left, &right, is_root)
     }
 }
 
