@@ -58,11 +58,11 @@ fn hash_benches_large(c: &mut Criterion) {
             hasher.finalize()
         })
     });
-    c.bench_function("hash_subtree", |b| {
-        b.iter(|| {
-            blake3::guts::hash_subtree(0, &data, true);
-        })
-    });
+    // c.bench_function("hash_subtree", |b| {
+    //     b.iter(|| {
+    //         blake3::guts::hash_subtree(0, &data, true);
+    //     })
+    // });
 }
 
 criterion_group!(benches, offset_benches, iter_benches, hash_benches_large,);
