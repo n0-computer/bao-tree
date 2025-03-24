@@ -8,12 +8,111 @@ use std::{
 
 use range_collections::range_set::RangeSetEntry;
 
-index_newtype! {
-    /// A number of blake3 chunks.
-    ///
-    /// This is a newtype for u64.
-    /// The blake3 chunk size is 1024 bytes.
-    pub struct ChunkNum(pub u64);
+/// A number of blake3 chunks.
+///
+/// This is a newtype for u64.
+/// The blake3 chunk size is 1024 bytes.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub struct ChunkNum(pub u64);
+
+impl std::fmt::Debug for ChunkNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if f.alternate() {
+            write!(f, "ChunkNum({:#x})", self.0)
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
+impl std::fmt::Display for ChunkNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+impl RangeSetEntry for ChunkNum {
+    fn min_value() -> Self {
+        ChunkNum(0)
+    }
+
+    fn is_min_value(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl Mul<u64> for ChunkNum {
+    type Output = ChunkNum;
+
+    fn mul(self, rhs: u64) -> Self::Output {
+        ChunkNum(self.0 * rhs)
+    }
+}
+
+impl Div<u64> for ChunkNum {
+    type Output = ChunkNum;
+
+    fn div(self, rhs: u64) -> Self::Output {
+        ChunkNum(self.0 / rhs)
+    }
+}
+
+impl Sub<u64> for ChunkNum {
+    type Output = ChunkNum;
+
+    fn sub(self, rhs: u64) -> Self::Output {
+        ChunkNum(self.0 - rhs)
+    }
+}
+
+impl Sub<ChunkNum> for ChunkNum {
+    type Output = ChunkNum;
+
+    fn sub(self, rhs: ChunkNum) -> Self::Output {
+        ChunkNum(self.0 - rhs.0)
+    }
+}
+
+impl Add<u64> for ChunkNum {
+    type Output = ChunkNum;
+
+    fn add(self, rhs: u64) -> Self::Output {
+        ChunkNum(self.0 + rhs)
+    }
+}
+
+impl Add<ChunkNum> for ChunkNum {
+    type Output = ChunkNum;
+
+    fn add(self, rhs: ChunkNum) -> Self::Output {
+        ChunkNum(self.0 + rhs.0)
+    }
+}
+
+impl PartialEq<u64> for ChunkNum {
+    fn eq(&self, other: &u64) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<ChunkNum> for u64 {
+    fn eq(&self, other: &ChunkNum) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialOrd<u64> for ChunkNum {
+    fn partial_cmp(&self, other: &u64) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+impl ChunkNum {
+    /// Convert to usize or panic if it doesn't fit.
+    pub fn to_usize(self) -> usize {
+        usize::try_from(self.0).expect("usize overflow")
+    }
 }
 
 pub(crate) const BLAKE3_CHUNK_SIZE: usize = 1024;

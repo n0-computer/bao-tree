@@ -208,8 +208,6 @@ use std::{
 };
 
 use range_collections::RangeSetRef;
-#[macro_use]
-mod macros;
 pub mod iter;
 mod rec;
 mod tree;
