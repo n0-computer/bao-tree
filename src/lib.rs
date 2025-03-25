@@ -235,7 +235,7 @@ pub type ByteRanges = range_collections::RangeSet2<u64>;
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
 fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
-    use blake3::guts::HasherExt;
+    use blake3::hazmat::{HasherExt, ChainingValue};
     if is_root {
         debug_assert!(start_chunk == 0);
         blake3::hash(data)
@@ -243,18 +243,19 @@ fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
         let mut hasher = blake3::Hasher::new();
         hasher.set_input_offset(start_chunk * 1024);
         hasher.update(data);
-        let non_root_hash = hasher.finalize_non_root();
-        blake3::Hash::from(non_root_hash.0)
+        let non_root_hash: ChainingValue = hasher.finalize_non_root();
+        blake3::Hash::from(non_root_hash)
     }
 }
 
 fn parent_cv(left_child: &blake3::Hash, right_child: &blake3::Hash, is_root: bool) -> blake3::Hash {
-    let left_child = blake3::guts::NonRootHash(*left_child.as_bytes());
-    let right_child = blake3::guts::NonRootHash(*right_child.as_bytes());
+    use blake3::hazmat::{ChainingValue, merge_subtrees_root, merge_subtrees_non_root, Mode};
+    let left_child: ChainingValue = *left_child.as_bytes();
+    let right_child: ChainingValue = *right_child.as_bytes();
     if is_root {
-        blake3::guts::merge_subtrees_root(&left_child, &right_child, blake3::guts::Mode::Hash)
+        merge_subtrees_root(&left_child, &right_child, Mode::Hash)
     } else {
-        blake3::Hash::from(blake3::guts::merge_subtrees_non_root(&left_child, &right_child, blake3::guts::Mode::Hash).0)
+        blake3::Hash::from(merge_subtrees_non_root(&left_child, &right_child, Mode::Hash))
     }
 }
 
