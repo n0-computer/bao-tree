@@ -873,6 +873,7 @@ pub(crate) fn split_inner(
 }
 
 // Module that handles io::Error serialization/deserialization
+#[cfg(feature = "serde")]
 mod io_error_serde {
     use std::{fmt, io};
 

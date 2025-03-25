@@ -13,7 +13,8 @@ use range_collections::range_set::RangeSetEntry;
 /// This is a newtype for u64.
 /// The blake3 chunk size is 1024 bytes.
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ChunkNum(pub u64);
 
 impl std::fmt::Debug for ChunkNum {
