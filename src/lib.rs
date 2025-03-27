@@ -330,7 +330,7 @@ impl BaoTree {
         let open_block = ((size & mask) != 0) as u64;
         // total number of blocks, rounding up to 1 if there are no blocks
         let blocks = (full_blocks + open_block).max(1);
-        let n = (blocks + 1) / 2;
+        let n = blocks.div_ceil(2);
         // root node
         let root = n.next_power_of_two() - 1;
         // number of nodes in the tree
@@ -453,7 +453,7 @@ impl BaoTree {
     #[allow(dead_code)]
     fn filled_size(&self) -> TreeNode {
         let blocks = self.chunks();
-        let n = (blocks.0 + 1) / 2;
+        let n = blocks.0.div_ceil(2);
         TreeNode(n + n.saturating_sub(1))
     }
 
@@ -596,7 +596,7 @@ impl TreeNode {
 
     /// Given a number of blocks, gives root node
     fn root(chunks: ChunkNum) -> TreeNode {
-        Self(((chunks.0 + 1) / 2).next_power_of_two() - 1)
+        Self(chunks.0.div_ceil(2).next_power_of_two() - 1)
     }
 
     /// the middle of the tree node, in blocks
@@ -909,7 +909,7 @@ mod io_error_serde {
             {
                 // For simplicity, create a generic error
                 // In a real app, you might want to parse the kind from the string
-                Ok(io::Error::new(io::ErrorKind::Other, value))
+                Ok(io::Error::other(value))
             }
         }
 

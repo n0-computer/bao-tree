@@ -74,7 +74,7 @@ impl Sender for tokio::sync::mpsc::Sender<EncodedItem> {
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-pub async fn traverse_ranges_validated<'a, D, O, F>(
+pub async fn traverse_ranges_validated<D, O, F>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
@@ -179,7 +179,7 @@ where
                         return Err(EncodeError::LeafHashMismatch(start_chunk));
                     }
                     for item in out_buf.into_iter() {
-                        if let Err(e) = send.send(item.into()).await {
+                        if let Err(e) = send.send(item).await {
                             return Ok(Err(e));
                         }
                     }
