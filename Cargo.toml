@@ -17,7 +17,7 @@ iroh-blake3 = "1.4.3"
 range-collections = { version = "0.4.5", features = ["new_unchecked"] }
 smallvec = "1"
 
-bytes = { version = "1", features = ["serde"] }
+bytes = { version = "1" }
 futures-lite = { version = "2.3", optional = true }
 self_cell = { version = "1" }
 iroh-io = { version = "0.6.0", default-features = false, optional = true }
@@ -27,7 +27,7 @@ tokio = { version = "1", features = ["sync"], default-features = false, optional
 serde = { version = "1", features = ["derive"], optional = true }
 
 [features]
-serde = ["dep:serde"]
+serde = ["dep:serde", "bytes/serde"]
 tokio_fsm = ["dep:futures-lite", "dep:iroh-io"]
 validate = ["dep:genawaiter"]
 experimental-mixed = ["dep:tokio"]

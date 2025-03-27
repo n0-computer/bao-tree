@@ -212,7 +212,6 @@ pub mod iter;
 mod rec;
 mod tree;
 use iter::*;
-use serde::{Deserialize, Serialize};
 pub use tree::{BlockSize, ChunkNum};
 pub mod io;
 pub use iroh_blake3 as blake3;
@@ -550,7 +549,8 @@ pub(crate) const fn blocks(size: u64, block_size: BlockSize) -> u64 {
 /// You typically don't have to use this, but it can be useful for debugging
 /// and error handling. Hash validation errors contain a `TreeNode` that allows
 /// you to find the position where validation failed.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeNode(u64);
 
 impl fmt::Display for TreeNode {
