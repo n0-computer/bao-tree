@@ -896,7 +896,7 @@ mod io_error_serde {
     {
         struct IoErrorVisitor;
 
-        impl<'de> Visitor<'de> for IoErrorVisitor {
+        impl Visitor<'_> for IoErrorVisitor {
             type Value = io::Error;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
