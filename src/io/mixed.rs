@@ -2,14 +2,12 @@
 use std::result;
 
 use bytes::Bytes;
-use iroh_blake3 as blake3;
-use iroh_blake3::guts::parent_cv;
+use blake3;
 use smallvec::SmallVec;
 
 use super::{sync::Outboard, EncodeError, Leaf, Parent};
 use crate::{
-    hash_subtree, iter::BaoChunk, rec::truncate_ranges, split_inner, ChunkNum, ChunkRangesRef,
-    TreeNode,
+    hash_subtree, iter::BaoChunk, parent_cv, rec::truncate_ranges, split_inner, ChunkNum, ChunkRangesRef, TreeNode
 };
 
 /// A content item for the bao streaming protocol.
@@ -199,7 +197,7 @@ pub fn traverse_selected_rec(
     emit_data: bool,
     res: &mut Vec<EncodedItem>,
 ) -> blake3::Hash {
-    use blake3::guts::{ChunkState, CHUNK_LEN};
+    use blake3::guts::CHUNK_LEN;
     if data.len() <= CHUNK_LEN {
         if emit_data && !query.is_empty() {
             res.push(
@@ -210,9 +208,7 @@ pub fn traverse_selected_rec(
                 .into(),
             );
         }
-        let mut hasher = ChunkState::new(start_chunk.0);
-        hasher.update(&data);
-        hasher.finalize(is_root)
+        hash_subtree(start_chunk.0, &data, is_root)
     } else {
         let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
