@@ -13,7 +13,7 @@ rust-version = "1.75"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-blake3 = { git = "https://github.com/BLAKE3-team/BLAKE3", branch = "new_guts" }
+
 range-collections = { version = "0.4.5", features = ["new_unchecked"] }
 smallvec = "1"
 
@@ -24,6 +24,7 @@ iroh-io = { version = "0.6.0", default-features = false, optional = true }
 positioned-io = { version = "0.3.1", default-features = false }
 genawaiter = { version = "0.99.1", features = ["futures03"], optional = true }
 tokio = { version = "1", features = ["sync"], default-features = false, optional = true }
+blake3 = { git = "https://github.com/BLAKE3-team/BLAKE3", branch = "hazmat" }
 
 [features]
 tokio_fsm = ["dep:futures-lite", "dep:iroh-io"]
