@@ -87,6 +87,7 @@ impl DecodeError {
 /// or a size mismatch. If the remote end stops listening while we are writing,
 /// the error will indicate which parent or chunk we were writing at the time.
 #[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EncodeError {
     /// The hash of a parent did not match the expected hash
     ParentHashMismatch(TreeNode),
@@ -99,6 +100,7 @@ pub enum EncodeError {
     /// File size does not match size in outboard
     SizeMismatch,
     /// There was an error reading from the underlying io
+    #[cfg_attr(feature = "serde", serde(with = "crate::io_error_serde"))]
     Io(io::Error),
 }
 

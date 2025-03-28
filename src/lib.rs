@@ -208,8 +208,6 @@ use std::{
 };
 
 use range_collections::RangeSetRef;
-#[macro_use]
-mod macros;
 pub mod iter;
 mod rec;
 mod tree;
@@ -234,7 +232,12 @@ pub type ByteRanges = range_collections::RangeSet2<u64>;
 /// [ChunkRanges] implements [`AsRef<ChunkRangesRef>`].
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
-fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
+/// Quickly hash a subtree
+///
+/// This is a wrapper that passes through to the blake3::guts implementation if the size is a power of 2, and
+/// falls back to a recursive implementation if it is not. There is a bug in the guts implementation that
+/// requires this workaround.
+pub fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
     if data.len().is_power_of_two() {
         blake3::guts::hash_subtree(start_chunk, data, is_root)
     } else {
@@ -326,7 +329,7 @@ impl BaoTree {
         let open_block = ((size & mask) != 0) as u64;
         // total number of blocks, rounding up to 1 if there are no blocks
         let blocks = (full_blocks + open_block).max(1);
-        let n = (blocks + 1) / 2;
+        let n = blocks.div_ceil(2);
         // root node
         let root = n.next_power_of_two() - 1;
         // number of nodes in the tree
@@ -449,7 +452,7 @@ impl BaoTree {
     #[allow(dead_code)]
     fn filled_size(&self) -> TreeNode {
         let blocks = self.chunks();
-        let n = (blocks.0 + 1) / 2;
+        let n = blocks.0.div_ceil(2);
         TreeNode(n + n.saturating_sub(1))
     }
 
@@ -547,6 +550,7 @@ pub(crate) const fn blocks(size: u64, block_size: BlockSize) -> u64 {
 /// and error handling. Hash validation errors contain a `TreeNode` that allows
 /// you to find the position where validation failed.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeNode(u64);
 
 impl fmt::Display for TreeNode {
@@ -592,7 +596,7 @@ impl TreeNode {
 
     /// Given a number of blocks, gives root node
     fn root(chunks: ChunkNum) -> TreeNode {
-        Self(((chunks.0 + 1) / 2).next_power_of_two() - 1)
+        Self(chunks.0.div_ceil(2).next_power_of_two() - 1)
     }
 
     /// the middle of the tree node, in blocks
@@ -866,4 +870,49 @@ pub(crate) fn split_inner(
         b = RangeSetRef::new(&[ChunkNum(0)]).unwrap();
     }
     (a, b)
+}
+
+// Module that handles io::Error serialization/deserialization
+#[cfg(feature = "serde")]
+mod io_error_serde {
+    use std::{fmt, io};
+
+    use serde::{
+        de::{self, Visitor},
+        Deserializer, Serializer,
+    };
+
+    pub fn serialize<S>(error: &io::Error, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize the error kind and message
+        serializer.serialize_str(&format!("{:?}:{}", error.kind(), error))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<io::Error, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IoErrorVisitor;
+
+        impl Visitor<'_> for IoErrorVisitor {
+            type Value = io::Error;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an io::Error string representation")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                // For simplicity, create a generic error
+                // In a real app, you might want to parse the kind from the string
+                Ok(io::Error::other(value))
+            }
+        }
+
+        deserializer.deserialize_str(IoErrorVisitor)
+    }
 }
