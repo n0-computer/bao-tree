@@ -357,7 +357,7 @@ fn outboard_wrong_hash() {
 //     let is_root = false;
 //     let data = make_test_data(len);
 //     let expected = recursive_hash_subtree(start_chunk, &data, is_root);
-//     let actual = blake3::guts::hash_subtree(start_chunk, &data, is_root);
+//     let actual = blake3::hazmat::hash_subtree(start_chunk, &data, is_root);
 //     assert_eq!(expected, actual);
 // }
 

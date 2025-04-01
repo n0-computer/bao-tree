@@ -105,7 +105,7 @@ pub(crate) fn encode_selected_rec(
     emit_data: bool,
     res: &mut Vec<u8>,
 ) -> blake3::Hash {
-    use blake3::guts::CHUNK_LEN;
+    use blake3::CHUNK_LEN;
     if data.len() <= CHUNK_LEN {
         if emit_data && !query.is_empty() {
             res.extend_from_slice(data);
@@ -123,7 +123,7 @@ pub(crate) fn encode_selected_rec(
         // for full ranges where the level is below min_level, we want to emit
         // just the data.
         //
-        // todo: maybe call into blake3::guts::hash_subtree directly for this case? it would be faster.
+        // todo: maybe call into blake3::hazmat::hash_subtree directly for this case? it would be faster.
         let full = query.is_all();
         let emit_parent = !query.is_empty() && (!full || level >= min_level);
         let hash_offset = if emit_parent {
@@ -201,7 +201,7 @@ mod test_support {
         if ranges.is_empty() {
             return;
         }
-        use blake3::guts::CHUNK_LEN;
+        use blake3::CHUNK_LEN;
 
         if size <= CHUNK_LEN {
             emit(BaoChunk::Leaf {
