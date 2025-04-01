@@ -3,6 +3,7 @@ use std::{future::Future, result};
 
 use blake3;
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use super::{sync::Outboard, EncodeError, Leaf, Parent};
