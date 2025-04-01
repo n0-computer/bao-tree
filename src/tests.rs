@@ -349,18 +349,6 @@ fn outboard_wrong_hash() {
     assert_eq!(expected, actual);
 }
 
-// #[test]
-// #[ignore]
-// fn wrong_hash_small() {
-//     let start_chunk = 3;
-//     let len = 2049;
-//     let is_root = false;
-//     let data = make_test_data(len);
-//     let expected = recursive_hash_subtree(start_chunk, &data, is_root);
-//     let actual = blake3::hazmat::hash_subtree(start_chunk, &data, is_root);
-//     assert_eq!(expected, actual);
-// }
-
 // create the mapping from a node number to the offset in the pre order traversal,
 // using brute force lookup in the bao output
 fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
