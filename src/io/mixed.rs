@@ -1,5 +1,5 @@
 //! Read from sync, send to tokio sender
-use std::result;
+use std::{future::Future, result};
 
 use blake3;
 use bytes::Bytes;
@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// A content item for the bao streaming protocol.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum EncodedItem {
     /// total data size, will be the first item
     Size(u64),
@@ -44,6 +44,27 @@ impl From<EncodeError> for EncodedItem {
     }
 }
 
+/// Abstract sender trait for sending encoded items
+pub trait Sender {
+    /// Error type
+    type Error;
+    /// Send an item
+    fn send(
+        &mut self,
+        item: EncodedItem,
+    ) -> impl Future<Output = std::result::Result<(), Self::Error>> + '_;
+}
+
+impl Sender for tokio::sync::mpsc::Sender<EncodedItem> {
+    type Error = tokio::sync::mpsc::error::SendError<EncodedItem>;
+    fn send(
+        &mut self,
+        item: EncodedItem,
+    ) -> impl Future<Output = std::result::Result<(), Self::Error>> + '_ {
+        tokio::sync::mpsc::Sender::send(self, item)
+    }
+}
+
 /// Traverse ranges relevant to a query from a reader and outboard to a stream
 ///
 /// This function validates the data before writing.
@@ -51,21 +72,24 @@ impl From<EncodeError> for EncodedItem {
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-pub async fn traverse_ranges_validated<D: ReadBytesAt, O: Outboard>(
+pub async fn traverse_ranges_validated<D, O, F>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
-    encoded: &tokio::sync::mpsc::Sender<EncodedItem>,
-) {
-    encoded
-        .send(EncodedItem::Size(outboard.tree().size()))
-        .await
-        .ok();
-    let res = match traverse_ranges_validated_impl(data, outboard, ranges, encoded).await {
-        Ok(()) => EncodedItem::Done,
+    send: &mut F,
+) -> std::result::Result<(), F::Error>
+where
+    D: ReadBytesAt,
+    O: Outboard,
+    F: Sender,
+{
+    send.send(EncodedItem::Size(outboard.tree().size())).await?;
+    let res = match traverse_ranges_validated_impl(data, outboard, ranges, send).await {
+        Ok(Ok(())) => EncodedItem::Done,
         Err(cause) => EncodedItem::Error(cause),
+        Ok(Err(err)) => return Err(err),
     };
-    encoded.send(res).await.ok();
+    send.send(res).await
 }
 
 /// Encode ranges relevant to a query from a reader and outboard to a writer
@@ -75,14 +99,19 @@ pub async fn traverse_ranges_validated<D: ReadBytesAt, O: Outboard>(
 /// It is possible to encode ranges from a partial file and outboard.
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
-async fn traverse_ranges_validated_impl<D: ReadBytesAt, O: Outboard>(
+async fn traverse_ranges_validated_impl<D, O, F>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
-    encoded: &tokio::sync::mpsc::Sender<EncodedItem>,
-) -> result::Result<(), EncodeError> {
+    send: &mut F,
+) -> result::Result<std::result::Result<(), F::Error>, EncodeError>
+where
+    D: ReadBytesAt,
+    O: Outboard,
+    F: Sender,
+{
     if ranges.is_empty() {
-        return Ok(());
+        return Ok(Ok(()));
     }
     let mut stack: SmallVec<[_; 10]> = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
@@ -111,16 +140,13 @@ async fn traverse_ranges_validated_impl<D: ReadBytesAt, O: Outboard>(
                 if left {
                     stack.push(l_hash);
                 }
-                encoded
-                    .send(
-                        Parent {
-                            node,
-                            pair: (l_hash, r_hash),
-                        }
-                        .into(),
-                    )
-                    .await
-                    .ok();
+                let item = Parent {
+                    node,
+                    pair: (l_hash, r_hash),
+                };
+                if let Err(e) = send.send(item.into()).await {
+                    return Ok(Err(e));
+                }
             }
             BaoChunk::Leaf {
                 start_chunk,
@@ -151,7 +177,9 @@ async fn traverse_ranges_validated_impl<D: ReadBytesAt, O: Outboard>(
                         return Err(EncodeError::LeafHashMismatch(start_chunk));
                     }
                     for item in out_buf.into_iter() {
-                        encoded.send(item).await.ok();
+                        if let Err(e) = send.send(item).await {
+                            return Ok(Err(e));
+                        }
                     }
                 } else {
                     let actual = hash_subtree(start_chunk.0, &buffer, is_root);
@@ -163,12 +191,14 @@ async fn traverse_ranges_validated_impl<D: ReadBytesAt, O: Outboard>(
                         data: buffer,
                         offset: start_chunk.to_bytes(),
                     };
-                    encoded.send(item.into()).await.ok();
+                    if let Err(e) = send.send(item.into()).await {
+                        return Ok(Err(e));
+                    }
                 };
             }
         }
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Encode ranges relevant to a query from a slice and outboard to a buffer.
@@ -296,11 +326,13 @@ mod tests {
     async fn smoke() {
         let data = [0u8; 100000];
         let outboard = PreOrderMemOutboard::create(data, BlockSize::from_chunk_log(4));
-        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let (mut tx, mut rx) = tokio::sync::mpsc::channel(10);
         let mut encoded = Vec::new();
         encode_ranges_validated(&data[..], &outboard, &ChunkRanges::empty(), &mut encoded).unwrap();
         tokio::spawn(async move {
-            traverse_ranges_validated(&data[..], &outboard, &ChunkRanges::empty(), &tx).await;
+            traverse_ranges_validated(&data[..], &outboard, &ChunkRanges::empty(), &mut tx)
+                .await
+                .unwrap();
         });
         let mut res = Vec::new();
         while let Some(item) = rx.recv().await {

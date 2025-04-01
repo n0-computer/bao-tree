@@ -1,6 +1,6 @@
 [package]
 name = "bao-tree"
-version = "0.13.0"
+version = "0.14.0"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
 description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
@@ -25,12 +25,14 @@ positioned-io = { version = "0.3.1", default-features = false }
 genawaiter = { version = "0.99.1", features = ["futures03"], optional = true }
 tokio = { version = "1", features = ["sync"], default-features = false, optional = true }
 blake3 = { version = "1.8" }
+serde = { version = "1", features = ["derive"], optional = true }
 
 [features]
+serde = ["dep:serde", "bytes/serde"]
 tokio_fsm = ["dep:futures-lite", "dep:iroh-io"]
 validate = ["dep:genawaiter"]
 experimental-mixed = ["dep:tokio"]
-default = ["tokio_fsm", "validate", "experimental-mixed"]
+default = ["tokio_fsm", "validate", "serde"]
 
 [dev-dependencies]
 hex = "0.4.3"

@@ -208,8 +208,6 @@ use std::{
 };
 
 use range_collections::RangeSetRef;
-#[macro_use]
-mod macros;
 pub mod iter;
 mod rec;
 mod tree;
@@ -550,6 +548,7 @@ pub(crate) const fn blocks(size: u64, block_size: BlockSize) -> u64 {
 /// and error handling. Hash validation errors contain a `TreeNode` that allows
 /// you to find the position where validation failed.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeNode(u64);
 
 impl fmt::Display for TreeNode {
@@ -869,4 +868,49 @@ pub(crate) fn split_inner(
         b = RangeSetRef::new(&[ChunkNum(0)]).unwrap();
     }
     (a, b)
+}
+
+// Module that handles io::Error serialization/deserialization
+#[cfg(feature = "serde")]
+mod io_error_serde {
+    use std::{fmt, io};
+
+    use serde::{
+        de::{self, Visitor},
+        Deserializer, Serializer,
+    };
+
+    pub fn serialize<S>(error: &io::Error, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize the error kind and message
+        serializer.serialize_str(&format!("{:?}:{}", error.kind(), error))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<io::Error, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IoErrorVisitor;
+
+        impl Visitor<'_> for IoErrorVisitor {
+            type Value = io::Error;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("an io::Error string representation")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                // For simplicity, create a generic error
+                // In a real app, you might want to parse the kind from the string
+                Ok(io::Error::other(value))
+            }
+        }
+
+        deserializer.deserialize_str(IoErrorVisitor)
+    }
 }
