@@ -22,13 +22,14 @@ use smallvec::SmallVec;
 pub use super::BaoContentItem;
 use super::{combine_hash_pair, DecodeError};
 use crate::{
-    blake3, hash_subtree, parent_cv,
+    blake3, hash_subtree,
     io::{
         error::EncodeError,
         outboard::{PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
     iter::{BaoChunk, ResponseIter},
+    parent_cv,
     rec::{encode_selected_rec, truncate_ranges, truncate_ranges_owned},
     BaoTree, BlockSize, ChunkRanges, ChunkRangesRef, TreeNode,
 };
@@ -756,7 +757,8 @@ mod validate {
 
     use super::Outboard;
     use crate::{
-        blake3, hash_subtree, io::LocalBoxFuture, parent_cv, rec::truncate_ranges, split, BaoTree, ChunkNum, ChunkRangesRef, TreeNode
+        blake3, hash_subtree, io::LocalBoxFuture, parent_cv, rec::truncate_ranges, split, BaoTree,
+        ChunkNum, ChunkRangesRef, TreeNode,
     };
 
     /// Given a data file and an outboard, compute all valid ranges.

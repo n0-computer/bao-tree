@@ -149,7 +149,7 @@ checksum = "3663af8a469bf3a2d818b8c1a7b62e4dc55c4547b4c14f5dab35fc9e707bef83"
 dependencies = [
  "arrayref",
  "arrayvec",
- "blake3 1.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "blake3",
 ]
 
 [[package]]
@@ -158,7 +158,7 @@ version = "0.13.0"
 dependencies = [
  "anyhow",
  "bao",
- "blake3 1.7.0 (git+https://github.com/BLAKE3-team/BLAKE3?branch=hazmat)",
+ "blake3",
  "bytes",
  "clap 4.5.34",
  "criterion",
@@ -222,21 +222,9 @@ checksum = "5c8214115b7bf84099f1309324e63141d4c5d7cc26862f97a0a857dbefe165bd"
 
 [[package]]
 name = "blake3"
-version = "1.7.0"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b17679a8d69b6d7fd9cd9801a536cec9fa5e5970b69f9d4747f70b39b031f5e7"
-dependencies = [
- "arrayref",
- "arrayvec",
- "cc",
- "cfg-if",
- "constant_time_eq",
-]
-
-[[package]]
-name = "blake3"
-version = "1.7.0"
-source = "git+https://github.com/BLAKE3-team/BLAKE3?branch=hazmat#284a13f7834636e38c05568166da4dca626fb876"
+checksum = "34a796731680be7931955498a16a10b2270c7762963d5d570fdbfe02dcbf314f"
 dependencies = [
  "arrayref",
  "arrayvec",

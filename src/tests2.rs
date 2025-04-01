@@ -17,16 +17,21 @@ use smallvec::SmallVec;
 use test_strategy::proptest;
 
 use crate::{
-    assert_tuple_eq, blake3, hash_subtree, io::{
+    assert_tuple_eq, blake3, hash_subtree,
+    io::{
         fsm::ResponseDecoderNext,
         outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
         sync::Outboard,
         BaoContentItem, Leaf, Parent,
-    }, iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef}, parent_cv, prop_assert_tuple_eq, rec::{
+    },
+    iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
+    parent_cv, prop_assert_tuple_eq,
+    rec::{
         encode_selected_rec, get_leaf_ranges, make_test_data, partial_chunk_iter_reference,
         range_union, response_iter_reference, select_nodes_rec, truncate_ranges,
         ReferencePreOrderPartialChunkIterRef,
-    }, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, TreeNode
+    },
+    BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, TreeNode,
 };
 
 fn tree() -> impl Strategy<Value = BaoTree> {

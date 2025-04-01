@@ -1,13 +1,14 @@
 //! Read from sync, send to tokio sender
 use std::result;
 
-use bytes::Bytes;
 use blake3;
+use bytes::Bytes;
 use smallvec::SmallVec;
 
 use super::{sync::Outboard, EncodeError, Leaf, Parent};
 use crate::{
-    hash_subtree, iter::BaoChunk, parent_cv, rec::truncate_ranges, split_inner, ChunkNum, ChunkRangesRef, TreeNode
+    hash_subtree, iter::BaoChunk, parent_cv, rec::truncate_ranges, split_inner, ChunkNum,
+    ChunkRangesRef, TreeNode,
 };
 
 /// A content item for the bao streaming protocol.

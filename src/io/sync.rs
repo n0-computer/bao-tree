@@ -14,11 +14,16 @@ use smallvec::SmallVec;
 use super::{combine_hash_pair, BaoContentItem, DecodeError};
 pub use crate::rec::truncate_ranges;
 use crate::{
-    blake3, hash_subtree, io::{
+    blake3, hash_subtree,
+    io::{
         error::EncodeError,
         outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
-    }, iter::{BaoChunk, ResponseIterRef}, parent_cv, rec::encode_selected_rec, BaoTree, BlockSize, ChunkRangesRef, TreeNode
+    },
+    iter::{BaoChunk, ResponseIterRef},
+    parent_cv,
+    rec::encode_selected_rec,
+    BaoTree, BlockSize, ChunkRangesRef, TreeNode,
 };
 
 /// A binary merkle tree for blake3 hashes of a blob.
@@ -658,7 +663,8 @@ mod validate {
 
     use super::Outboard;
     use crate::{
-        blake3, hash_subtree, io::LocalBoxFuture, parent_cv, rec::truncate_ranges, split, BaoTree, ChunkNum, ChunkRangesRef, TreeNode
+        blake3, hash_subtree, io::LocalBoxFuture, parent_cv, rec::truncate_ranges, split, BaoTree,
+        ChunkNum, ChunkRangesRef, TreeNode,
     };
 
     /// Given a data file and an outboard, compute all valid ranges.
