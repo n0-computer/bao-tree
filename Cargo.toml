@@ -31,7 +31,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde = ["dep:serde", "bytes/serde"]
 tokio_fsm = ["dep:futures-lite", "dep:iroh-io"]
 validate = ["dep:genawaiter"]
-experimental-mixed = ["dep:tokio"]
+experimental-mixed = ["dep:tokio", "dep:serde"]
 default = ["tokio_fsm", "validate", "serde"]
 
 [dev-dependencies]
