@@ -14,7 +14,6 @@ use std::{
     result,
 };
 
-use blake3::guts::parent_cv;
 use bytes::Bytes;
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 use iroh_io::{AsyncStreamReader, AsyncStreamWriter};
@@ -30,6 +29,7 @@ use crate::{
         Leaf, Parent,
     },
     iter::{BaoChunk, ResponseIter},
+    parent_cv,
     rec::{encode_selected_rec, truncate_ranges, truncate_ranges_owned},
     BaoTree, BlockSize, ChunkRanges, ChunkRangesRef, TreeNode,
 };
@@ -757,8 +757,8 @@ mod validate {
 
     use super::Outboard;
     use crate::{
-        blake3, hash_subtree, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum,
-        ChunkRangesRef, TreeNode,
+        blake3, hash_subtree, io::LocalBoxFuture, parent_cv, rec::truncate_ranges, split, BaoTree,
+        ChunkNum, ChunkRangesRef, TreeNode,
     };
 
     /// Given a data file and an outboard, compute all valid ranges.
@@ -867,7 +867,7 @@ mod validate {
                     // outboard is incomplete, we can't validate
                     return Ok(());
                 };
-                let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
                 if &actual != parent_hash {
                     // hash mismatch, we can't validate
                     return Ok(());
@@ -970,7 +970,7 @@ mod validate {
                     // outboard is incomplete, we can't validate
                     return Ok(());
                 };
-                let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+                let actual = parent_cv(&l_hash, &r_hash, is_root);
                 if &actual != parent_hash {
                     // hash mismatch, we can't validate
                     return Ok(());

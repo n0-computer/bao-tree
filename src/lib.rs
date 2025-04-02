@@ -214,7 +214,7 @@ mod tree;
 use iter::*;
 pub use tree::{BlockSize, ChunkNum};
 pub mod io;
-pub use iroh_blake3 as blake3;
+pub use blake3;
 
 #[cfg(all(test, feature = "tokio_fsm"))]
 mod tests;
@@ -232,34 +232,32 @@ pub type ByteRanges = range_collections::RangeSet2<u64>;
 /// [ChunkRanges] implements [`AsRef<ChunkRangesRef>`].
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
-/// Quickly hash a subtree
-///
-/// This is a wrapper that passes through to the blake3::guts implementation if the size is a power of 2, and
-/// falls back to a recursive implementation if it is not. There is a bug in the guts implementation that
-/// requires this workaround.
-pub fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
-    if data.len().is_power_of_two() {
-        blake3::guts::hash_subtree(start_chunk, data, is_root)
+fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
+    use blake3::hazmat::{ChainingValue, HasherExt};
+    if is_root {
+        debug_assert!(start_chunk == 0);
+        blake3::hash(data)
     } else {
-        recursive_hash_subtree(start_chunk, data, is_root)
+        let mut hasher = blake3::Hasher::new();
+        hasher.set_input_offset(start_chunk * 1024);
+        hasher.update(data);
+        let non_root_hash: ChainingValue = hasher.finalize_non_root();
+        blake3::Hash::from(non_root_hash)
     }
 }
 
-/// This is a recursive version of [`hash_subtree`], for testing.
-fn recursive_hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
-    use blake3::guts::{ChunkState, CHUNK_LEN};
-    if data.len() <= CHUNK_LEN {
-        let mut hasher = ChunkState::new(start_chunk);
-        hasher.update(data);
-        hasher.finalize(is_root)
+fn parent_cv(left_child: &blake3::Hash, right_child: &blake3::Hash, is_root: bool) -> blake3::Hash {
+    use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
+    let left_child: ChainingValue = *left_child.as_bytes();
+    let right_child: ChainingValue = *right_child.as_bytes();
+    if is_root {
+        merge_subtrees_root(&left_child, &right_child, Mode::Hash)
     } else {
-        let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
-        let chunks = chunks.next_power_of_two();
-        let mid = chunks / 2;
-        let mid_bytes = mid * CHUNK_LEN;
-        let left = recursive_hash_subtree(start_chunk, &data[..mid_bytes], false);
-        let right = recursive_hash_subtree(start_chunk + mid as u64, &data[mid_bytes..], false);
-        blake3::guts::parent_cv(&left, &right, is_root)
+        blake3::Hash::from(merge_subtrees_non_root(
+            &left_child,
+            &right_child,
+            Mode::Hash,
+        ))
     }
 }
 

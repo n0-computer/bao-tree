@@ -27,7 +27,7 @@ use crate::{
         encode_ranges_reference, encode_selected_rec, make_test_data, range_union, truncate_ranges,
         ReferencePreOrderPartialChunkIterRef,
     },
-    recursive_hash_subtree, split, ChunkRanges, ChunkRangesRef, ResponseIter,
+    split, ChunkRanges, ChunkRangesRef, ResponseIter,
 };
 
 /// Compute the blake3 hash for the given data,
@@ -346,18 +346,6 @@ fn outboard_wrong_hash() {
     let data = make_test_data(100000000);
     let expected = blake3::hash(&data);
     let actual = PostOrderMemOutboard::create(&data, BlockSize(4)).root();
-    assert_eq!(expected, actual);
-}
-
-#[test]
-#[ignore]
-fn wrong_hash_small() {
-    let start_chunk = 3;
-    let len = 2049;
-    let is_root = false;
-    let data = make_test_data(len);
-    let expected = recursive_hash_subtree(start_chunk, &data, is_root);
-    let actual = blake3::guts::hash_subtree(start_chunk, &data, is_root);
     assert_eq!(expected, actual);
 }
 
@@ -1081,14 +1069,5 @@ proptest! {
     #[ignore]
     fn pre_post_outboard(n in 0usize..1000000) {
         compare_pre_order_outboard(n);
-    }
-
-    #[test]
-    fn hash_subtree_bs4(block in 0u64..100000, size in 0usize..1024 << 4) {
-        let chunk = block << 4;
-        let data = make_test_data(size);
-        let expected = recursive_hash_subtree(chunk, &data, false);
-        let actual = crate::hash_subtree(chunk, &data, false);
-        prop_assert_eq!(expected, actual);
     }
 }

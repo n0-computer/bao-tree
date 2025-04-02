@@ -25,7 +25,7 @@ use crate::{
         BaoContentItem, Leaf, Parent,
     },
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
-    prop_assert_tuple_eq,
+    parent_cv, prop_assert_tuple_eq,
     rec::{
         encode_selected_rec, get_leaf_ranges, make_test_data, partial_chunk_iter_reference,
         range_union, response_iter_reference, select_nodes_rec, truncate_ranges,
@@ -156,7 +156,7 @@ fn outboard_test_sync(data: &[u8], outboard: impl crate::io::sync::Outboard) {
         let byte_range = tree.byte_range(node);
         let data = &data[byte_range.start.try_into().unwrap()..byte_range.end.try_into().unwrap()];
         let expected = hash_subtree(start_chunk.0, data, is_root);
-        let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+        let actual = parent_cv(&l_hash, &r_hash, is_root);
         assert_eq!(actual, expected);
     }
 }
@@ -176,7 +176,7 @@ async fn outboard_test_fsm(data: &[u8], mut outboard: impl crate::io::fsm::Outbo
         let byte_range = tree.byte_range(node);
         let data = &data[byte_range.start.try_into().unwrap()..byte_range.end.try_into().unwrap()];
         let expected = hash_subtree(start_chunk.0, data, is_root);
-        let actual = blake3::guts::parent_cv(&l_hash, &r_hash, is_root);
+        let actual = parent_cv(&l_hash, &r_hash, is_root);
         assert_eq!(actual, expected);
     }
 }
