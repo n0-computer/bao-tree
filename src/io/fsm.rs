@@ -430,7 +430,7 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
                 let this = &mut self.0;
                 let data = this
                     .encoded
-                    .read_bytes(size)
+                    .read_bytes_exact(size)
                     .await
                     .map_err(|e| DecodeError::maybe_leaf_not_found(e, start_chunk))?;
                 let leaf_hash = this.stack.pop().unwrap();
@@ -482,7 +482,7 @@ where
                 start_chunk, size, ..
             } => {
                 let start = start_chunk.to_bytes();
-                let bytes = data.read_at(start, size).await?;
+                let bytes = data.read_exact_at(start, size).await?;
                 encoded
                     .write_bytes(bytes)
                     .await
@@ -555,7 +555,7 @@ where
             } => {
                 let expected = stack.pop().unwrap();
                 let start = start_chunk.to_bytes();
-                let bytes = data.read_at(start, size).await?;
+                let bytes = data.read_exact_at(start, size).await?;
                 let (actual, to_write) = if !ranges.is_all() {
                     // we need to encode just a part of the data
                     //
@@ -669,7 +669,7 @@ async fn outboard_impl(
                 start_chunk,
                 ..
             } => {
-                let buf = data.read_bytes(size).await?;
+                let buf = data.read_bytes_exact(size).await?;
                 let hash = hash_subtree(start_chunk.0, &buf, is_root);
                 stack.push(hash);
             }
@@ -722,7 +722,7 @@ async fn outboard_post_order_impl(
                 start_chunk,
                 ..
             } => {
-                let buf = data.read_bytes(size).await?;
+                let buf = data.read_bytes_exact(size).await?;
                 let hash = hash_subtree(start_chunk.0, &buf, is_root);
                 stack.push(hash);
             }
@@ -802,7 +802,9 @@ mod validate {
             if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 let mut data = data;
-                let data = data.read_at(0, tree.size().try_into().unwrap()).await?;
+                let data = data
+                    .read_exact_at(0, tree.size().try_into().unwrap())
+                    .await?;
                 let actual = hash_subtree(0, &data, true);
                 if actual == outboard.root() {
                     co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
@@ -831,7 +833,7 @@ mod validate {
             is_root: bool,
         ) -> io::Result<()> {
             let len = (range.end - range.start).try_into().unwrap();
-            let data = self.data.read_at(range.start, len).await?;
+            let data = self.data.read_exact_at(range.start, len).await?;
             // is_root is always false because the case of a single chunk group is handled before calling this function
             let actual = hash_subtree(ChunkNum::full_chunks(range.start).0, &data, is_root);
             if &actual == hash {
