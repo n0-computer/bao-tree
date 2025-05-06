@@ -126,7 +126,7 @@ fn bao_tree_decode_slice_iter_impl(data: Vec<u8>, range: Range<u64>) {
     }
 }
 
-#[cfg(feature = "tokio_fsm")]
+#[cfg(feature = "fsm")]
 mod fsm_tests {
 
     use super::*;

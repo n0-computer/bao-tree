@@ -161,7 +161,7 @@ impl From<io::Error> for EncodeError {
 }
 
 impl EncodeError {
-    #[cfg(feature = "tokio_fsm")]
+    #[cfg(feature = "fsm")]
     pub(crate) fn maybe_parent_write(e: io::Error, node: TreeNode) -> Self {
         if e.kind() == io::ErrorKind::ConnectionReset {
             Self::ParentWrite(node)
@@ -170,7 +170,7 @@ impl EncodeError {
         }
     }
 
-    #[cfg(feature = "tokio_fsm")]
+    #[cfg(feature = "fsm")]
     pub(crate) fn maybe_leaf_write(e: io::Error, chunk: ChunkNum) -> Self {
         if e.kind() == io::ErrorKind::ConnectionReset {
             Self::LeafWrite(chunk)

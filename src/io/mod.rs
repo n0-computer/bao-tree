@@ -8,7 +8,7 @@ mod error;
 pub use error::*;
 use range_collections::{range_set::RangeSetRange, RangeSetRef};
 
-#[cfg(feature = "tokio_fsm")]
+#[cfg(feature = "fsm")]
 pub mod fsm;
 #[cfg(feature = "experimental-mixed")]
 pub mod mixed;
