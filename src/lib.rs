@@ -216,9 +216,9 @@ pub use tree::{BlockSize, ChunkNum};
 pub mod io;
 pub use blake3;
 
-#[cfg(all(test, feature = "tokio_fsm"))]
+#[cfg(all(test, feature = "fsm"))]
 mod tests;
-#[cfg(all(test, feature = "tokio_fsm"))]
+#[cfg(all(test, feature = "fsm"))]
 mod tests2;
 
 /// A set of chunk ranges
@@ -578,7 +578,7 @@ impl TreeNode {
     ///
     /// This is a bridge from the recursive reference implementation to the node
     /// based implementations, and is therefore only used in tests.
-    #[cfg(all(test, feature = "tokio_fsm"))]
+    #[cfg(all(test, feature = "fsm"))]
     fn from_start_chunk_and_level(start_chunk: ChunkNum, level: BlockSize) -> Self {
         let start_chunk = start_chunk.0;
         let level = level.0;
