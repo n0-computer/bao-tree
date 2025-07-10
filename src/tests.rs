@@ -30,19 +30,6 @@ use crate::{
     split, ChunkRanges, ChunkRangesRef, ResponseIter,
 };
 
-/// Compute the blake3 hash for the given data,
-///
-/// using blake3_hash_inner which is used in hash_block.
-fn blake3_hash(data: impl AsRef<[u8]>) -> blake3::Hash {
-    blake3::hash(data.as_ref())
-}
-
-fn bao_tree_blake3_impl(data: Vec<u8>) -> (blake3::Hash, blake3::Hash) {
-    let expected = blake3::hash(&data);
-    let actual = blake3_hash(&data);
-    (expected, actual)
-}
-
 /// Computes a reference pre order outboard using the bao crate (chunk_group_log = 0) and then flips it to a post-order outboard.
 fn post_order_outboard_bao(data: &[u8]) -> PostOrderMemOutboard {
     let mut outboard = Vec::new();
@@ -314,20 +301,6 @@ fn bao_tree_decode_slice_0() {
     bao_tree_decode_slice_iter_impl(td(1025), 0..1);
     bao_tree_decode_slice_iter_impl(td(1025), 1..2);
     bao_tree_decode_slice_iter_impl(td(1024 * 17), 0..18);
-}
-
-#[test]
-fn bao_tree_blake3_0() {
-    use make_test_data as td;
-    assert_tuple_eq!(bao_tree_blake3_impl(td(0)));
-    assert_tuple_eq!(bao_tree_blake3_impl(td(1)));
-    assert_tuple_eq!(bao_tree_blake3_impl(td(1023)));
-    assert_tuple_eq!(bao_tree_blake3_impl(td(1024)));
-    assert_tuple_eq!(bao_tree_blake3_impl(td(1025)));
-    assert_tuple_eq!(bao_tree_blake3_impl(td(2047)));
-    assert_tuple_eq!(bao_tree_blake3_impl(td(2048)));
-    assert_tuple_eq!(bao_tree_blake3_impl(td(2049)));
-    assert_tuple_eq!(bao_tree_blake3_impl(td(10000)));
 }
 
 #[test]
@@ -1006,11 +979,6 @@ proptest! {
     #[test]
     fn pre_order_iter_comparison(len in 0..1000000u64, level in 0u8..4) {
         prop_assert_tuple_eq!(pre_order_iter_comparison_impl(len, level));
-    }
-
-    #[test]
-    fn bao_tree_blake3(data in proptest::collection::vec(any::<u8>(), 0..32768)) {
-        prop_assert_tuple_eq!(bao_tree_blake3_impl(data));
     }
 
     #[test]
