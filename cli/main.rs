@@ -55,7 +55,7 @@ fn main() -> anyhow::Result<()> {
             target.write_all(size.to_le_bytes().as_ref())?;
             let dt = t0.elapsed();
             let rate = size as f64 / dt.as_secs_f64();
-            println!("{}", hash);
+            println!("{hash}");
             println!(
                 "{} bytes in {} seconds, {} bytes/sec",
                 size,
