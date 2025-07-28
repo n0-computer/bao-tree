@@ -1176,9 +1176,8 @@ dependencies = [
 
 [[package]]
 name = "positioned-io"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccabfeeb89c73adf4081f0dca7f8e28dbda90981a222ceea37f619e93ea6afe9"
+version = "0.3.4"
+source = "git+https://github.com/Frando/positioned-io?branch=Frando/wasm#7e023d676ade0738b5a2a2a133e196cf781ec9c6"
 dependencies = [
  "libc",
  "winapi",

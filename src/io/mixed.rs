@@ -396,6 +396,8 @@ mod impls {
 }
 
     // Apply the macros
-    impl_read_bytes_at_generic!(&[u8], Vec<u8>, std::fs::File);
+    impl_read_bytes_at_generic!(&[u8], Vec<u8>);
     impl_read_bytes_at_special!(Bytes, &Bytes, &mut Bytes);
+    #[cfg(feature = "fs")]
+    impl_read_bytes_at_generic!(std::fs::File);
 }
