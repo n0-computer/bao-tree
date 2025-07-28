@@ -469,7 +469,7 @@ fn pre_order_outboard_line(case: usize) {
         if delta == 0 {
             print!(" ");
         } else {
-            print!("{}", delta);
+            print!("{delta}");
         }
     }
     println!();
@@ -783,9 +783,9 @@ fn test_post_order_node_iter() {
         for i in 0..5 {
             let tree = BaoTree::new(size, BlockSize(i));
             let items = tree.post_order_nodes_iter().collect::<Vec<_>>();
-            println!("{}", i);
+            println!("{i}");
             for item in items {
-                println!("{:?}", item);
+                println!("{item:?}");
             }
             println!();
         }
@@ -803,7 +803,7 @@ fn test_pre_order_chunks_iter_ref() {
         for i in 0..5 {
             let tree = BaoTree::new(size, BlockSize(i));
             let items = PreOrderPartialIterRef::new(tree, &ranges, tree.block_size.0);
-            println!("{}", i);
+            println!("{i}");
             for item in items {
                 println!("{:?} {:?}", item.node.byte_range(), item);
             }
@@ -812,9 +812,9 @@ fn test_pre_order_chunks_iter_ref() {
         for i in 0..5 {
             let tree = BaoTree::new(size, BlockSize(i));
             let items = ReferencePreOrderPartialChunkIterRef::new(tree, &ranges, tree.block_size.0);
-            println!("{}", i);
+            println!("{i}");
             for item in items {
-                println!("{:?}", item);
+                println!("{item:?}");
             }
             println!();
         }
@@ -828,9 +828,9 @@ fn test_post_order_chunk_iter() {
     for i in 1..5 {
         let tree = BaoTree::new(1, BlockSize(i));
         let items = PostOrderChunkIter::new(tree).collect::<Vec<_>>();
-        println!("{}", i);
+        println!("{i}");
         for item in items {
-            println!("{:?}", item);
+            println!("{item:?}");
         }
         println!();
     }

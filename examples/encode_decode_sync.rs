@@ -44,7 +44,7 @@ fn main() -> io::Result<()> {
 
     // Print the valid ranges of the file
     for range in valid_ranges(&ob, &decoded, &ChunkRanges::all()) {
-        println!("{:?}", range);
+        println!("{range:?}");
     }
     Ok(())
 }

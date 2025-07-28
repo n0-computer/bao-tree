@@ -49,7 +49,7 @@ async fn main() -> io::Result<()> {
     let ranges = ChunkRanges::all();
     let mut stream = valid_ranges(&mut ob, &mut decoded, &ranges);
     while let Some(range) = stream.next().await {
-        println!("{:?}", range);
+        println!("{range:?}");
     }
     Ok(())
 }
