@@ -339,7 +339,7 @@ mod tests {
         while let Some(item) = rx.recv().await {
             res.push(item);
         }
-        println!("{:?}", res);
+        println!("{res:?}");
         let encoded2 = flatten(res);
         assert_eq!(encoded, encoded2);
     }
