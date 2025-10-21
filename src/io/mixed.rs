@@ -339,7 +339,7 @@ mod tests {
         while let Some(item) = rx.recv().await {
             res.push(item);
         }
-        println!("{:?}", res);
+        println!("{res:?}");
         let encoded2 = flatten(res);
         assert_eq!(encoded, encoded2);
     }
@@ -396,6 +396,8 @@ mod impls {
 }
 
     // Apply the macros
-    impl_read_bytes_at_generic!(&[u8], Vec<u8>, std::fs::File);
+    impl_read_bytes_at_generic!(&[u8], Vec<u8>);
     impl_read_bytes_at_special!(Bytes, &Bytes, &mut Bytes);
+    #[cfg(feature = "fs")]
+    impl_read_bytes_at_generic!(std::fs::File);
 }

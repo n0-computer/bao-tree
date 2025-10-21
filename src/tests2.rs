@@ -759,9 +759,9 @@ fn selection_reference_comparison_proptest(
     let actual2 = ReferencePreOrderPartialChunkIterRef::new(tree, &ranges, 0).collect::<Vec<_>>();
     if actual2 != expected {
         println!();
-        println!("{:?} {:?}", tree, ranges);
-        println!("actual new {:?}", actual2);
-        println!("expected   {:?}", expected);
+        println!("{tree:?} {ranges:?}");
+        println!("actual new {actual2:?}");
+        println!("expected   {expected:?}");
         panic!();
     }
 }
@@ -823,7 +823,7 @@ fn cases() -> impl Iterator<Item = (BaoTree, ChunkRanges, u8)> {
 #[test]
 fn filtered_chunks() {
     for (tree, ranges, min_full_level) in cases() {
-        println!("{:?} {:?}", tree, ranges);
+        println!("{tree:?} {ranges:?}");
         println!("encode:");
         let data = make_test_data(tree.size.try_into().unwrap());
         let (_, encoded) = encode_selected_reference(&data, BlockSize(min_full_level), &ranges);
