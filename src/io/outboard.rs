@@ -193,6 +193,21 @@ impl PostOrderMemOutboard {
         }
     }
 
+    /// Create a keyed outboard from `data` and a `block_size`.
+    pub fn create_keyed(data: impl AsRef<[u8]>, block_size: BlockSize, key: &[u8; 32]) -> Self {
+        let data = data.as_ref();
+        let size = data.len() as u64;
+        let tree = BaoTree::new(size, block_size);
+        let mut outboard = Vec::with_capacity(tree.outboard_size().try_into().unwrap());
+        let root =
+            crate::io::sync::keyed_outboard_post_order(data, tree, &mut outboard, key).unwrap();
+        Self {
+            root,
+            tree,
+            data: outboard,
+        }
+    }
+
     /// returns the outboard data, with the length suffix.
     pub fn into_inner_with_suffix(self) -> Vec<u8> {
         let mut res = self.data;
@@ -363,6 +378,22 @@ impl PreOrderMemOutboard {
             data: outboard,
         };
         let root = crate::io::sync::outboard(data, tree, &mut res).unwrap();
+        res.root = root;
+        res
+    }
+
+    /// Create a keyed outboard from `data` and a `block_size`.
+    pub fn create_keyed(data: impl AsRef<[u8]>, block_size: BlockSize, key: &[u8; 32]) -> Self {
+        let data = data.as_ref();
+        let size = data.len() as u64;
+        let tree = BaoTree::new(size, block_size);
+        let outboard = vec![0u8; tree.outboard_size().try_into().unwrap()];
+        let mut res = Self {
+            root: blake3::Hash::from([0; 32]),
+            tree,
+            data: outboard,
+        };
+        let root = crate::io::sync::keyed_outboard(data, tree, &mut res, key).unwrap();
         res.root = root;
         res
     }

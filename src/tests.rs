@@ -19,16 +19,431 @@ use super::{
     BaoTree, BlockSize, TreeNode,
 };
 use crate::{
-    assert_tuple_eq, blake3,
-    io::{full_chunk_groups, outboard::PreOrderMemOutboard, sync::Outboard, BaoContentItem, Leaf},
+    assert_tuple_eq, blake3, hash_subtree,
+    io::{
+        full_chunk_groups,
+        outboard::{PostOrderOutboard, PreOrderMemOutboard, PreOrderOutboard},
+        sync::Outboard,
+        BaoContentItem, DecodeError, EncodeError, Leaf,
+    },
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
-    prop_assert_tuple_eq,
+    keyed_hash_subtree, keyed_parent_cv, parent_cv, prop_assert_tuple_eq,
     rec::{
-        encode_ranges_reference, encode_selected_rec, make_test_data, range_union, truncate_ranges,
-        ReferencePreOrderPartialChunkIterRef,
+        encode_ranges_reference, encode_selected_rec, keyed_create_sized_keyed_checks,
+        keyed_init_from_keyed_checks, keyed_outboard_functions_checks, make_test_data, range_union,
+        truncate_ranges, ReferencePreOrderPartialChunkIterRef,
     },
     split, ChunkRanges, ChunkRangesRef, ResponseIter,
 };
+
+#[cfg(feature = "tokio_fsm")]
+use crate::rec::{
+    keyed_create_sized_keyed_checks_fsm, keyed_init_from_keyed_checks_fsm,
+    keyed_outboard_functions_checks_fsm,
+};
+
+fn keyed_encode_selected_reference(
+    data: &[u8],
+    block_size: BlockSize,
+    ranges: &ChunkRangesRef,
+    key: &[u8; 32],
+) -> (blake3::Hash, Vec<u8>) {
+    let mut res = Vec::new();
+    let max_skip_level = block_size.to_u32();
+    let ranges = truncate_ranges(ranges, data.len() as u64);
+    let hash = encode_selected_rec(
+        ChunkNum(0),
+        data,
+        true,
+        ranges,
+        max_skip_level,
+        true,
+        &mut res,
+        Some(key),
+    );
+    (hash, res)
+}
+
+fn keyed_encode_decode_roundtrip_sync_impl(data: &[u8], block_size: BlockSize, key: &[u8; 32]) {
+    use crate::io::sync::{keyed_decode_ranges, keyed_encode_ranges_validated};
+
+    let outboard = PostOrderMemOutboard::create_keyed(data, block_size, key);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(data, &outboard, &ranges, &mut encoded, key).unwrap();
+    let size = outboard.tree.size;
+    let tree = BaoTree::new(size, block_size);
+    let mut decoded = Vec::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    keyed_decode_ranges(
+        Cursor::new(encoded),
+        &ranges,
+        &mut decoded,
+        &mut ob_res,
+        key,
+    )
+    .unwrap();
+    assert_eq!(decoded, data);
+    assert_eq!(ob_res.root(), outboard.root());
+}
+
+fn keyed_encode_decode_roundtrip_fsm_impl(data: Vec<u8>, block_size: BlockSize, key: &[u8; 32]) {
+    use crate::io::fsm::{keyed_decode_ranges, keyed_encode_ranges_validated};
+
+    let mut outboard = PostOrderMemOutboard::create_keyed(&data, block_size, key);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(keyed_encode_ranges_validated(
+            Bytes::from(data.clone()),
+            &mut outboard,
+            &ranges,
+            &mut encoded,
+            key,
+        ))
+        .unwrap();
+    let tree = outboard.tree();
+    let mut decoded = bytes::BytesMut::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(keyed_decode_ranges(
+            Cursor::new(encoded.as_slice()),
+            ranges,
+            &mut decoded,
+            &mut ob_res,
+            key,
+        ))
+        .unwrap();
+    assert_eq!(decoded.to_vec(), data);
+    assert_eq!(ob_res.root(), outboard.root());
+}
+
+/// Parent hash mismatch node for 10_000-byte payloads at block level 0.
+fn keyed_multi_chunk_mismatch_node() -> TreeNode {
+    TreeNode(7)
+}
+
+fn keyed_wrong_key_decode_sync_impl(
+    data: &[u8],
+    block_size: BlockSize,
+    expected_err: Option<DecodeError>,
+) {
+    use crate::io::sync::{keyed_decode_ranges, keyed_encode_ranges_validated};
+
+    let key_a = blake3::derive_key("bao-tree.test", b"key-a");
+    let key_b = blake3::derive_key("bao-tree.test", b"key-b");
+    let outboard = PostOrderMemOutboard::create_keyed(data, block_size, &key_a);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(data, &outboard, &ranges, &mut encoded, &key_a).unwrap();
+    let tree = outboard.tree();
+    let mut decoded = Vec::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    let err = keyed_decode_ranges(
+        Cursor::new(encoded),
+        &ranges,
+        &mut decoded,
+        &mut ob_res,
+        &key_b,
+    )
+    .unwrap_err();
+    assert!(decoded.is_empty());
+    match expected_err {
+        Some(expected) => assert_decode_error_eq(err, expected),
+        None => assert!(matches!(
+            err,
+            DecodeError::ParentHashMismatch(_) | DecodeError::LeafHashMismatch(_)
+        )),
+    }
+}
+
+fn assert_decode_error_eq(got: DecodeError, expected: DecodeError) {
+    match (got, expected) {
+        (DecodeError::ParentHashMismatch(got), DecodeError::ParentHashMismatch(expected)) => {
+            assert_eq!(got, expected);
+        }
+        (DecodeError::LeafHashMismatch(got), DecodeError::LeafHashMismatch(expected)) => {
+            assert_eq!(got, expected);
+        }
+        (got, expected) => panic!("expected {expected:?}, got {got:?}"),
+    }
+}
+
+fn assert_encode_error_eq(got: EncodeError, expected: EncodeError) {
+    match (got, expected) {
+        (EncodeError::ParentHashMismatch(got), EncodeError::ParentHashMismatch(expected)) => {
+            assert_eq!(got, expected);
+        }
+        (EncodeError::LeafHashMismatch(got), EncodeError::LeafHashMismatch(expected)) => {
+            assert_eq!(got, expected);
+        }
+        (got, expected) => panic!("expected {expected:?}, got {got:?}"),
+    }
+}
+
+fn keyed_wrong_key_fails_encode_sync_impl(
+    data: &[u8],
+    block_size: BlockSize,
+    expected_err: EncodeError,
+) {
+    use crate::io::sync::keyed_encode_ranges_validated;
+
+    let key_a = blake3::derive_key("bao-tree.test", b"key-a");
+    let key_b = blake3::derive_key("bao-tree.test", b"key-b");
+    let outboard = PostOrderMemOutboard::create_keyed(data, block_size, &key_a);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    let err =
+        keyed_encode_ranges_validated(data, &outboard, &ranges, &mut encoded, &key_b).unwrap_err();
+    assert!(encoded.is_empty());
+    assert_encode_error_eq(err, expected_err);
+}
+
+fn unkeyed_encode_keyed_decode_fails_sync_impl(
+    data: &[u8],
+    block_size: BlockSize,
+    expected_err: DecodeError,
+) {
+    use crate::io::sync::{encode_ranges_validated, keyed_decode_ranges};
+
+    let key = blake3::derive_key("bao-tree.test", b"keyed-decode");
+    let outboard = PostOrderMemOutboard::create(data, block_size);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    encode_ranges_validated(data, &outboard, &ranges, &mut encoded).unwrap();
+    let tree = outboard.tree();
+    let mut decoded = Vec::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    let err = keyed_decode_ranges(
+        Cursor::new(encoded),
+        &ranges,
+        &mut decoded,
+        &mut ob_res,
+        &key,
+    )
+    .unwrap_err();
+    assert!(decoded.is_empty());
+    assert_decode_error_eq(err, expected_err);
+}
+
+#[cfg(feature = "tokio_fsm")]
+async fn keyed_wrong_key_decode_fsm_async_impl(
+    data: &[u8],
+    block_size: BlockSize,
+    expected_err: Option<DecodeError>,
+) {
+    use crate::io::fsm::{keyed_decode_ranges, keyed_encode_ranges_validated};
+
+    let key_a = blake3::derive_key("bao-tree.test", b"key-a");
+    let key_b = blake3::derive_key("bao-tree.test", b"key-b");
+    let mut outboard = PostOrderMemOutboard::create_keyed(data, block_size, &key_a);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(
+        Bytes::from(data.to_vec()),
+        &mut outboard,
+        &ranges,
+        &mut encoded,
+        &key_a,
+    )
+    .await
+    .unwrap();
+    let tree = outboard.tree();
+    let mut decoded = bytes::BytesMut::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    let err = keyed_decode_ranges(
+        Cursor::new(encoded.as_slice()),
+        ranges,
+        &mut decoded,
+        &mut ob_res,
+        &key_b,
+    )
+    .await
+    .unwrap_err();
+    assert!(decoded.is_empty());
+    match expected_err {
+        Some(expected) => assert_decode_error_eq(err, expected),
+        None => assert!(matches!(
+            err,
+            DecodeError::ParentHashMismatch(_) | DecodeError::LeafHashMismatch(_)
+        )),
+    }
+}
+
+#[cfg(feature = "tokio_fsm")]
+async fn keyed_wrong_key_fails_encode_fsm_async_impl(
+    data: &[u8],
+    block_size: BlockSize,
+    expected_err: EncodeError,
+) {
+    use crate::io::fsm::keyed_encode_ranges_validated;
+
+    let key_a = blake3::derive_key("bao-tree.test", b"key-a");
+    let key_b = blake3::derive_key("bao-tree.test", b"key-b");
+    let mut outboard = PostOrderMemOutboard::create_keyed(data, block_size, &key_a);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    let err = keyed_encode_ranges_validated(
+        Bytes::from(data.to_vec()),
+        &mut outboard,
+        &ranges,
+        &mut encoded,
+        &key_b,
+    )
+    .await
+    .unwrap_err();
+    assert!(encoded.is_empty());
+    assert_encode_error_eq(err, expected_err);
+}
+
+#[cfg(feature = "tokio_fsm")]
+async fn unkeyed_encode_keyed_decode_fails_fsm_async_impl(
+    data: &[u8],
+    block_size: BlockSize,
+    expected_err: DecodeError,
+) {
+    use crate::io::fsm::{encode_ranges_validated, keyed_decode_ranges};
+
+    let key = blake3::derive_key("bao-tree.test", b"keyed-decode-fsm");
+    let mut outboard = PostOrderMemOutboard::create(data, block_size);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    encode_ranges_validated(
+        Bytes::from(data.to_vec()),
+        &mut outboard,
+        &ranges,
+        &mut encoded,
+    )
+    .await
+    .unwrap();
+    let tree = outboard.tree();
+    let mut decoded = bytes::BytesMut::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    let err = keyed_decode_ranges(
+        Cursor::new(encoded.as_slice()),
+        ranges,
+        &mut decoded,
+        &mut ob_res,
+        &key,
+    )
+    .await
+    .unwrap_err();
+    assert!(decoded.is_empty());
+    assert_decode_error_eq(err, expected_err);
+}
+
+fn keyed_bao_tree_slice_roundtrip_test(
+    data: Vec<u8>,
+    mut range: Range<ChunkNum>,
+    block_size: BlockSize,
+    key: &[u8; 32],
+) {
+    use crate::io::sync::{keyed_encode_ranges_validated, DecodeResponseIter};
+
+    if range.start == range.end {
+        range.end.0 += 1;
+    }
+    let outboard = PostOrderMemOutboard::create_keyed(&data, block_size, key);
+    let ranges = ChunkRanges::from(range.clone());
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(&data, &outboard, &ranges, &mut encoded, key).unwrap();
+    let expected = data.clone();
+    let tree = outboard.tree();
+    let iter =
+        DecodeResponseIter::new_keyed(outboard.root(), tree, Cursor::new(&encoded), &ranges, key);
+    let mut all_ranges: RangeSet2<u64> = RangeSet2::empty();
+    for item in iter {
+        match item.unwrap() {
+            BaoContentItem::Leaf(Leaf { offset, data }) => {
+                all_ranges |= RangeSet2::from(offset..offset + (data.len() as u64));
+                let pos = offset.try_into().unwrap();
+                assert_eq!(expected[pos..pos + data.len()], *data);
+            }
+            BaoContentItem::Parent(_) => {}
+        }
+    }
+    let byte_start = range.start.to_bytes();
+    let byte_end = range.end.to_bytes().min(data.len() as u64);
+    let expected_coverage = RangeSet2::from(byte_start..byte_end);
+    assert_eq!(all_ranges, expected_coverage);
+}
+
+#[cfg(feature = "tokio_fsm")]
+async fn keyed_bao_tree_slice_roundtrip_fsm_test(
+    data: Vec<u8>,
+    mut range: Range<ChunkNum>,
+    block_size: BlockSize,
+    key: &[u8; 32],
+) {
+    use crate::io::fsm::{keyed_encode_ranges_validated, ResponseDecoder, ResponseDecoderNext};
+
+    if range.start == range.end {
+        range.end.0 += 1;
+    }
+    let mut outboard = PostOrderMemOutboard::create_keyed(&data, block_size, key);
+    let ranges = ChunkRanges::from(range.clone());
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(
+        Bytes::from(data.clone()),
+        &mut outboard,
+        &ranges,
+        &mut encoded,
+        key,
+    )
+    .await
+    .unwrap();
+    let expected = data.clone();
+    let tree = outboard.tree();
+    let mut reading = ResponseDecoder::new_keyed(
+        outboard.root(),
+        ranges,
+        tree,
+        Cursor::new(encoded.as_slice()),
+        key,
+    );
+    let mut all_ranges: RangeSet2<u64> = RangeSet2::empty();
+    while let ResponseDecoderNext::More((next, result)) = reading.next().await {
+        reading = next;
+        match result.unwrap() {
+            BaoContentItem::Leaf(Leaf { offset, data }) => {
+                all_ranges |= RangeSet2::from(offset..offset + (data.len() as u64));
+                let pos = offset.try_into().unwrap();
+                assert_eq!(expected[pos..pos + data.len()], *data);
+            }
+            BaoContentItem::Parent(_) => {}
+        }
+    }
+    let byte_start = range.start.to_bytes();
+    let byte_end = range.end.to_bytes().min(data.len() as u64);
+    let expected_coverage = RangeSet2::from(byte_start..byte_end);
+    assert_eq!(all_ranges, expected_coverage);
+}
 
 /// Computes a reference pre order outboard using the bao crate (chunk_group_log = 0) and then flips it to a post-order outboard.
 fn post_order_outboard_bao(data: &[u8]) -> PostOrderMemOutboard {
@@ -629,6 +1044,7 @@ fn encode_selected_rec_cases() {
             min_level,
             true,
             &mut actual_encoded,
+            None,
         );
         actual_encoded.len() - data.len()
     };
@@ -654,6 +1070,7 @@ fn encode_selected_reference(
         max_skip_level,
         true,
         &mut res,
+        None,
     );
     (hash, res)
 }
@@ -739,6 +1156,651 @@ fn outboard_hash() {
         let outboard = PostOrderMemOutboard::create(data, BlockSize(i));
         let hash = outboard.root();
         assert_eq!(hash, blake3::hash(data));
+    }
+}
+
+#[test]
+fn keyed_outboard_root_matches_blake3() {
+    let data = make_test_data(100_000);
+    let key = blake3::derive_key("bao-tree.test", b"format-1");
+    for block_level in 0..=4u8 {
+        let outboard = PostOrderMemOutboard::create_keyed(&data, BlockSize(block_level), &key);
+        assert_eq!(outboard.root(), blake3::keyed_hash(&key, &data));
+    }
+}
+
+#[test]
+fn keyed_domain_separation() {
+    let data = make_test_data(50_000);
+    let key1 = blake3::derive_key("bao-tree.test", b"format-1");
+    let key2 = blake3::derive_key("bao-tree.test", b"format-2");
+    let root1 = PostOrderMemOutboard::create_keyed(&data, BlockSize(2), &key1).root();
+    let root2 = PostOrderMemOutboard::create_keyed(&data, BlockSize(2), &key2).root();
+    assert_ne!(root1, root2);
+    assert_ne!(root1, blake3::hash(&data));
+}
+
+#[test]
+fn keyed_encode_decode_roundtrip_sync() {
+    use crate::io::sync::{keyed_decode_ranges, keyed_encode_ranges_validated};
+
+    let data = make_test_data(50_000);
+    let key = blake3::derive_key("bao-tree.test", b"roundtrip");
+    let block_size = BlockSize(2);
+    let outboard = PostOrderMemOutboard::create_keyed(&data, block_size, &key);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(&data, &outboard, &ranges, &mut encoded, &key).unwrap();
+    let size = outboard.tree.size;
+    let tree = BaoTree::new(size, block_size);
+    let mut decoded = Vec::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    keyed_decode_ranges(
+        Cursor::new(encoded),
+        &ranges,
+        &mut decoded,
+        &mut ob_res,
+        &key,
+    )
+    .unwrap();
+    assert_eq!(decoded, data);
+    assert_eq!(ob_res.root(), outboard.root());
+}
+
+#[test]
+fn keyed_encode_decode_roundtrip_fsm() {
+    use crate::io::fsm::{keyed_decode_ranges, keyed_encode_ranges_validated};
+
+    let data = make_test_data(50_000);
+    let key = blake3::derive_key("bao-tree.test", b"roundtrip");
+    let block_size = BlockSize(2);
+    let mut outboard = PostOrderMemOutboard::create_keyed(&data, block_size, &key);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(keyed_encode_ranges_validated(
+            Bytes::from(data.clone()),
+            &mut outboard,
+            &ranges,
+            &mut encoded,
+            &key,
+        ))
+        .unwrap();
+    let size = outboard.tree.size;
+    let tree = BaoTree::new(size, block_size);
+    let mut decoded = bytes::BytesMut::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(keyed_decode_ranges(
+            Cursor::new(encoded.as_slice()),
+            ranges,
+            &mut decoded,
+            &mut ob_res,
+            &key,
+        ))
+        .unwrap();
+    assert_eq!(decoded.to_vec(), data);
+    assert_eq!(ob_res.root(), outboard.root());
+}
+
+#[test]
+fn keyed_hash_subtree_differs_from_standard() {
+    use blake3::hazmat::HasherExt;
+
+    let data = make_test_data(2048);
+    let key = blake3::derive_key("bao-tree.test", b"low-level-subtree");
+    let standard = hash_subtree(0, &data, true);
+    let keyed = keyed_hash_subtree(0, &data, true, &key);
+    assert_ne!(standard, keyed);
+    assert_eq!(keyed, blake3::keyed_hash(&key, &data));
+    let non_root_standard = hash_subtree(1, &data[..1024], false);
+    let non_root_keyed = keyed_hash_subtree(1, &data[..1024], false, &key);
+    assert_ne!(non_root_standard, non_root_keyed);
+    let mut hasher = blake3::Hasher::new_keyed(&key);
+    hasher.set_input_offset(1024);
+    hasher.update(&data[..1024]);
+    let expected_non_root = blake3::Hash::from(hasher.finalize_non_root());
+    assert_eq!(non_root_keyed, expected_non_root);
+}
+
+#[test]
+fn keyed_parent_cv_differs_from_standard() {
+    use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
+
+    let left = blake3::hash(b"left");
+    let right = blake3::hash(b"right");
+    let key = blake3::derive_key("bao-tree.test", b"low-level-parent");
+    let standard = parent_cv(&left, &right, true);
+    let keyed = keyed_parent_cv(&left, &right, true, &key);
+    assert_ne!(standard, keyed);
+    let standard_non_root = parent_cv(&left, &right, false);
+    let keyed_non_root = keyed_parent_cv(&left, &right, false, &key);
+    assert_ne!(standard_non_root, keyed_non_root);
+    let left_cv: ChainingValue = *left.as_bytes();
+    let right_cv: ChainingValue = *right.as_bytes();
+    let mode = Mode::KeyedHash(&key);
+    assert_eq!(keyed, merge_subtrees_root(&left_cv, &right_cv, mode));
+    assert_eq!(
+        keyed_non_root,
+        blake3::Hash::from(merge_subtrees_non_root(&left_cv, &right_cv, mode))
+    );
+}
+
+#[test]
+fn keyed_pre_order_outboard_root_matches_blake3() {
+    let data = make_test_data(10_000);
+    let key = blake3::derive_key("bao-tree.test", b"pre-order");
+    for block_level in 0..=4u8 {
+        let outboard = PreOrderMemOutboard::create_keyed(&data, BlockSize(block_level), &key);
+        assert_eq!(outboard.root(), blake3::keyed_hash(&key, &data));
+    }
+}
+
+#[test]
+fn keyed_create_outboard_trait_sync() {
+    use crate::io::sync::CreateOutboard;
+
+    let data = make_test_data(5000);
+    let key = blake3::derive_key("bao-tree.test", b"create-outboard");
+    let block_size = BlockSize(2);
+    let post: PostOrderOutboard<Vec<u8>> =
+        PostOrderOutboard::create_keyed(Cursor::new(&data), block_size, &key).unwrap();
+    assert_eq!(post.root(), blake3::keyed_hash(&key, &data));
+    let pre: PreOrderOutboard<Vec<u8>> =
+        PreOrderOutboard::create_keyed(Cursor::new(&data), block_size, &key).unwrap();
+    assert_eq!(pre.root(), blake3::keyed_hash(&key, &data));
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_create_outboard_trait_fsm() {
+    use crate::io::fsm::CreateOutboard;
+
+    let data = make_test_data(5000);
+    let key = blake3::derive_key("bao-tree.test", b"create-outboard-fsm");
+    let block_size = BlockSize(2);
+    let post: PostOrderOutboard<Vec<u8>> =
+        PostOrderOutboard::create_keyed(Bytes::from(data.clone()), block_size, &key)
+            .await
+            .unwrap();
+    assert_eq!(post.root(), blake3::keyed_hash(&key, &data));
+    let pre: PreOrderOutboard<Vec<u8>> =
+        PreOrderOutboard::create_keyed(Bytes::from(data.clone()), block_size, &key)
+            .await
+            .unwrap();
+    assert_eq!(pre.root(), blake3::keyed_hash(&key, &data));
+}
+
+#[test]
+fn keyed_create_sized_keyed_sync() {
+    let data = make_test_data(5000);
+    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed");
+    keyed_create_sized_keyed_checks(&data, BlockSize(2), &key);
+}
+
+#[test]
+fn keyed_create_sized_keyed_empty_sync() {
+    let data: Vec<u8> = vec![];
+    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-empty");
+    keyed_create_sized_keyed_checks(&data, BlockSize(0), &key);
+}
+
+#[test]
+fn keyed_create_sized_keyed_oversize_sync() {
+    use crate::io::sync::CreateOutboard;
+
+    let data = make_test_data(100);
+    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-oversize");
+    let oversize = data.len() as u64 + 100;
+    assert!(PostOrderOutboard::<Vec<u8>>::create_sized_keyed(
+        Cursor::new(&data),
+        oversize,
+        BlockSize(0),
+        &key
+    )
+    .is_err());
+    let tree = BaoTree::new(oversize, BlockSize(0));
+    let mut post = PostOrderOutboard {
+        root: blake3::Hash::from([0; 32]),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    assert!(post.init_from_keyed(Cursor::new(&data), &key).is_err());
+    assert!(PreOrderOutboard::<Vec<u8>>::create_sized_keyed(
+        Cursor::new(&data),
+        oversize,
+        BlockSize(0),
+        &key
+    )
+    .is_err());
+    let mut pre = PreOrderOutboard {
+        root: blake3::Hash::from([0; 32]),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    assert!(pre.init_from_keyed(Cursor::new(&data), &key).is_err());
+}
+
+#[test]
+fn keyed_init_from_keyed_sync() {
+    let data = make_test_data(5000);
+    let key = blake3::derive_key("bao-tree.test", b"init-from-keyed");
+    keyed_init_from_keyed_checks(&data, BlockSize(2), &key);
+}
+
+#[test]
+fn keyed_outboard_functions_sync() {
+    let data = make_test_data(5000);
+    let key = blake3::derive_key("bao-tree.test", b"keyed-outboard-fn");
+    keyed_outboard_functions_checks(&data, BlockSize(2), &key);
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_create_sized_keyed_fsm() {
+    let data = make_test_data(5000);
+    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-fsm");
+    keyed_create_sized_keyed_checks_fsm(&data, BlockSize(2), &key).await;
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_create_sized_keyed_empty_fsm() {
+    let data: Vec<u8> = vec![];
+    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-empty-fsm");
+    keyed_create_sized_keyed_checks_fsm(&data, BlockSize(0), &key).await;
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_create_sized_keyed_oversize_fsm() {
+    use crate::io::fsm::CreateOutboard;
+
+    let data = make_test_data(100);
+    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-oversize-fsm");
+    let oversize = data.len() as u64 + 100;
+    assert!(PostOrderOutboard::<Vec<u8>>::create_sized_keyed(
+        Cursor::new(Bytes::from(data.clone())),
+        oversize,
+        BlockSize(0),
+        &key
+    )
+    .await
+    .is_err());
+    let tree = BaoTree::new(oversize, BlockSize(0));
+    let mut post = PostOrderOutboard {
+        root: blake3::Hash::from([0; 32]),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    assert!(post
+        .init_from_keyed(Cursor::new(Bytes::from(data.clone())), &key)
+        .await
+        .is_err());
+    assert!(PreOrderOutboard::<Vec<u8>>::create_sized_keyed(
+        Cursor::new(Bytes::from(data.clone())),
+        oversize,
+        BlockSize(0),
+        &key
+    )
+    .await
+    .is_err());
+    let mut pre = PreOrderOutboard {
+        root: blake3::Hash::from([0; 32]),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    assert!(pre
+        .init_from_keyed(Cursor::new(Bytes::from(data)), &key)
+        .await
+        .is_err());
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_init_from_keyed_fsm() {
+    let data = make_test_data(5000);
+    let key = blake3::derive_key("bao-tree.test", b"init-from-keyed-fsm");
+    keyed_init_from_keyed_checks_fsm(&data, BlockSize(2), &key).await;
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_outboard_functions_fsm() {
+    let data = make_test_data(5000);
+    let key = blake3::derive_key("bao-tree.test", b"keyed-outboard-fn-fsm");
+    keyed_outboard_functions_checks_fsm(&data, BlockSize(2), &key).await;
+}
+
+#[test]
+fn keyed_wrong_key_fails_decode_sync() {
+    let data = make_test_data(10_000);
+    for block_level in 0..=4u8 {
+        keyed_wrong_key_decode_sync_impl(&data, BlockSize(block_level), None);
+    }
+}
+
+#[test]
+fn keyed_wrong_key_decode_error_variant_sync() {
+    let multi_chunk = make_test_data(10_000);
+    keyed_wrong_key_decode_sync_impl(
+        &multi_chunk,
+        BlockSize(0),
+        Some(DecodeError::ParentHashMismatch(
+            keyed_multi_chunk_mismatch_node(),
+        )),
+    );
+    let single_byte = make_test_data(1);
+    keyed_wrong_key_decode_sync_impl(
+        &single_byte,
+        BlockSize(0),
+        Some(DecodeError::LeafHashMismatch(ChunkNum(0))),
+    );
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_wrong_key_fails_decode_fsm() {
+    let data = make_test_data(10_000);
+    for block_level in 0..=4u8 {
+        keyed_wrong_key_decode_fsm_async_impl(&data, BlockSize(block_level), None).await;
+    }
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_wrong_key_decode_error_variant_fsm() {
+    let multi_chunk = make_test_data(10_000);
+    keyed_wrong_key_decode_fsm_async_impl(
+        &multi_chunk,
+        BlockSize(0),
+        Some(DecodeError::ParentHashMismatch(
+            keyed_multi_chunk_mismatch_node(),
+        )),
+    )
+    .await;
+    let single_byte = make_test_data(1);
+    keyed_wrong_key_decode_fsm_async_impl(
+        &single_byte,
+        BlockSize(0),
+        Some(DecodeError::LeafHashMismatch(ChunkNum(0))),
+    )
+    .await;
+}
+
+#[test]
+fn keyed_wrong_key_fails_encode_sync() {
+    let multi_chunk = make_test_data(10_000);
+    keyed_wrong_key_fails_encode_sync_impl(
+        &multi_chunk,
+        BlockSize(0),
+        EncodeError::ParentHashMismatch(keyed_multi_chunk_mismatch_node()),
+    );
+    let single_byte = make_test_data(1);
+    keyed_wrong_key_fails_encode_sync_impl(
+        &single_byte,
+        BlockSize(0),
+        EncodeError::LeafHashMismatch(ChunkNum(0)),
+    );
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_wrong_key_fails_encode_fsm() {
+    let multi_chunk = make_test_data(10_000);
+    keyed_wrong_key_fails_encode_fsm_async_impl(
+        &multi_chunk,
+        BlockSize(0),
+        EncodeError::ParentHashMismatch(keyed_multi_chunk_mismatch_node()),
+    )
+    .await;
+    let single_byte = make_test_data(1);
+    keyed_wrong_key_fails_encode_fsm_async_impl(
+        &single_byte,
+        BlockSize(0),
+        EncodeError::LeafHashMismatch(ChunkNum(0)),
+    )
+    .await;
+}
+
+#[test]
+fn keyed_outboard_unkeyed_decode_fails_sync() {
+    use crate::io::sync::{decode_ranges, keyed_encode_ranges_validated};
+
+    let multi_chunk = make_test_data(10_000);
+    let key = blake3::derive_key("bao-tree.test", b"unkeyed-decode");
+    let outboard = PostOrderMemOutboard::create_keyed(&multi_chunk, BlockSize(0), &key);
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(&multi_chunk, &outboard, &ranges, &mut encoded, &key).unwrap();
+    let tree = outboard.tree();
+    let mut decoded = Vec::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    let err = decode_ranges(Cursor::new(encoded), &ranges, &mut decoded, &mut ob_res).unwrap_err();
+    assert!(decoded.is_empty());
+    assert_decode_error_eq(
+        err,
+        DecodeError::ParentHashMismatch(keyed_multi_chunk_mismatch_node()),
+    );
+
+    let single_byte = make_test_data(1);
+    let outboard = PostOrderMemOutboard::create_keyed(&single_byte, BlockSize(0), &key);
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(&single_byte, &outboard, &ranges, &mut encoded, &key).unwrap();
+    let tree = outboard.tree();
+    let mut decoded = Vec::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    let err = decode_ranges(Cursor::new(encoded), &ranges, &mut decoded, &mut ob_res).unwrap_err();
+    assert!(decoded.is_empty());
+    assert_decode_error_eq(err, DecodeError::LeafHashMismatch(ChunkNum(0)));
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_outboard_unkeyed_decode_fails_fsm() {
+    use crate::io::fsm::{decode_ranges, keyed_encode_ranges_validated};
+
+    let multi_chunk = make_test_data(10_000);
+    let key = blake3::derive_key("bao-tree.test", b"unkeyed-decode-fsm");
+    let mut outboard = PostOrderMemOutboard::create_keyed(&multi_chunk, BlockSize(0), &key);
+    let ranges = ChunkRanges::all();
+    let ranges2 = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(
+        Bytes::from(multi_chunk.clone()),
+        &mut outboard,
+        &ranges,
+        &mut encoded,
+        &key,
+    )
+    .await
+    .unwrap();
+    let tree = outboard.tree();
+    let mut decoded = bytes::BytesMut::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    let err = decode_ranges(
+        Cursor::new(encoded.as_slice()),
+        ranges,
+        &mut decoded,
+        &mut ob_res,
+    )
+    .await
+    .unwrap_err();
+    assert!(decoded.is_empty());
+    assert_decode_error_eq(
+        err,
+        DecodeError::ParentHashMismatch(keyed_multi_chunk_mismatch_node()),
+    );
+
+    let single_byte = make_test_data(1);
+    let mut outboard = PostOrderMemOutboard::create_keyed(&single_byte, BlockSize(0), &key);
+    let mut encoded = Vec::new();
+    keyed_encode_ranges_validated(
+        Bytes::from(single_byte.clone()),
+        &mut outboard,
+        &ranges2,
+        &mut encoded,
+        &key,
+    )
+    .await
+    .unwrap();
+    let tree = outboard.tree();
+    let mut decoded = bytes::BytesMut::new();
+    let mut ob_res = PostOrderMemOutboard {
+        root: outboard.root(),
+        tree,
+        data: vec![0; tree.outboard_size().try_into().unwrap()],
+    };
+    let err = decode_ranges(
+        Cursor::new(encoded.as_slice()),
+        ranges2,
+        &mut decoded,
+        &mut ob_res,
+    )
+    .await
+    .unwrap_err();
+    assert!(decoded.is_empty());
+    assert_decode_error_eq(err, DecodeError::LeafHashMismatch(ChunkNum(0)));
+}
+
+#[test]
+fn unkeyed_outboard_keyed_decode_fails_sync() {
+    let multi_chunk = make_test_data(10_000);
+    unkeyed_encode_keyed_decode_fails_sync_impl(
+        &multi_chunk,
+        BlockSize(0),
+        DecodeError::ParentHashMismatch(keyed_multi_chunk_mismatch_node()),
+    );
+    let single_byte = make_test_data(1);
+    unkeyed_encode_keyed_decode_fails_sync_impl(
+        &single_byte,
+        BlockSize(0),
+        DecodeError::LeafHashMismatch(ChunkNum(0)),
+    );
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn unkeyed_outboard_keyed_decode_fails_fsm() {
+    let multi_chunk = make_test_data(10_000);
+    unkeyed_encode_keyed_decode_fails_fsm_async_impl(
+        &multi_chunk,
+        BlockSize(0),
+        DecodeError::ParentHashMismatch(keyed_multi_chunk_mismatch_node()),
+    )
+    .await;
+    let single_byte = make_test_data(1);
+    unkeyed_encode_keyed_decode_fails_fsm_async_impl(
+        &single_byte,
+        BlockSize(0),
+        DecodeError::LeafHashMismatch(ChunkNum(0)),
+    )
+    .await;
+}
+
+#[test]
+fn keyed_encode_decode_edge_sizes_sync() {
+    use make_test_data as td;
+
+    let key = blake3::derive_key("bao-tree.test", b"edge");
+    let block_size = BlockSize(0);
+    for size in [0, 1, 1024, 1025] {
+        keyed_encode_decode_roundtrip_sync_impl(&td(size), block_size, &key);
+    }
+}
+
+#[test]
+fn keyed_encode_decode_edge_sizes_fsm() {
+    use make_test_data as td;
+
+    let key = blake3::derive_key("bao-tree.test", b"edge");
+    let block_size = BlockSize(0);
+    for size in [0, 1, 1024, 1025] {
+        keyed_encode_decode_roundtrip_fsm_impl(td(size), block_size, &key);
+    }
+}
+
+fn keyed_bao_tree_slice_roundtrip_case_table(key: &[u8; 32]) {
+    use make_test_data as td;
+
+    let cases = [
+        (0, 0..1),
+        (1, 0..1),
+        (1023, 0..1),
+        (1024, 0..1),
+        (1025, 0..1),
+        (1025, 0..2),
+        (1025, 1..2),
+        (24 * 1024 + 1, 0..25),
+    ];
+    for chunk_group_log in 0..4 {
+        let block_size = BlockSize(chunk_group_log);
+        for (count, range) in cases.clone() {
+            keyed_bao_tree_slice_roundtrip_test(
+                td(count),
+                ChunkNum(range.start)..ChunkNum(range.end),
+                block_size,
+                key,
+            );
+        }
+    }
+}
+
+#[test]
+fn keyed_bao_tree_slice_roundtrip_cases() {
+    let key = blake3::derive_key("bao-tree.test", b"slice");
+    keyed_bao_tree_slice_roundtrip_case_table(&key);
+}
+
+#[cfg(feature = "tokio_fsm")]
+#[tokio::test]
+async fn keyed_bao_tree_slice_roundtrip_fsm_cases() {
+    use make_test_data as td;
+
+    let key = blake3::derive_key("bao-tree.test", b"slice-fsm");
+    let cases = [
+        (0, 0..1),
+        (1, 0..1),
+        (1023, 0..1),
+        (1024, 0..1),
+        (1025, 0..1),
+        (1025, 0..2),
+        (1025, 1..2),
+        (24 * 1024 + 1, 0..25),
+    ];
+    for chunk_group_log in 0..4 {
+        let block_size = BlockSize(chunk_group_log);
+        for (count, range) in cases.clone() {
+            keyed_bao_tree_slice_roundtrip_fsm_test(
+                td(count),
+                ChunkNum(range.start)..ChunkNum(range.end),
+                block_size,
+                &key,
+            )
+            .await;
+        }
     }
 }
 
@@ -915,6 +1977,74 @@ proptest! {
     /// Checks that the simple recursive impl bao_encode_selected_recursive that
     /// does not need an outboard is the same as the more complex encode_ranges_validated
     /// that requires an outboard.
+    #[test]
+    fn keyed_encode_selected_reference_sync_proptest(
+        (size, ranges) in size_and_selection(1..100000, 2),
+        block_size in 0..5u8,
+        key_seed in proptest::collection::vec(any::<u8>(), 32),
+    ) {
+        let key: [u8; 32] = key_seed.try_into().unwrap();
+        let data = make_test_data(size);
+        let expected_hash = blake3::keyed_hash(&key, &data);
+        let block_size = BlockSize(block_size);
+        let (actual_hash, actual_encoded) =
+            keyed_encode_selected_reference(&data, block_size, &ranges, &key);
+        let mut expected_encoded = Vec::new();
+        let outboard = PostOrderMemOutboard::create_keyed(&data, block_size, &key);
+        crate::io::sync::keyed_encode_ranges_validated(
+            &data,
+            &outboard,
+            &ranges,
+            &mut expected_encoded,
+            &key,
+        )
+        .unwrap();
+        prop_assert_eq!(expected_hash, actual_hash);
+        prop_assert_eq!(hex::encode(expected_encoded), hex::encode(actual_encoded));
+    }
+
+    #[test]
+    fn keyed_encode_selected_reference_fsm_proptest(
+        (size, ranges) in size_and_selection(1..100000, 2),
+        block_size in 0..4u8,
+        key_seed in proptest::collection::vec(any::<u8>(), 32),
+    ) {
+        let key: [u8; 32] = key_seed.try_into().unwrap();
+        let data = make_test_data(size);
+        let expected_hash = blake3::keyed_hash(&key, &data);
+        let block_size = BlockSize(block_size);
+        let (actual_hash, actual_encoded) =
+            keyed_encode_selected_reference(&data, block_size, &ranges, &key);
+        let mut expected_encoded = Vec::new();
+        let outboard = PostOrderMemOutboard::create_keyed(&data, block_size, &key);
+        let data: Bytes = data.into();
+        tokio::runtime::Runtime::new().unwrap().block_on(
+            crate::io::fsm::keyed_encode_ranges_validated(
+                data,
+                outboard,
+                &ranges,
+                &mut expected_encoded,
+                &key,
+            ),
+        )
+        .unwrap();
+        prop_assert_eq!(expected_hash, actual_hash);
+        prop_assert_eq!(expected_encoded, actual_encoded);
+    }
+
+    #[test]
+    fn keyed_bao_tree_slice_roundtrip_proptest(
+        (len, start, size) in size_and_slice_overlapping(),
+        level in 0u8..6,
+        key_seed in proptest::collection::vec(any::<u8>(), 32),
+    ) {
+        let key: [u8; 32] = key_seed.try_into().unwrap();
+        let level = BlockSize(level);
+        let data = make_test_data(len as usize);
+        let chunk_range = start .. start + size;
+        keyed_bao_tree_slice_roundtrip_test(data, chunk_range, level, &key);
+    }
+
     #[test]
     fn encode_selected_reference_sync_proptest((size, ranges) in size_and_selection(1..100000, 2), block_size in 0..5u8) {
         let data = make_test_data(size);
