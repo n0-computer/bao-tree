@@ -33,7 +33,7 @@ use crate::{
         keyed_init_from_keyed_checks, keyed_outboard_functions_checks, make_test_data, range_union,
         truncate_ranges, ReferencePreOrderPartialChunkIterRef,
     },
-    split, ChunkRanges, ChunkRangesRef, ResponseIter,
+    split, ChunkRanges, ChunkRangesRef, Keyed, ResponseIter, Standard,
 };
 
 #[cfg(feature = "tokio_fsm")]
@@ -42,6 +42,7 @@ use crate::rec::{
     keyed_outboard_functions_checks_fsm,
 };
 
+/// Reference encoder using the [Keyed] hashing strategy.
 fn keyed_encode_selected_reference(
     data: &[u8],
     block_size: BlockSize,
@@ -59,7 +60,7 @@ fn keyed_encode_selected_reference(
         max_skip_level,
         true,
         &mut res,
-        Some(key),
+        Keyed(*key),
     );
     (hash, res)
 }
@@ -1044,7 +1045,7 @@ fn encode_selected_rec_cases() {
             min_level,
             true,
             &mut actual_encoded,
-            None,
+            Standard,
         );
         actual_encoded.len() - data.len()
     };
@@ -1070,7 +1071,7 @@ fn encode_selected_reference(
         max_skip_level,
         true,
         &mut res,
-        None,
+        Standard,
     );
     (hash, res)
 }

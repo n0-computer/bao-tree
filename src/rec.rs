@@ -96,8 +96,12 @@ fn truncated_len(ranges: &ChunkRangesRef, size: u64) -> usize {
 /// This is used as a reference implementation in tests, but also to compute hashes
 /// below the chunk group size when creating responses for outboards with a chunk group
 /// size of >0.
-#[allow(clippy::too_many_arguments)] // keyed mode adds `key`; splitting into a struct isn't worth it here
-pub(crate) fn encode_selected_rec(
+/// Recursive reference encoder shared by standard and keyed paths.
+///
+/// `hash_strategy` selects which [crate::BaoHashing] implementation to use when
+/// computing subtree and parent hashes.
+#[allow(clippy::too_many_arguments)] // keyed mode adds `hash_strategy`; splitting into a struct isn't worth it here
+pub(crate) fn encode_selected_rec<H: crate::BaoHashing>(
     start_chunk: ChunkNum,
     data: &[u8],
     is_root: bool,
@@ -105,14 +109,14 @@ pub(crate) fn encode_selected_rec(
     min_level: u32,
     emit_data: bool,
     res: &mut Vec<u8>,
-    key: Option<&[u8; 32]>,
+    hash_strategy: H,
 ) -> blake3::Hash {
     use blake3::CHUNK_LEN;
     if data.len() <= CHUNK_LEN {
         if emit_data && !query.is_empty() {
             res.extend_from_slice(data);
         }
-        crate::hash_subtree_with_key(start_chunk.0, data, is_root, key)
+        hash_strategy.hash_subtree(start_chunk.0, data, is_root)
     } else {
         let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
@@ -144,7 +148,7 @@ pub(crate) fn encode_selected_rec(
             min_level,
             emit_data,
             res,
-            key,
+            hash_strategy,
         );
         let right = encode_selected_rec(
             mid_chunk,
@@ -154,14 +158,14 @@ pub(crate) fn encode_selected_rec(
             min_level,
             emit_data,
             res,
-            key,
+            hash_strategy,
         );
         // backfill the hashes if needed
         if let Some(o) = hash_offset {
             res[o..o + 32].copy_from_slice(left.as_bytes());
             res[o + 32..o + 64].copy_from_slice(right.as_bytes());
         }
-        crate::parent_cv_with_key(&left, &right, is_root, key)
+        hash_strategy.parent_cv(&left, &right, is_root)
     }
 }
 
@@ -279,7 +283,7 @@ mod test_support {
             0,
             false,
             &mut res,
-            None,
+            crate::Standard,
         );
         (res, hash)
     }
@@ -295,7 +299,7 @@ mod test_support {
             0,
             true,
             &mut res,
-            None,
+            crate::Standard,
         );
         (res, hash)
     }
@@ -436,7 +440,7 @@ mod test_support {
             block_size.to_u32(),
             true,
             &mut res,
-            None,
+            crate::Standard,
         );
         (res, hash)
     }

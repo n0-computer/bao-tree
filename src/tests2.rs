@@ -32,7 +32,7 @@ use crate::{
         partial_chunk_iter_reference, range_union, response_iter_reference, select_nodes_rec,
         truncate_ranges, ReferencePreOrderPartialChunkIterRef,
     },
-    BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, TreeNode,
+    BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, Standard, TreeNode,
 };
 
 fn keyed_test_key(context: &[u8]) -> [u8; 32] {
@@ -1298,7 +1298,9 @@ fn selection_reference_comparison_proptest(
     }
 }
 
-/// Reference implementation of encode_ranges_validated that uses the simple recursive impl
+/// Reference implementation of encode_ranges_validated that uses the simple recursive impl.
+///
+/// Uses the [Standard] hashing strategy for unkeyed BLAKE3 mode.
 fn encode_selected_reference(
     data: &[u8],
     block_size: BlockSize,
@@ -1315,7 +1317,7 @@ fn encode_selected_reference(
         max_skip_level,
         true,
         &mut res,
-        None,
+        Standard,
     );
     (hash, res)
 }
