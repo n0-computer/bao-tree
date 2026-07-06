@@ -401,18 +401,15 @@ pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::H
     Ok((l_hash, r_hash))
 }
 
-/// Generic over `H` so keyed and standard decoders share this implementation.
 #[derive(Debug)]
 struct ResponseDecoderInner<R, H: BaoHashing + Copy = Standard> {
     iter: ResponseIter,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
-    /// Compile time hashing strategy, either [Standard] or [Keyed].
     hash_strategy: H,
 }
 
 impl<R, H: BaoHashing + Copy> ResponseDecoderInner<R, H> {
-    /// Shared constructor used by [ResponseDecoder::new] and [ResponseDecoder::new_keyed].
     fn with_hash_strategy(
         tree: BaoTree,
         hash: blake3::Hash,
@@ -435,12 +432,16 @@ impl<R, H: BaoHashing + Copy> ResponseDecoderInner<R, H> {
 
 /// Response decoder.
 ///
-/// Generic over `H` so keyed and standard decoders share this implementation.
-/// Defaults to [Standard]. Use [Self::new_keyed] for keyed responses.
+/// Keyed callers should use [KeyedResponseDecoder] via [Self::new_keyed].
 #[derive(Debug)]
 pub struct ResponseDecoder<R, H: BaoHashing + Copy = Standard>(Box<ResponseDecoderInner<R, H>>);
 
-/// Next type for ResponseDecoder.
+/// Keyed response decoder.
+///
+/// See [ResponseDecoder::new_keyed].
+pub type KeyedResponseDecoder<R> = ResponseDecoder<R, Keyed>;
+
+/// Next type for [ResponseDecoder].
 #[derive(Debug)]
 pub enum ResponseDecoderNext<R, H: BaoHashing + Copy = Standard> {
     /// One more item, and you get back the state machine in the next state
@@ -453,6 +454,11 @@ pub enum ResponseDecoderNext<R, H: BaoHashing + Copy = Standard> {
     /// The stream is done, you get back the underlying reader
     Done(R),
 }
+
+/// Next type for [KeyedResponseDecoder].
+///
+/// See [ResponseDecoder::new_keyed].
+pub type KeyedResponseDecoderNext<R> = ResponseDecoderNext<R, Keyed>;
 
 impl<R: AsyncStreamReader> ResponseDecoder<R> {
     /// Create a new response decoder state machine, when you have already read the size.
@@ -471,7 +477,7 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
         tree: BaoTree,
         encoded: R,
         key: &[u8; 32],
-    ) -> ResponseDecoder<R, Keyed> {
+    ) -> KeyedResponseDecoder<R> {
         ResponseDecoder(Box::new(ResponseDecoderInner::with_hash_strategy(
             tree,
             hash,
@@ -483,7 +489,6 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
 }
 
 impl<R: AsyncStreamReader, H: BaoHashing + Copy> ResponseDecoder<R, H> {
-    /// Shared constructor used by decode helpers and public new methods.
     pub(crate) fn with_hash_strategy(
         hash: blake3::Hash,
         ranges: ChunkRanges,
@@ -651,7 +656,6 @@ where
     O: Outboard,
     W: AsyncStreamWriter,
 {
-    // Shared impl, standard BLAKE3 hash mode.
     encode_ranges_validated_impl(data, outboard, ranges, encoded, Standard).await
 }
 
@@ -668,13 +672,10 @@ where
     O: Outboard,
     W: AsyncStreamWriter,
 {
-    // Shared impl, keyed BLAKE3 mode.
     encode_ranges_validated_impl(data, outboard, ranges, encoded, Keyed(*key)).await
 }
 
-/// Shared encode path for standard and keyed APIs.
-///
-/// `hash_strategy` selects which [BaoHashing] implementation validates hashes.
+/// Generic encode body monomorphized over the compile time hashing strategy.
 async fn encode_ranges_validated_impl<D, O, W, H: BaoHashing>(
     mut data: D,
     mut outboard: O,
@@ -781,7 +782,6 @@ where
     R: AsyncStreamReader,
     W: AsyncSliceWriter,
 {
-    // Shared impl, standard BLAKE3 hash mode.
     decode_ranges_impl(encoded, ranges, target, outboard, Standard).await
 }
 
@@ -798,13 +798,10 @@ where
     R: AsyncStreamReader,
     W: AsyncSliceWriter,
 {
-    // Shared impl, keyed BLAKE3 mode.
     decode_ranges_impl(encoded, ranges, target, outboard, Keyed(*key)).await
 }
 
-/// Shared decode path for standard and keyed APIs.
-///
-/// `hash_strategy` selects which [BaoHashing] implementation verifies hashes.
+/// Generic decode body monomorphized over the compile time hashing strategy.
 async fn decode_ranges_impl<R, O, W, H: BaoHashing + Copy>(
     encoded: R,
     ranges: ChunkRanges,
@@ -843,6 +840,7 @@ where
     }
     Ok(())
 }
+
 fn read_parent(buf: &[u8]) -> (blake3::Hash, blake3::Hash) {
     let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
     let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..64]).unwrap());
@@ -858,7 +856,6 @@ pub async fn outboard(
     tree: BaoTree,
     outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
-    // Shared impl, standard BLAKE3 hash mode.
     outboard_with_hash_strategy(data, tree, outboard, Standard).await
 }
 
@@ -869,7 +866,6 @@ pub async fn keyed_outboard(
     outboard: impl OutboardMut,
     key: &[u8; 32],
 ) -> io::Result<blake3::Hash> {
-    // Shared impl, keyed BLAKE3 mode.
     outboard_with_hash_strategy(data, tree, outboard, Keyed(*key)).await
 }
 
@@ -884,9 +880,7 @@ async fn outboard_with_hash_strategy<H: BaoHashing>(
     outboard_impl(tree, data, &mut outboard, &mut buffer, hash_strategy).await
 }
 
-/// Shared outboard traversal for standard and keyed APIs.
-///
-/// `hash_strategy` selects which [BaoHashing] implementation computes hashes.
+/// Generic outboard traversal monomorphized over the compile time hashing strategy.
 async fn outboard_impl<H: BaoHashing>(
     tree: BaoTree,
     mut data: impl AsyncStreamReader,
@@ -934,7 +928,6 @@ pub async fn outboard_post_order(
     tree: BaoTree,
     outboard: impl AsyncStreamWriter,
 ) -> io::Result<blake3::Hash> {
-    // Shared impl, standard BLAKE3 hash mode.
     outboard_post_order_with_hash_strategy(data, tree, outboard, Standard).await
 }
 
@@ -945,7 +938,6 @@ pub async fn keyed_outboard_post_order(
     outboard: impl AsyncStreamWriter,
     key: &[u8; 32],
 ) -> io::Result<blake3::Hash> {
-    // Shared impl, keyed BLAKE3 mode.
     outboard_post_order_with_hash_strategy(data, tree, outboard, Keyed(*key)).await
 }
 
@@ -960,9 +952,7 @@ async fn outboard_post_order_with_hash_strategy<H: BaoHashing>(
     outboard_post_order_impl(tree, data, &mut outboard, &mut buffer, hash_strategy).await
 }
 
-/// Shared post order outboard traversal for standard and keyed APIs.
-///
-/// `hash_strategy` selects which [BaoHashing] implementation computes hashes.
+/// Generic post order outboard traversal monomorphized over the compile time hashing strategy.
 async fn outboard_post_order_impl<H: BaoHashing>(
     tree: BaoTree,
     mut data: impl AsyncStreamReader,
@@ -1042,7 +1032,6 @@ mod validate {
         O: Outboard + 'a,
         D: AsyncSliceReader + 'a,
     {
-        // Shared impl, standard BLAKE3 hash mode.
         valid_ranges_impl(outboard, data, ranges, Standard)
     }
 
@@ -1057,11 +1046,10 @@ mod validate {
         O: Outboard + 'a,
         D: AsyncSliceReader + 'a,
     {
-        // Shared impl, keyed BLAKE3 mode.
         valid_ranges_impl(outboard, data, ranges, Keyed(*key))
     }
 
-    /// Shared validation path for standard and keyed APIs.
+    /// Generic validation body monomorphized over the compile time hashing strategy.
     fn valid_ranges_impl<'a, O, D, H: BaoHashing + Copy + 'a>(
         outboard: O,
         data: D,

@@ -96,10 +96,8 @@ fn truncated_len(ranges: &ChunkRangesRef, size: u64) -> usize {
 /// This is used as a reference implementation in tests, but also to compute hashes
 /// below the chunk group size when creating responses for outboards with a chunk group
 /// size of >0.
-/// Recursive reference encoder shared by standard and keyed paths.
 ///
-/// `hash_strategy` selects which [crate::BaoHashing] implementation to use when
-/// computing subtree and parent hashes.
+/// `hash_strategy` is the compile time hashing mode for subtree and parent hashes.
 #[allow(clippy::too_many_arguments)] // keyed mode adds `hash_strategy`; splitting into a struct isn't worth it here
 pub(crate) fn encode_selected_rec<H: crate::BaoHashing>(
     start_chunk: ChunkNum,

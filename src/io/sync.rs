@@ -339,17 +339,20 @@ impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
 
 /// Iterator that can be used to decode a response to a range request.
 ///
-/// Generic over `H` so keyed and standard decoders share this implementation.
-/// Defaults to [Standard]. Use [Self::new_keyed] for keyed responses.
+/// Keyed callers should use [KeyedDecodeResponseIter] via [Self::new_keyed].
 #[derive(Debug)]
 pub struct DecodeResponseIter<'a, R, H: BaoHashing + Copy = Standard> {
     inner: ResponseIterRef<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
     buf: BytesMut,
-    /// Compile time hashing strategy, either [Standard] or [Keyed].
     hash_strategy: H,
 }
+
+/// Keyed response decoder iterator.
+///
+/// See [DecodeResponseIter::new_keyed].
+pub type KeyedDecodeResponseIter<'a, R> = DecodeResponseIter<'a, R, Keyed>;
 
 impl<'a, R: Read> DecodeResponseIter<'a, R> {
     /// Create a new iterator to decode a response.
@@ -382,14 +385,13 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         encoded: R,
         ranges: &'a ChunkRangesRef,
         key: &[u8; 32],
-    ) -> DecodeResponseIter<'a, R, Keyed> {
+    ) -> KeyedDecodeResponseIter<'a, R> {
         let buf = BytesMut::with_capacity(tree.block_size().bytes());
         DecodeResponseIter::with_hash_strategy(root, tree, encoded, ranges, buf, Keyed(*key))
     }
 }
 
 impl<'a, R: Read, H: BaoHashing + Copy> DecodeResponseIter<'a, R, H> {
-    /// Shared constructor used by [Self::new] and [Self::new_keyed].
     pub(crate) fn with_hash_strategy(
         root: blake3::Hash,
         tree: BaoTree,
@@ -534,7 +536,6 @@ pub fn encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
     ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError> {
-    // Shared impl, standard BLAKE3 hash mode.
     encode_ranges_validated_impl(data, outboard, ranges, encoded, Standard)
 }
 
@@ -546,13 +547,10 @@ pub fn keyed_encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
     encoded: W,
     key: &[u8; 32],
 ) -> result::Result<(), EncodeError> {
-    // Shared impl, keyed BLAKE3 mode.
     encode_ranges_validated_impl(data, outboard, ranges, encoded, Keyed(*key))
 }
 
-/// Shared encode path for standard and keyed APIs.
-///
-/// `hash_strategy` selects which [BaoHashing] implementation validates hashes.
+/// Generic encode body monomorphized over the compile time hashing strategy.
 fn encode_ranges_validated_impl<D: ReadAt, O: Outboard, W: Write, H: BaoHashing>(
     data: D,
     outboard: O,
@@ -654,7 +652,6 @@ where
     R: Read,
     W: WriteAt,
 {
-    // Shared impl, standard BLAKE3 hash mode.
     decode_ranges_impl(encoded, ranges, target, outboard, Standard)
 }
 
@@ -671,13 +668,10 @@ where
     R: Read,
     W: WriteAt,
 {
-    // Shared impl, keyed BLAKE3 mode.
     decode_ranges_impl(encoded, ranges, target, outboard, Keyed(*key))
 }
 
-/// Shared decode path for standard and keyed APIs.
-///
-/// `hash_strategy` selects which [BaoHashing] implementation verifies hashes.
+/// Generic decode body monomorphized over the compile time hashing strategy.
 fn decode_ranges_impl<R, O, W, H: BaoHashing + Copy>(
     encoded: R,
     ranges: &ChunkRangesRef,
@@ -720,7 +714,6 @@ pub fn outboard(
     tree: BaoTree,
     outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
-    // Shared impl, standard BLAKE3 hash mode.
     outboard_with_hash_strategy(data, tree, outboard, Standard)
 }
 
@@ -731,7 +724,6 @@ pub fn keyed_outboard(
     outboard: impl OutboardMut,
     key: &[u8; 32],
 ) -> io::Result<blake3::Hash> {
-    // Shared impl, keyed BLAKE3 mode.
     outboard_with_hash_strategy(data, tree, outboard, Keyed(*key))
 }
 
@@ -746,9 +738,7 @@ fn outboard_with_hash_strategy<H: BaoHashing>(
     outboard_impl(tree, data, &mut outboard, &mut buffer, hash_strategy)
 }
 
-/// Shared outboard traversal for standard and keyed APIs.
-///
-/// `hash_strategy` selects which [BaoHashing] implementation computes hashes.
+/// Generic outboard traversal monomorphized over the compile time hashing strategy.
 fn outboard_impl<H: BaoHashing>(
     tree: BaoTree,
     mut data: impl Read,
@@ -797,7 +787,6 @@ pub fn outboard_post_order(
     tree: BaoTree,
     outboard: impl Write,
 ) -> io::Result<blake3::Hash> {
-    // Shared impl, standard BLAKE3 hash mode.
     outboard_post_order_with_hash_strategy(data, tree, outboard, Standard)
 }
 
@@ -808,7 +797,6 @@ pub fn keyed_outboard_post_order(
     outboard: impl Write,
     key: &[u8; 32],
 ) -> io::Result<blake3::Hash> {
-    // Shared impl, keyed BLAKE3 mode.
     outboard_post_order_with_hash_strategy(data, tree, outboard, Keyed(*key))
 }
 
@@ -823,9 +811,7 @@ fn outboard_post_order_with_hash_strategy<H: BaoHashing>(
     outboard_post_order_impl(tree, data, &mut outboard, &mut buffer, hash_strategy)
 }
 
-/// Shared post order outboard traversal for standard and keyed APIs.
-///
-/// `hash_strategy` selects which [BaoHashing] implementation computes hashes.
+/// Generic post order outboard traversal monomorphized over the compile time hashing strategy.
 fn outboard_post_order_impl<H: BaoHashing>(
     tree: BaoTree,
     mut data: impl Read,
@@ -913,7 +899,6 @@ mod validate {
         O: Outboard + 'a,
         D: ReadAt + 'a,
     {
-        // Shared impl, standard BLAKE3 hash mode.
         valid_ranges_impl(outboard, data, ranges, Standard)
     }
 
@@ -928,11 +913,10 @@ mod validate {
         O: Outboard + 'a,
         D: ReadAt + 'a,
     {
-        // Shared impl, keyed BLAKE3 mode.
         valid_ranges_impl(outboard, data, ranges, Keyed(*key))
     }
 
-    /// Shared validation path for standard and keyed APIs.
+    /// Generic validation body monomorphized over the compile time hashing strategy.
     fn valid_ranges_impl<'a, O, D, H: BaoHashing + Copy + 'a>(
         outboard: O,
         data: D,

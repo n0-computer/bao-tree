@@ -239,18 +239,10 @@ pub type ByteRanges = range_collections::RangeSet2<u64>;
 /// [ChunkRanges] implements [`AsRef<ChunkRangesRef>`].
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
-/// Hashing strategy for shared encode and decode paths.
+/// Compile time hashing strategy for shared encode and decode paths.
 ///
-/// Internal IO is generic over this trait so standard and keyed modes share one
-/// implementation without runtime branches or duplicated bodies.
-///
-/// Pass [Standard] for BLAKE3 hash mode or [Keyed] for BLAKE3 keyed mode. The
-/// strategy is a compile time value, so each call site monomorphizes with zero
-/// extra cost.
-///
-/// Public entry points like `encode_ranges_validated` and
-/// `keyed_encode_ranges_validated` pick the strategy at the API boundary and
-/// delegate to a single shared function.
+/// Use the standard or `keyed_*` public APIs rather than this trait directly.
+#[doc(hidden)]
 pub trait BaoHashing: Copy {
     /// Hash a subtree of chunk data.
     fn hash_subtree(&self, start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash;
@@ -263,10 +255,8 @@ pub trait BaoHashing: Copy {
     ) -> blake3::Hash;
 }
 
-/// BLAKE3 hash mode. Default [BaoHashing] strategy for unkeyed APIs.
-///
-/// Routes through the crate internal [hash_subtree] and [parent_cv] helpers so
-/// validate only builds still link those symbols.
+/// BLAKE3 hash mode strategy for unkeyed APIs.
+#[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct Standard;
 
@@ -285,7 +275,8 @@ impl BaoHashing for Standard {
     }
 }
 
-/// BLAKE3 keyed mode. Wraps a 32 byte key for domain separated hashing.
+/// BLAKE3 keyed mode strategy. Wraps a 32 byte key for domain separated hashing.
+#[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct Keyed(pub [u8; 32]);
 
