@@ -301,11 +301,23 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         key: &[u8; 32],
     ) -> Self {
         let buf = BytesMut::with_capacity(tree.block_size().bytes());
+        Self::new_keyed_with_buffer(root, tree, encoded, ranges, buf, key)
+    }
+
+    /// Create a new iterator to decode a keyed response.
+    ///
+    /// This is the same as [Self::new_keyed], but allows you to provide a buffer to use for decoding.
+    /// The buffer will be resized as needed, but it's capacity should be the [crate::BlockSize::bytes].
+    pub fn new_keyed_with_buffer(
+        root: blake3::Hash,
+        tree: BaoTree,
+        encoded: R,
+        ranges: &'a ChunkRangesRef,
+        buf: BytesMut,
+        key: &[u8; 32],
+    ) -> Self {
         DecodeResponseIter::with_mode(root, tree, encoded, ranges, buf, HashMode::Keyed(*key))
     }
-}
-
-impl<'a, R: Read> DecodeResponseIter<'a, R> {
     pub(crate) fn with_mode(
         root: blake3::Hash,
         tree: BaoTree,
@@ -462,7 +474,6 @@ pub fn keyed_encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
     encode_ranges_validated_impl(data, outboard, ranges, encoded, HashMode::Keyed(*key))
 }
 
-/// Generic encode body monomorphized over the compile time hashing strategy.
 fn encode_ranges_validated_impl<D: ReadAt, O: Outboard, W: Write>(
     data: D,
     outboard: O,
@@ -583,7 +594,6 @@ where
     decode_ranges_impl(encoded, ranges, target, outboard, HashMode::Keyed(*key))
 }
 
-/// Generic decode body monomorphized over the compile time hashing strategy.
 fn decode_ranges_impl<R, O, W>(
     encoded: R,
     ranges: &ChunkRangesRef,
@@ -650,7 +660,6 @@ fn outboard_with_mode(
     outboard_impl(tree, data, &mut outboard, &mut buffer, mode)
 }
 
-/// Generic outboard traversal monomorphized over the compile time hashing strategy.
 fn outboard_impl(
     tree: BaoTree,
     mut data: impl Read,
@@ -723,7 +732,6 @@ fn outboard_post_order_with_mode(
     outboard_post_order_impl(tree, data, &mut outboard, &mut buffer, mode)
 }
 
-/// Generic post order outboard traversal monomorphized over the compile time hashing strategy.
 fn outboard_post_order_impl(
     tree: BaoTree,
     mut data: impl Read,
@@ -828,7 +836,6 @@ mod validate {
         valid_ranges_impl(outboard, data, ranges, HashMode::Keyed(*key))
     }
 
-    /// Generic validation body monomorphized over the compile time hashing strategy.
     fn valid_ranges_impl<'a, O, D>(
         outboard: O,
         data: D,

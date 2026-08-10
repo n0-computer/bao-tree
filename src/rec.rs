@@ -446,7 +446,7 @@ mod test_support {
     use std::io::Cursor;
 
     use crate::io::outboard::{PostOrderMemOutboard, PreOrderMemOutboard, PreOrderOutboard};
-    use crate::io::sync::{self};
+    use crate::io::sync;
 
     pub(crate) fn assert_pre_order_outboard_matches_mem(
         outboard: &PreOrderOutboard<Vec<u8>>,

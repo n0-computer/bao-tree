@@ -305,6 +305,7 @@ impl HashMode {
 /// Compute the hash of a subtree using BLAKE3 keyed mode.
 ///
 /// See [keyed_parent_cv] for merging child hashes in keyed mode.
+#[inline]
 pub fn keyed_hash_subtree(
     start_chunk: u64,
     data: &[u8],
@@ -315,6 +316,7 @@ pub fn keyed_hash_subtree(
 }
 
 /// Merge two child subtree hashes using BLAKE3 keyed mode.
+#[inline]
 pub fn keyed_parent_cv(
     left_child: &blake3::Hash,
     right_child: &blake3::Hash,

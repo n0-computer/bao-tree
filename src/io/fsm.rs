@@ -391,9 +391,6 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
             HashMode::Keyed(*key),
         )))
     }
-}
-
-impl<R: AsyncStreamReader> ResponseDecoder<R> {
     pub(crate) fn with_mode(
         hash: blake3::Hash,
         ranges: ChunkRanges,
@@ -574,7 +571,6 @@ where
     encode_ranges_validated_impl(data, outboard, ranges, encoded, HashMode::Keyed(*key)).await
 }
 
-/// Generic encode body monomorphized over the compile time hashing strategy.
 async fn encode_ranges_validated_impl<D, O, W>(
     mut data: D,
     mut outboard: O,
@@ -700,7 +696,6 @@ where
     decode_ranges_impl(encoded, ranges, target, outboard, HashMode::Keyed(*key)).await
 }
 
-/// Generic decode body monomorphized over the compile time hashing strategy.
 async fn decode_ranges_impl<R, O, W>(
     encoded: R,
     ranges: ChunkRanges,
@@ -774,7 +769,6 @@ async fn outboard_with_mode(
     outboard_impl(tree, data, &mut outboard, &mut buffer, mode).await
 }
 
-/// Generic outboard traversal monomorphized over the compile time hashing strategy.
 async fn outboard_impl(
     tree: BaoTree,
     mut data: impl AsyncStreamReader,
@@ -846,7 +840,6 @@ async fn outboard_post_order_with_mode(
     outboard_post_order_impl(tree, data, &mut outboard, &mut buffer, mode).await
 }
 
-/// Generic post order outboard traversal monomorphized over the compile time hashing strategy.
 async fn outboard_post_order_impl(
     tree: BaoTree,
     mut data: impl AsyncStreamReader,
@@ -943,7 +936,6 @@ mod validate {
         valid_ranges_impl(outboard, data, ranges, HashMode::Keyed(*key))
     }
 
-    /// Generic validation body monomorphized over the compile time hashing strategy.
     fn valid_ranges_impl<'a, O, D>(
         outboard: O,
         data: D,
