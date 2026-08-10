@@ -128,37 +128,6 @@ pub trait CreateOutboard {
     ///
     /// It will only include data up the the current tree size.
     fn init_from(&mut self, data: impl AsyncStreamReader) -> impl Future<Output = io::Result<()>>;
-
-    /// Create a keyed outboard from a seekable data source.
-    #[allow(async_fn_in_trait)]
-    async fn create_keyed(
-        mut data: impl AsyncSliceReader,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) -> io::Result<Self>
-    where
-        Self: Default + Sized,
-    {
-        let size = data.size().await?;
-        Self::create_sized_keyed(Cursor::new(data), size, block_size, key).await
-    }
-
-    /// Create a keyed outboard from a data source with a known size.
-    fn create_sized_keyed(
-        data: impl AsyncStreamReader,
-        size: u64,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) -> impl Future<Output = io::Result<Self>>
-    where
-        Self: Default + Sized;
-
-    /// Init a keyed outboard from a data source.
-    fn init_from_keyed(
-        &mut self,
-        data: impl AsyncStreamReader,
-        key: &[u8; 32],
-    ) -> impl Future<Output = io::Result<()>>;
 }
 
 impl<O: Outboard> Outboard for &mut O {
@@ -280,35 +249,6 @@ impl<W: AsyncSliceWriter> CreateOutboard for PreOrderOutboard<W> {
         this.sync().await?;
         Ok(())
     }
-
-    async fn create_sized_keyed(
-        data: impl AsyncStreamReader,
-        size: u64,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) -> io::Result<Self>
-    where
-        Self: Default + Sized,
-    {
-        let mut res = Self {
-            tree: BaoTree::new(size, block_size),
-            ..Self::default()
-        };
-        res.init_from_keyed(data, key).await?;
-        Ok(res)
-    }
-
-    async fn init_from_keyed(
-        &mut self,
-        data: impl AsyncStreamReader,
-        key: &[u8; 32],
-    ) -> io::Result<()> {
-        let mut this = self;
-        let root = keyed_outboard(data, this.tree, &mut this, key).await?;
-        this.root = root;
-        this.sync().await?;
-        Ok(())
-    }
 }
 
 impl<W: AsyncSliceWriter> CreateOutboard for PostOrderOutboard<W> {
@@ -331,35 +271,6 @@ impl<W: AsyncSliceWriter> CreateOutboard for PostOrderOutboard<W> {
     async fn init_from(&mut self, data: impl AsyncStreamReader) -> io::Result<()> {
         let mut this = self;
         let root = outboard(data, this.tree, &mut this).await?;
-        this.root = root;
-        this.sync().await?;
-        Ok(())
-    }
-
-    async fn create_sized_keyed(
-        data: impl AsyncStreamReader,
-        size: u64,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) -> io::Result<Self>
-    where
-        Self: Default + Sized,
-    {
-        let mut res = Self {
-            tree: BaoTree::new(size, block_size),
-            ..Self::default()
-        };
-        res.init_from_keyed(data, key).await?;
-        Ok(res)
-    }
-
-    async fn init_from_keyed(
-        &mut self,
-        data: impl AsyncStreamReader,
-        key: &[u8; 32],
-    ) -> io::Result<()> {
-        let mut this = self;
-        let root = keyed_outboard(data, this.tree, &mut this, key).await?;
         this.root = root;
         this.sync().await?;
         Ok(())

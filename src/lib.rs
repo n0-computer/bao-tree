@@ -262,9 +262,22 @@ impl HashMode {
         data: &[u8],
         is_root: bool,
     ) -> blake3::Hash {
-        match self {
-            HashMode::Standard => hash_subtree(start_chunk, data, is_root),
-            HashMode::Keyed(key) => keyed_hash_subtree(start_chunk, data, is_root, key),
+        use blake3::hazmat::{ChainingValue, HasherExt};
+        if is_root {
+            debug_assert!(start_chunk == 0);
+            match self {
+                HashMode::Standard => blake3::hash(data),
+                HashMode::Keyed(key) => blake3::keyed_hash(key, data),
+            }
+        } else {
+            let mut hasher = match self {
+                HashMode::Standard => blake3::Hasher::new(),
+                HashMode::Keyed(key) => blake3::Hasher::new_keyed(key),
+            };
+            hasher.set_input_offset(start_chunk * 1024);
+            hasher.update(data);
+            let non_root_hash: ChainingValue = hasher.finalize_non_root();
+            blake3::Hash::from(non_root_hash)
         }
     }
 
@@ -274,24 +287,18 @@ impl HashMode {
         right_child: &blake3::Hash,
         is_root: bool,
     ) -> blake3::Hash {
-        match self {
-            HashMode::Standard => parent_cv(left_child, right_child, is_root),
-            HashMode::Keyed(key) => keyed_parent_cv(left_child, right_child, is_root, key),
+        use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
+        let left_child: ChainingValue = *left_child.as_bytes();
+        let right_child: ChainingValue = *right_child.as_bytes();
+        let mode = match self {
+            HashMode::Standard => Mode::Hash,
+            HashMode::Keyed(key) => Mode::KeyedHash(key),
+        };
+        if is_root {
+            merge_subtrees_root(&left_child, &right_child, mode)
+        } else {
+            blake3::Hash::from(merge_subtrees_non_root(&left_child, &right_child, mode))
         }
-    }
-}
-
-pub(crate) fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
-    use blake3::hazmat::{ChainingValue, HasherExt};
-    if is_root {
-        debug_assert!(start_chunk == 0);
-        blake3::hash(data)
-    } else {
-        let mut hasher = blake3::Hasher::new();
-        hasher.set_input_offset(start_chunk * 1024);
-        hasher.update(data);
-        let non_root_hash: ChainingValue = hasher.finalize_non_root();
-        blake3::Hash::from(non_root_hash)
     }
 }
 
@@ -304,36 +311,7 @@ pub fn keyed_hash_subtree(
     is_root: bool,
     key: &[u8; 32],
 ) -> blake3::Hash {
-    use blake3::hazmat::{ChainingValue, HasherExt};
-    if is_root {
-        debug_assert!(start_chunk == 0);
-        blake3::keyed_hash(key, data)
-    } else {
-        let mut hasher = blake3::Hasher::new_keyed(key);
-        hasher.set_input_offset(start_chunk * 1024);
-        hasher.update(data);
-        let non_root_hash: ChainingValue = hasher.finalize_non_root();
-        blake3::Hash::from(non_root_hash)
-    }
-}
-
-pub(crate) fn parent_cv(
-    left_child: &blake3::Hash,
-    right_child: &blake3::Hash,
-    is_root: bool,
-) -> blake3::Hash {
-    use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
-    let left_child: ChainingValue = *left_child.as_bytes();
-    let right_child: ChainingValue = *right_child.as_bytes();
-    if is_root {
-        merge_subtrees_root(&left_child, &right_child, Mode::Hash)
-    } else {
-        blake3::Hash::from(merge_subtrees_non_root(
-            &left_child,
-            &right_child,
-            Mode::Hash,
-        ))
-    }
+    HashMode::Keyed(*key).hash_subtree(start_chunk, data, is_root)
 }
 
 /// Merge two child subtree hashes using BLAKE3 keyed mode.
@@ -343,15 +321,7 @@ pub fn keyed_parent_cv(
     is_root: bool,
     key: &[u8; 32],
 ) -> blake3::Hash {
-    use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
-    let left_child: ChainingValue = *left_child.as_bytes();
-    let right_child: ChainingValue = *right_child.as_bytes();
-    let mode = Mode::KeyedHash(key);
-    if is_root {
-        merge_subtrees_root(&left_child, &right_child, mode)
-    } else {
-        blake3::Hash::from(merge_subtrees_non_root(&left_child, &right_child, mode))
-    }
+    HashMode::Keyed(*key).parent_cv(left_child, right_child, is_root)
 }
 
 /// Defines a Bao tree.

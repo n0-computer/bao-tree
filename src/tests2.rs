@@ -17,7 +17,7 @@ use smallvec::SmallVec;
 use test_strategy::proptest;
 
 use crate::{
-    assert_tuple_eq, blake3, hash_subtree,
+    assert_tuple_eq, blake3,
     io::{
         fsm::ResponseDecoderNext,
         outboard::{PostOrderMemOutboard, PreOrderMemOutboard},
@@ -25,10 +25,9 @@ use crate::{
         BaoContentItem, Leaf, Parent,
     },
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
-    keyed_hash_subtree, keyed_parent_cv, parent_cv, prop_assert_tuple_eq,
+    keyed_hash_subtree, keyed_parent_cv, prop_assert_tuple_eq,
     rec::{
-        encode_selected_rec, get_leaf_ranges, keyed_create_sized_keyed_checks,
-        keyed_init_from_keyed_checks, keyed_outboard_functions_checks, make_test_data,
+        encode_selected_rec, get_leaf_ranges, keyed_outboard_functions_checks, make_test_data,
         partial_chunk_iter_reference, range_union, response_iter_reference, select_nodes_rec,
         truncate_ranges, ReferencePreOrderPartialChunkIterRef,
     },
@@ -180,8 +179,8 @@ fn outboard_test_sync(data: &[u8], outboard: impl crate::io::sync::Outboard) {
         let start_chunk = node.chunk_range().start;
         let byte_range = tree.byte_range(node);
         let data = &data[byte_range.start.try_into().unwrap()..byte_range.end.try_into().unwrap()];
-        let expected = hash_subtree(start_chunk.0, data, is_root);
-        let actual = parent_cv(&l_hash, &r_hash, is_root);
+        let expected = HashMode::Standard.hash_subtree(start_chunk.0, data, is_root);
+        let actual = HashMode::Standard.parent_cv(&l_hash, &r_hash, is_root);
         assert_eq!(actual, expected);
     }
 }
@@ -224,8 +223,8 @@ async fn outboard_test_fsm(data: &[u8], mut outboard: impl crate::io::fsm::Outbo
         let start_chunk = node.chunk_range().start;
         let byte_range = tree.byte_range(node);
         let data = &data[byte_range.start.try_into().unwrap()..byte_range.end.try_into().unwrap()];
-        let expected = hash_subtree(start_chunk.0, data, is_root);
-        let actual = parent_cv(&l_hash, &r_hash, is_root);
+        let expected = HashMode::Standard.hash_subtree(start_chunk.0, data, is_root);
+        let actual = HashMode::Standard.parent_cv(&l_hash, &r_hash, is_root);
         assert_eq!(actual, expected);
     }
 }
@@ -340,48 +339,10 @@ fn keyed_pre_order_outboard_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
 }
 
 #[proptest]
-fn keyed_create_sized_keyed_proptest(#[strategy(tree())] tree: BaoTree) {
-    let data = make_test_data(tree.size.try_into().unwrap());
-    let key = keyed_test_key(&tree.size.to_le_bytes());
-    keyed_create_sized_keyed_checks(&data, tree.block_size, &key);
-}
-
-#[proptest]
-fn keyed_init_from_keyed_proptest(#[strategy(tree())] tree: BaoTree) {
-    let data = make_test_data(tree.size.try_into().unwrap());
-    let key = keyed_test_key(&tree.size.to_le_bytes());
-    keyed_init_from_keyed_checks(&data, tree.block_size, &key);
-}
-
-#[proptest]
 fn keyed_outboard_functions_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
     let key = keyed_test_key(&tree.size.to_le_bytes());
     keyed_outboard_functions_checks(&data, tree.block_size, &key);
-}
-
-#[cfg(feature = "tokio_fsm")]
-#[proptest]
-fn keyed_create_sized_keyed_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
-    let data = make_test_data(tree.size.try_into().unwrap());
-    let key = keyed_test_key(&tree.size.to_le_bytes());
-    run_blocking(crate::rec::keyed_create_sized_keyed_checks_fsm(
-        &data,
-        tree.block_size,
-        &key,
-    ));
-}
-
-#[cfg(feature = "tokio_fsm")]
-#[proptest]
-fn keyed_init_from_keyed_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
-    let data = make_test_data(tree.size.try_into().unwrap());
-    let key = keyed_test_key(&tree.size.to_le_bytes());
-    run_blocking(crate::rec::keyed_init_from_keyed_checks_fsm(
-        &data,
-        tree.block_size,
-        &key,
-    ));
 }
 
 fn mem_outboard_flip_impl(tree: BaoTree) {

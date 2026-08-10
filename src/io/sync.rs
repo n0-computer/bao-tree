@@ -96,33 +96,6 @@ pub trait CreateOutboard {
     ///
     /// It will only include data up the the current tree size.
     fn init_from(&mut self, data: impl Read) -> io::Result<()>;
-
-    /// Create a keyed outboard from a data source.
-    fn create_keyed(
-        mut data: impl Read + Seek,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) -> io::Result<Self>
-    where
-        Self: Default + Sized,
-    {
-        let size = data.seek(io::SeekFrom::End(0))?;
-        data.rewind()?;
-        Self::create_sized_keyed(data, size, block_size, key)
-    }
-
-    /// Create a keyed outboard from a data source with a known size.
-    fn create_sized_keyed(
-        data: impl Read,
-        size: u64,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) -> io::Result<Self>
-    where
-        Self: Default + Sized;
-
-    /// Init a keyed outboard from a data source.
-    fn init_from_keyed(&mut self, data: impl Read, key: &[u8; 32]) -> io::Result<()>;
 }
 
 impl<O: OutboardMut> OutboardMut for &mut O {
@@ -219,33 +192,6 @@ impl<W: WriteAt> CreateOutboard for PreOrderOutboard<W> {
         this.sync()?;
         Ok(())
     }
-
-    fn create_sized_keyed(
-        data: impl Read,
-        size: u64,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) -> io::Result<Self>
-    where
-        Self: Default + Sized,
-    {
-        let tree = BaoTree::new(size, block_size);
-        let mut res = Self {
-            tree,
-            ..Default::default()
-        };
-        res.init_from_keyed(data, key)?;
-        res.sync()?;
-        Ok(res)
-    }
-
-    fn init_from_keyed(&mut self, data: impl Read, key: &[u8; 32]) -> io::Result<()> {
-        let mut this = self;
-        let root = keyed_outboard(data, this.tree, &mut this, key)?;
-        this.root = root;
-        this.sync()?;
-        Ok(())
-    }
 }
 
 impl<W: WriteAt> CreateOutboard for PostOrderOutboard<W> {
@@ -266,33 +212,6 @@ impl<W: WriteAt> CreateOutboard for PostOrderOutboard<W> {
     fn init_from(&mut self, data: impl Read) -> io::Result<()> {
         let mut this = self;
         let root = outboard(data, this.tree, &mut this)?;
-        this.root = root;
-        this.sync()?;
-        Ok(())
-    }
-
-    fn create_sized_keyed(
-        data: impl Read,
-        size: u64,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) -> io::Result<Self>
-    where
-        Self: Default + Sized,
-    {
-        let tree = BaoTree::new(size, block_size);
-        let mut res = Self {
-            tree,
-            ..Default::default()
-        };
-        res.init_from_keyed(data, key)?;
-        res.sync()?;
-        Ok(res)
-    }
-
-    fn init_from_keyed(&mut self, data: impl Read, key: &[u8; 32]) -> io::Result<()> {
-        let mut this = self;
-        let root = keyed_outboard(data, this.tree, &mut this, key)?;
         this.root = root;
         this.sync()?;
         Ok(())

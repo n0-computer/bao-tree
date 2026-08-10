@@ -445,28 +445,8 @@ mod test_support {
 
     use std::io::Cursor;
 
-    use crate::io::outboard::{
-        PostOrderMemOutboard, PostOrderOutboard, PreOrderMemOutboard, PreOrderOutboard,
-    };
-    use crate::io::sync::{self, CreateOutboard, Outboard};
-
-    pub(crate) fn assert_post_order_outboard_matches_mem(
-        outboard: &PostOrderOutboard<Vec<u8>>,
-        data: &[u8],
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) {
-        let reference = PostOrderMemOutboard::create_keyed(data, block_size, key);
-        assert_eq!(outboard.root, reference.root);
-        let tree = outboard.tree;
-        let mut copied = PostOrderMemOutboard {
-            root: outboard.root,
-            tree,
-            data: vec![0; tree.outboard_hash_pairs() as usize * 64],
-        };
-        sync::copy(outboard, &mut copied).unwrap();
-        assert_eq!(copied.data, reference.data);
-    }
+    use crate::io::outboard::{PostOrderMemOutboard, PreOrderMemOutboard, PreOrderOutboard};
+    use crate::io::sync::{self};
 
     pub(crate) fn assert_pre_order_outboard_matches_mem(
         outboard: &PreOrderOutboard<Vec<u8>>,
@@ -484,157 +464,6 @@ mod test_support {
         };
         sync::copy(outboard, &mut copied).unwrap();
         assert_eq!(copied.data, reference.data);
-    }
-
-    fn assert_truncated_create_sized_keyed_post(
-        truncated: &PostOrderOutboard<Vec<u8>>,
-        data: &[u8],
-        truncated_size: u64,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) {
-        assert_eq!(truncated.tree.size, truncated_size);
-        assert_eq!(
-            truncated.root(),
-            blake3::keyed_hash(key, &data[..truncated_size as usize])
-        );
-        assert_post_order_outboard_matches_mem(
-            truncated,
-            &data[..truncated_size as usize],
-            block_size,
-            key,
-        );
-    }
-
-    fn assert_truncated_create_sized_keyed_pre(
-        truncated: &PreOrderOutboard<Vec<u8>>,
-        data: &[u8],
-        truncated_size: u64,
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) {
-        assert_eq!(truncated.tree.size, truncated_size);
-        assert_eq!(
-            truncated.root(),
-            blake3::keyed_hash(key, &data[..truncated_size as usize])
-        );
-        assert_pre_order_outboard_matches_mem(
-            truncated,
-            &data[..truncated_size as usize],
-            block_size,
-            key,
-        );
-    }
-
-    pub(crate) fn keyed_create_sized_keyed_checks(
-        data: &[u8],
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) {
-        let size = data.len() as u64;
-
-        let post: PostOrderOutboard<Vec<u8>> =
-            PostOrderOutboard::create_sized_keyed(Cursor::new(data), size, block_size, key)
-                .unwrap();
-        assert_post_order_outboard_matches_mem(&post, data, block_size, key);
-
-        let pre: PreOrderOutboard<Vec<u8>> =
-            PreOrderOutboard::create_sized_keyed(Cursor::new(data), size, block_size, key).unwrap();
-        assert_pre_order_outboard_matches_mem(&pre, data, block_size, key);
-
-        let truncated_size = 1024u64.min(size);
-        if truncated_size < size {
-            let truncated_post: PostOrderOutboard<Vec<u8>> = PostOrderOutboard::create_sized_keyed(
-                Cursor::new(data),
-                truncated_size,
-                BlockSize(0),
-                key,
-            )
-            .unwrap();
-            assert_truncated_create_sized_keyed_post(
-                &truncated_post,
-                data,
-                truncated_size,
-                BlockSize(0),
-                key,
-            );
-
-            let truncated_pre: PreOrderOutboard<Vec<u8>> = PreOrderOutboard::create_sized_keyed(
-                Cursor::new(data),
-                truncated_size,
-                BlockSize(0),
-                key,
-            )
-            .unwrap();
-            assert_truncated_create_sized_keyed_pre(
-                &truncated_pre,
-                data,
-                truncated_size,
-                BlockSize(0),
-                key,
-            );
-        }
-    }
-
-    pub(crate) fn keyed_init_from_keyed_checks(data: &[u8], block_size: BlockSize, key: &[u8; 32]) {
-        let tree = BaoTree::new(data.len() as u64, block_size);
-        let expected = blake3::keyed_hash(key, data);
-
-        let mut post = PostOrderOutboard {
-            root: blake3::Hash::from([0; 32]),
-            tree,
-            data: vec![0; tree.outboard_size().try_into().unwrap()],
-        };
-        post.init_from_keyed(Cursor::new(data), key).unwrap();
-        assert_eq!(post.root(), expected);
-        assert_post_order_outboard_matches_mem(&post, data, block_size, key);
-
-        let mut pre = PreOrderOutboard {
-            root: blake3::Hash::from([0; 32]),
-            tree,
-            data: vec![0; tree.outboard_size().try_into().unwrap()],
-        };
-        pre.init_from_keyed(Cursor::new(data), key).unwrap();
-        assert_eq!(pre.root(), expected);
-        assert_pre_order_outboard_matches_mem(&pre, data, block_size, key);
-
-        let truncated_size = 1024u64.min(data.len() as u64);
-        if truncated_size < data.len() as u64 {
-            let truncated_tree = BaoTree::new(truncated_size, BlockSize(0));
-            let truncated_expected = blake3::keyed_hash(key, &data[..truncated_size as usize]);
-
-            let mut truncated_post = PostOrderOutboard {
-                root: blake3::Hash::from([0; 32]),
-                tree: truncated_tree,
-                data: vec![0; truncated_tree.outboard_size().try_into().unwrap()],
-            };
-            truncated_post
-                .init_from_keyed(Cursor::new(data), key)
-                .unwrap();
-            assert_eq!(truncated_post.root(), truncated_expected);
-            assert_post_order_outboard_matches_mem(
-                &truncated_post,
-                &data[..truncated_size as usize],
-                BlockSize(0),
-                key,
-            );
-
-            let mut truncated_pre = PreOrderOutboard {
-                root: blake3::Hash::from([0; 32]),
-                tree: truncated_tree,
-                data: vec![0; truncated_tree.outboard_size().try_into().unwrap()],
-            };
-            truncated_pre
-                .init_from_keyed(Cursor::new(data), key)
-                .unwrap();
-            assert_eq!(truncated_pre.root(), truncated_expected);
-            assert_pre_order_outboard_matches_mem(
-                &truncated_pre,
-                &data[..truncated_size as usize],
-                BlockSize(0),
-                key,
-            );
-        }
     }
 
     pub(crate) fn keyed_outboard_functions_checks(
@@ -671,76 +500,37 @@ mod test_support {
         };
         let pre_from_post = post_mem.flip();
         assert_eq!(pre_from_post.data, pre.data);
-    }
 
-    #[cfg(feature = "tokio_fsm")]
-    pub(crate) async fn keyed_create_sized_keyed_checks_fsm(
-        data: &[u8],
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) {
-        use bytes::Bytes;
-
-        let size = data.len() as u64;
-
-        let post: PostOrderOutboard<Vec<u8>> =
-            <PostOrderOutboard<Vec<u8>> as crate::io::fsm::CreateOutboard>::create_sized_keyed(
-                Cursor::new(Bytes::from(data.to_vec())),
-                size,
-                block_size,
-                key,
-            )
-            .await
-            .unwrap();
-        assert_post_order_outboard_matches_mem(&post, data, block_size, key);
-
-        let pre: PreOrderOutboard<Vec<u8>> =
-            <PreOrderOutboard<Vec<u8>> as crate::io::fsm::CreateOutboard>::create_sized_keyed(
-                Cursor::new(Bytes::from(data.to_vec())),
-                size,
-                block_size,
-                key,
-            )
-            .await
-            .unwrap();
-        assert_pre_order_outboard_matches_mem(&pre, data, block_size, key);
-
-        let truncated_size = 1024u64.min(size);
-        if truncated_size < size {
-            let truncated_post: PostOrderOutboard<Vec<u8>> =
-                <PostOrderOutboard<Vec<u8>> as crate::io::fsm::CreateOutboard>::create_sized_keyed(
-                    Cursor::new(Bytes::from(data.to_vec())),
-                    truncated_size,
-                    BlockSize(0),
-                    key,
-                )
-                .await
-                .unwrap();
-            assert_truncated_create_sized_keyed_post(
-                &truncated_post,
-                data,
-                truncated_size,
-                BlockSize(0),
-                key,
+        let truncated_size = 1024u64.min(data.len() as u64);
+        if truncated_size < data.len() as u64 {
+            let truncated_tree = BaoTree::new(truncated_size, BlockSize(0));
+            let mut truncated_pre = PreOrderOutboard {
+                root: blake3::Hash::from([0; 32]),
+                tree: truncated_tree,
+                data: vec![0; truncated_tree.outboard_size().try_into().unwrap()],
+            };
+            let root =
+                sync::keyed_outboard(Cursor::new(data), truncated_tree, &mut truncated_pre, key)
+                    .unwrap();
+            truncated_pre.root = root;
+            assert_eq!(
+                root,
+                blake3::keyed_hash(key, &data[..truncated_size as usize])
             );
-
-            let truncated_pre: PreOrderOutboard<Vec<u8>> =
-                <PreOrderOutboard<Vec<u8>> as crate::io::fsm::CreateOutboard>::create_sized_keyed(
-                    Cursor::new(Bytes::from(data.to_vec())),
-                    truncated_size,
-                    BlockSize(0),
-                    key,
-                )
-                .await
-                .unwrap();
-            assert_truncated_create_sized_keyed_pre(
+            assert_pre_order_outboard_matches_mem(
                 &truncated_pre,
-                data,
-                truncated_size,
+                &data[..truncated_size as usize],
                 BlockSize(0),
                 key,
             );
         }
+
+        let oversize_tree = BaoTree::new(data.len() as u64 + 100, BlockSize(0));
+        let mut sink = Vec::new();
+        assert!(
+            sync::keyed_outboard_post_order(Cursor::new(data), oversize_tree, &mut sink, key)
+                .is_err()
+        );
     }
 
     #[cfg(feature = "tokio_fsm")]
@@ -789,87 +579,28 @@ mod test_support {
         };
         let pre_from_post = post_mem.flip();
         assert_eq!(pre_from_post.data, pre.data);
-    }
-
-    #[cfg(feature = "tokio_fsm")]
-    pub(crate) async fn keyed_init_from_keyed_checks_fsm(
-        data: &[u8],
-        block_size: BlockSize,
-        key: &[u8; 32],
-    ) {
-        use bytes::Bytes;
-
-        let tree = BaoTree::new(data.len() as u64, block_size);
-        let expected = blake3::keyed_hash(key, data);
-
-        let mut post = PostOrderOutboard {
-            root: blake3::Hash::from([0; 32]),
-            tree,
-            data: vec![0; tree.outboard_size().try_into().unwrap()],
-        };
-        crate::io::fsm::CreateOutboard::init_from_keyed(
-            &mut post,
-            Cursor::new(Bytes::from(data.to_vec())),
-            key,
-        )
-        .await
-        .unwrap();
-        assert_eq!(post.root(), expected);
-        assert_post_order_outboard_matches_mem(&post, data, block_size, key);
-
-        let mut pre = PreOrderOutboard {
-            root: blake3::Hash::from([0; 32]),
-            tree,
-            data: vec![0; tree.outboard_size().try_into().unwrap()],
-        };
-        crate::io::fsm::CreateOutboard::init_from_keyed(
-            &mut pre,
-            Cursor::new(Bytes::from(data.to_vec())),
-            key,
-        )
-        .await
-        .unwrap();
-        assert_eq!(pre.root(), expected);
-        assert_pre_order_outboard_matches_mem(&pre, data, block_size, key);
 
         let truncated_size = 1024u64.min(data.len() as u64);
         if truncated_size < data.len() as u64 {
             let truncated_tree = BaoTree::new(truncated_size, BlockSize(0));
-            let truncated_expected = blake3::keyed_hash(key, &data[..truncated_size as usize]);
-
-            let mut truncated_post = PostOrderOutboard {
-                root: blake3::Hash::from([0; 32]),
-                tree: truncated_tree,
-                data: vec![0; truncated_tree.outboard_size().try_into().unwrap()],
-            };
-            crate::io::fsm::CreateOutboard::init_from_keyed(
-                &mut truncated_post,
-                Cursor::new(Bytes::from(data.to_vec())),
-                key,
-            )
-            .await
-            .unwrap();
-            assert_eq!(truncated_post.root(), truncated_expected);
-            assert_post_order_outboard_matches_mem(
-                &truncated_post,
-                &data[..truncated_size as usize],
-                BlockSize(0),
-                key,
-            );
-
             let mut truncated_pre = PreOrderOutboard {
                 root: blake3::Hash::from([0; 32]),
                 tree: truncated_tree,
                 data: vec![0; truncated_tree.outboard_size().try_into().unwrap()],
             };
-            crate::io::fsm::CreateOutboard::init_from_keyed(
-                &mut truncated_pre,
+            let root = keyed_outboard(
                 Cursor::new(Bytes::from(data.to_vec())),
+                truncated_tree,
+                &mut truncated_pre,
                 key,
             )
             .await
             .unwrap();
-            assert_eq!(truncated_pre.root(), truncated_expected);
+            truncated_pre.root = root;
+            assert_eq!(
+                root,
+                blake3::keyed_hash(key, &data[..truncated_size as usize])
+            );
             assert_pre_order_outboard_matches_mem(
                 &truncated_pre,
                 &data[..truncated_size as usize],
@@ -877,6 +608,17 @@ mod test_support {
                 key,
             );
         }
+
+        let oversize_tree = BaoTree::new(data.len() as u64 + 100, BlockSize(0));
+        let mut sink = Vec::new();
+        assert!(keyed_outboard_post_order(
+            Cursor::new(Bytes::from(data.to_vec())),
+            oversize_tree,
+            &mut sink,
+            key
+        )
+        .await
+        .is_err());
     }
 
     /// Check that l and r of a 2-tuple are equal

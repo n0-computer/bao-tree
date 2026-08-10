@@ -19,28 +19,22 @@ use super::{
     BaoTree, BlockSize, TreeNode,
 };
 use crate::{
-    assert_tuple_eq, blake3, hash_subtree,
+    assert_tuple_eq, blake3,
     io::{
-        full_chunk_groups,
-        outboard::{PostOrderOutboard, PreOrderMemOutboard, PreOrderOutboard},
-        sync::Outboard,
-        BaoContentItem, DecodeError, EncodeError, Leaf,
+        full_chunk_groups, outboard::PreOrderMemOutboard, sync::Outboard, BaoContentItem,
+        DecodeError, EncodeError, Leaf,
     },
     iter::{PostOrderChunkIter, PreOrderPartialIterRef, ResponseIterRef},
-    keyed_hash_subtree, keyed_parent_cv, parent_cv, prop_assert_tuple_eq,
+    keyed_hash_subtree, keyed_parent_cv, prop_assert_tuple_eq,
     rec::{
-        encode_ranges_reference, encode_selected_rec, keyed_create_sized_keyed_checks,
-        keyed_init_from_keyed_checks, keyed_outboard_functions_checks, make_test_data, range_union,
-        truncate_ranges, ReferencePreOrderPartialChunkIterRef,
+        encode_ranges_reference, encode_selected_rec, keyed_outboard_functions_checks,
+        make_test_data, range_union, truncate_ranges, ReferencePreOrderPartialChunkIterRef,
     },
     split, ChunkRanges, ChunkRangesRef, HashMode, ResponseIter,
 };
 
 #[cfg(feature = "tokio_fsm")]
-use crate::rec::{
-    keyed_create_sized_keyed_checks_fsm, keyed_init_from_keyed_checks_fsm,
-    keyed_outboard_functions_checks_fsm,
-};
+use crate::rec::keyed_outboard_functions_checks_fsm;
 
 /// Reference encoder using BLAKE3 keyed mode.
 fn keyed_encode_selected_reference(
@@ -1260,11 +1254,11 @@ fn keyed_hash_subtree_differs_from_standard() {
 
     let data = make_test_data(2048);
     let key = blake3::derive_key("bao-tree.test", b"low-level-subtree");
-    let standard = hash_subtree(0, &data, true);
+    let standard = HashMode::Standard.hash_subtree(0, &data, true);
     let keyed = keyed_hash_subtree(0, &data, true, &key);
     assert_ne!(standard, keyed);
     assert_eq!(keyed, blake3::keyed_hash(&key, &data));
-    let non_root_standard = hash_subtree(1, &data[..1024], false);
+    let non_root_standard = HashMode::Standard.hash_subtree(1, &data[..1024], false);
     let non_root_keyed = keyed_hash_subtree(1, &data[..1024], false, &key);
     assert_ne!(non_root_standard, non_root_keyed);
     let mut hasher = blake3::Hasher::new_keyed(&key);
@@ -1281,10 +1275,10 @@ fn keyed_parent_cv_differs_from_standard() {
     let left = blake3::hash(b"left");
     let right = blake3::hash(b"right");
     let key = blake3::derive_key("bao-tree.test", b"low-level-parent");
-    let standard = parent_cv(&left, &right, true);
+    let standard = HashMode::Standard.parent_cv(&left, &right, true);
     let keyed = keyed_parent_cv(&left, &right, true, &key);
     assert_ne!(standard, keyed);
-    let standard_non_root = parent_cv(&left, &right, false);
+    let standard_non_root = HashMode::Standard.parent_cv(&left, &right, false);
     let keyed_non_root = keyed_parent_cv(&left, &right, false, &key);
     assert_ne!(standard_non_root, keyed_non_root);
     let left_cv: ChainingValue = *left.as_bytes();
@@ -1308,171 +1302,10 @@ fn keyed_pre_order_outboard_root_matches_blake3() {
 }
 
 #[test]
-fn keyed_create_outboard_trait_sync() {
-    use crate::io::sync::CreateOutboard;
-
-    let data = make_test_data(5000);
-    let key = blake3::derive_key("bao-tree.test", b"create-outboard");
-    let block_size = BlockSize(2);
-    let post: PostOrderOutboard<Vec<u8>> =
-        PostOrderOutboard::create_keyed(Cursor::new(&data), block_size, &key).unwrap();
-    assert_eq!(post.root(), blake3::keyed_hash(&key, &data));
-    let pre: PreOrderOutboard<Vec<u8>> =
-        PreOrderOutboard::create_keyed(Cursor::new(&data), block_size, &key).unwrap();
-    assert_eq!(pre.root(), blake3::keyed_hash(&key, &data));
-}
-
-#[cfg(feature = "tokio_fsm")]
-#[tokio::test]
-async fn keyed_create_outboard_trait_fsm() {
-    use crate::io::fsm::CreateOutboard;
-
-    let data = make_test_data(5000);
-    let key = blake3::derive_key("bao-tree.test", b"create-outboard-fsm");
-    let block_size = BlockSize(2);
-    let post: PostOrderOutboard<Vec<u8>> =
-        PostOrderOutboard::create_keyed(Bytes::from(data.clone()), block_size, &key)
-            .await
-            .unwrap();
-    assert_eq!(post.root(), blake3::keyed_hash(&key, &data));
-    let pre: PreOrderOutboard<Vec<u8>> =
-        PreOrderOutboard::create_keyed(Bytes::from(data.clone()), block_size, &key)
-            .await
-            .unwrap();
-    assert_eq!(pre.root(), blake3::keyed_hash(&key, &data));
-}
-
-#[test]
-fn keyed_create_sized_keyed_sync() {
-    let data = make_test_data(5000);
-    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed");
-    keyed_create_sized_keyed_checks(&data, BlockSize(2), &key);
-}
-
-#[test]
-fn keyed_create_sized_keyed_empty_sync() {
-    let data: Vec<u8> = vec![];
-    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-empty");
-    keyed_create_sized_keyed_checks(&data, BlockSize(0), &key);
-}
-
-#[test]
-fn keyed_create_sized_keyed_oversize_sync() {
-    use crate::io::sync::CreateOutboard;
-
-    let data = make_test_data(100);
-    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-oversize");
-    let oversize = data.len() as u64 + 100;
-    assert!(PostOrderOutboard::<Vec<u8>>::create_sized_keyed(
-        Cursor::new(&data),
-        oversize,
-        BlockSize(0),
-        &key
-    )
-    .is_err());
-    let tree = BaoTree::new(oversize, BlockSize(0));
-    let mut post = PostOrderOutboard {
-        root: blake3::Hash::from([0; 32]),
-        tree,
-        data: vec![0; tree.outboard_size().try_into().unwrap()],
-    };
-    assert!(post.init_from_keyed(Cursor::new(&data), &key).is_err());
-    assert!(PreOrderOutboard::<Vec<u8>>::create_sized_keyed(
-        Cursor::new(&data),
-        oversize,
-        BlockSize(0),
-        &key
-    )
-    .is_err());
-    let mut pre = PreOrderOutboard {
-        root: blake3::Hash::from([0; 32]),
-        tree,
-        data: vec![0; tree.outboard_size().try_into().unwrap()],
-    };
-    assert!(pre.init_from_keyed(Cursor::new(&data), &key).is_err());
-}
-
-#[test]
-fn keyed_init_from_keyed_sync() {
-    let data = make_test_data(5000);
-    let key = blake3::derive_key("bao-tree.test", b"init-from-keyed");
-    keyed_init_from_keyed_checks(&data, BlockSize(2), &key);
-}
-
-#[test]
 fn keyed_outboard_functions_sync() {
     let data = make_test_data(5000);
     let key = blake3::derive_key("bao-tree.test", b"keyed-outboard-fn");
     keyed_outboard_functions_checks(&data, BlockSize(2), &key);
-}
-
-#[cfg(feature = "tokio_fsm")]
-#[tokio::test]
-async fn keyed_create_sized_keyed_fsm() {
-    let data = make_test_data(5000);
-    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-fsm");
-    keyed_create_sized_keyed_checks_fsm(&data, BlockSize(2), &key).await;
-}
-
-#[cfg(feature = "tokio_fsm")]
-#[tokio::test]
-async fn keyed_create_sized_keyed_empty_fsm() {
-    let data: Vec<u8> = vec![];
-    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-empty-fsm");
-    keyed_create_sized_keyed_checks_fsm(&data, BlockSize(0), &key).await;
-}
-
-#[cfg(feature = "tokio_fsm")]
-#[tokio::test]
-async fn keyed_create_sized_keyed_oversize_fsm() {
-    use crate::io::fsm::CreateOutboard;
-
-    let data = make_test_data(100);
-    let key = blake3::derive_key("bao-tree.test", b"create-sized-keyed-oversize-fsm");
-    let oversize = data.len() as u64 + 100;
-    assert!(PostOrderOutboard::<Vec<u8>>::create_sized_keyed(
-        Cursor::new(Bytes::from(data.clone())),
-        oversize,
-        BlockSize(0),
-        &key
-    )
-    .await
-    .is_err());
-    let tree = BaoTree::new(oversize, BlockSize(0));
-    let mut post = PostOrderOutboard {
-        root: blake3::Hash::from([0; 32]),
-        tree,
-        data: vec![0; tree.outboard_size().try_into().unwrap()],
-    };
-    assert!(post
-        .init_from_keyed(Cursor::new(Bytes::from(data.clone())), &key)
-        .await
-        .is_err());
-    assert!(PreOrderOutboard::<Vec<u8>>::create_sized_keyed(
-        Cursor::new(Bytes::from(data.clone())),
-        oversize,
-        BlockSize(0),
-        &key
-    )
-    .await
-    .is_err());
-    let mut pre = PreOrderOutboard {
-        root: blake3::Hash::from([0; 32]),
-        tree,
-        data: vec![0; tree.outboard_size().try_into().unwrap()],
-    };
-    assert!(pre
-        .init_from_keyed(Cursor::new(Bytes::from(data)), &key)
-        .await
-        .is_err());
-}
-
-#[cfg(feature = "tokio_fsm")]
-#[tokio::test]
-async fn keyed_init_from_keyed_fsm() {
-    let data = make_test_data(5000);
-    let key = blake3::derive_key("bao-tree.test", b"init-from-keyed-fsm");
-    keyed_init_from_keyed_checks_fsm(&data, BlockSize(2), &key).await;
 }
 
 #[cfg(feature = "tokio_fsm")]

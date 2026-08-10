@@ -227,7 +227,7 @@ where
 /// This will compute the root hash, so it will have to traverse the entire tree.
 /// The `ranges` parameter just controls which parts of the data are written.
 ///
-/// Except for writing to a buffer, this is the same as [crate::hash_subtree].
+/// Except for writing to a buffer, this is the same as computing the subtree hash.
 /// The `min_level` parameter controls the minimum level that will be emitted as a leaf.
 /// Set this to 0 to disable chunk groups entirely.
 /// The `emit_data` parameter controls whether the data is written to the buffer.
