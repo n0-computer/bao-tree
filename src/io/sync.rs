@@ -1057,8 +1057,35 @@ mod validate {
     where
         O: Outboard + 'a,
     {
+        valid_outboard_ranges_impl(outboard, ranges, HashMode::Standard)
+    }
+
+    /// Given just a keyed outboard, compute all valid ranges.
+    ///
+    /// This is not cheap since it recomputes the hashes for all chunks.
+    pub fn keyed_valid_outboard_ranges<'a, O>(
+        outboard: O,
+        ranges: &'a ChunkRangesRef,
+        key: &[u8; 32],
+    ) -> impl IntoIterator<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+    {
+        valid_outboard_ranges_impl(outboard, ranges, HashMode::Keyed(*key))
+    }
+
+    fn valid_outboard_ranges_impl<'a, O>(
+        outboard: O,
+        ranges: &'a ChunkRangesRef,
+        mode: HashMode,
+    ) -> impl IntoIterator<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+    {
         Gen::new(move |co| async move {
-            if let Err(cause) = RecursiveOutboardValidator::validate(outboard, ranges, &co).await {
+            if let Err(cause) =
+                RecursiveOutboardValidator::validate(outboard, ranges, &co, mode).await
+            {
                 co.yield_(Err(cause)).await;
             }
         })
@@ -1069,6 +1096,7 @@ mod validate {
         shifted_filled_size: TreeNode,
         outboard: O,
         co: &'a Co<io::Result<Range<ChunkNum>>>,
+        mode: HashMode,
     }
 
     impl<O: Outboard> RecursiveOutboardValidator<'_, O> {
@@ -1076,6 +1104,7 @@ mod validate {
             outboard: O,
             ranges: &ChunkRangesRef,
             co: &Co<io::Result<Range<ChunkNum>>>,
+            mode: HashMode,
         ) -> io::Result<()> {
             let tree = outboard.tree();
             if tree.blocks() == 1 {
@@ -1091,6 +1120,7 @@ mod validate {
                 shifted_filled_size,
                 outboard,
                 co,
+                mode,
             };
             validator
                 .validate_rec(&root_hash, shifted_root, true, ranges)
@@ -1124,7 +1154,7 @@ mod validate {
                     // outboard is incomplete, we can't validate
                     return Ok(());
                 };
-                let actual = HashMode::Standard.parent_cv(&l_hash, &r_hash, is_root);
+                let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);
                 if &actual != parent_hash {
                     // hash mismatch, we can't validate
                     return Ok(());
@@ -1150,4 +1180,6 @@ mod validate {
     }
 }
 #[cfg(feature = "validate")]
-pub use validate::{keyed_valid_ranges, valid_outboard_ranges, valid_ranges};
+pub use validate::{
+    keyed_valid_outboard_ranges, keyed_valid_ranges, valid_outboard_ranges, valid_ranges,
+};

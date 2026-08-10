@@ -515,6 +515,87 @@ mod validate {
         }
     }
 
+    fn keyed_valid_outboard_ranges_sync(
+        outboard: impl crate::io::sync::Outboard,
+        key: &[u8; 32],
+    ) -> ChunkRanges {
+        let ranges = ChunkRanges::all();
+        let iter = crate::io::sync::keyed_valid_outboard_ranges(outboard, &ranges, key);
+        let mut res = ChunkRanges::empty();
+        for item in iter {
+            res |= ChunkRanges::from(item.unwrap());
+        }
+        res
+    }
+
+    fn keyed_valid_outboard_ranges_fsm(
+        outboard: &mut PostOrderMemOutboard,
+        key: &[u8; 32],
+    ) -> ChunkRanges {
+        run_blocking(async move {
+            let ranges = ChunkRanges::all();
+            let mut stream = crate::io::fsm::keyed_valid_outboard_ranges(outboard, &ranges, key);
+            let mut res = ChunkRanges::empty();
+            while let Some(item) = stream.next().await {
+                let item = item?;
+                res |= ChunkRanges::from(item);
+            }
+            std::io::Result::Ok(res)
+        })
+        .unwrap()
+    }
+
+    fn validate_keyed_outboard_pos_impl(tree: BaoTree) {
+        let size = tree.size.try_into().unwrap();
+        let block_size = tree.block_size;
+        let data = make_test_data(size);
+        let key = blake3::derive_key("bao-tree.test", b"valid-outboard-ranges");
+        let mut outboard = PostOrderMemOutboard::create_keyed(data, block_size, &key);
+        let expected = ChunkRanges::from(..outboard.tree().chunks());
+        let actual = keyed_valid_outboard_ranges_sync(&mut outboard, &key);
+        assert_eq!(expected, actual);
+        let actual = keyed_valid_outboard_ranges_fsm(&mut outboard, &key);
+        assert_eq!(expected, actual)
+    }
+
+    #[proptest]
+    fn validate_keyed_outboard_pos_proptest(#[strategy(tree())] tree: BaoTree) {
+        validate_keyed_outboard_pos_impl(tree);
+    }
+
+    #[test]
+    fn validate_keyed_outboard_pos_cases() {
+        let cases = [(0x10001, 0)];
+        for (size, block_level) in cases {
+            let tree = BaoTree::new(size, BlockSize(block_level));
+            validate_keyed_outboard_pos_impl(tree);
+        }
+    }
+
+    /// Wrong key must not report a multi-block keyed outboard as fully valid.
+    fn validate_keyed_outboard_wrong_key_impl(tree: BaoTree) {
+        let size = tree.size.try_into().unwrap();
+        let block_size = tree.block_size;
+        let data = make_test_data(size);
+        let key = blake3::derive_key("bao-tree.test", b"valid-outboard-ranges");
+        let wrong_key = blake3::derive_key("bao-tree.test", b"wrong-key");
+        let mut outboard = PostOrderMemOutboard::create_keyed(data, block_size, &key);
+        let expected = ChunkRanges::from(..outboard.tree().chunks());
+        let actual = keyed_valid_outboard_ranges_sync(&mut outboard, &wrong_key);
+        assert_ne!(expected, actual);
+        let actual = keyed_valid_outboard_ranges_fsm(&mut outboard, &wrong_key);
+        assert_ne!(expected, actual)
+    }
+
+    #[test]
+    fn validate_keyed_outboard_wrong_key_cases() {
+        let cases = [(0x10001, 0), (0x2001, 0), (5000, 1)];
+        for (size, block_level) in cases {
+            let tree = BaoTree::new(size, BlockSize(block_level));
+            validate_keyed_outboard_wrong_key_impl(tree);
+        }
+    }
+
     fn validate_pos_impl(tree: BaoTree) {
         let size = tree.size.try_into().unwrap();
         let block_size = tree.block_size;
