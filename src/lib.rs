@@ -257,7 +257,7 @@ pub trait BaoHashing: Copy {
 
 /// BLAKE3 hash mode strategy for unkeyed APIs.
 #[doc(hidden)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct Standard;
 
 impl BaoHashing for Standard {
@@ -279,6 +279,12 @@ impl BaoHashing for Standard {
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct Keyed(pub [u8; 32]);
+
+impl std::fmt::Debug for Keyed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Keyed").finish_non_exhaustive()
+    }
+}
 
 impl BaoHashing for Keyed {
     fn hash_subtree(&self, start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
