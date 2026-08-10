@@ -239,65 +239,45 @@ pub type ByteRanges = range_collections::RangeSet2<u64>;
 /// [ChunkRanges] implements [`AsRef<ChunkRangesRef>`].
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
-/// Compile time hashing strategy for shared encode and decode paths.
-///
-/// Use the standard or `keyed_*` public APIs rather than this trait directly.
-#[doc(hidden)]
-pub trait BaoHashing: Copy {
-    /// Hash a subtree of chunk data.
-    fn hash_subtree(&self, start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash;
-    /// Combine two child chaining values into a parent chaining value.
-    fn parent_cv(
-        &self,
-        left_child: &blake3::Hash,
-        right_child: &blake3::Hash,
-        is_root: bool,
-    ) -> blake3::Hash;
-}
-
-/// BLAKE3 hash mode strategy for unkeyed APIs.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy)]
-pub struct Standard;
-
-impl BaoHashing for Standard {
-    fn hash_subtree(&self, start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
-        hash_subtree(start_chunk, data, is_root)
-    }
-
-    fn parent_cv(
-        &self,
-        left_child: &blake3::Hash,
-        right_child: &blake3::Hash,
-        is_root: bool,
-    ) -> blake3::Hash {
-        parent_cv(left_child, right_child, is_root)
-    }
-}
-
-/// BLAKE3 keyed mode strategy. Wraps a 32 byte key for domain separated hashing.
-#[doc(hidden)]
+/// Hashing mode for shared encode and decode paths, either standard or keyed BLAKE3.
 #[derive(Clone, Copy)]
-pub struct Keyed(pub [u8; 32]);
+pub(crate) enum HashMode {
+    Standard,
+    Keyed([u8; 32]),
+}
 
-impl std::fmt::Debug for Keyed {
+impl std::fmt::Debug for HashMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Keyed").finish_non_exhaustive()
+        match self {
+            HashMode::Standard => f.write_str("Standard"),
+            HashMode::Keyed(_) => f.debug_struct("Keyed").finish_non_exhaustive(),
+        }
     }
 }
 
-impl BaoHashing for Keyed {
-    fn hash_subtree(&self, start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
-        keyed_hash_subtree(start_chunk, data, is_root, &self.0)
+impl HashMode {
+    pub(crate) fn hash_subtree(
+        &self,
+        start_chunk: u64,
+        data: &[u8],
+        is_root: bool,
+    ) -> blake3::Hash {
+        match self {
+            HashMode::Standard => hash_subtree(start_chunk, data, is_root),
+            HashMode::Keyed(key) => keyed_hash_subtree(start_chunk, data, is_root, key),
+        }
     }
 
-    fn parent_cv(
+    pub(crate) fn parent_cv(
         &self,
         left_child: &blake3::Hash,
         right_child: &blake3::Hash,
         is_root: bool,
     ) -> blake3::Hash {
-        keyed_parent_cv(left_child, right_child, is_root, &self.0)
+        match self {
+            HashMode::Standard => parent_cv(left_child, right_child, is_root),
+            HashMode::Keyed(key) => keyed_parent_cv(left_child, right_child, is_root, key),
+        }
     }
 }
 

@@ -97,9 +97,9 @@ fn truncated_len(ranges: &ChunkRangesRef, size: u64) -> usize {
 /// below the chunk group size when creating responses for outboards with a chunk group
 /// size of >0.
 ///
-/// `hash_strategy` is the compile time hashing mode for subtree and parent hashes.
-#[allow(clippy::too_many_arguments)] // keyed mode adds `hash_strategy`; splitting into a struct isn't worth it here
-pub(crate) fn encode_selected_rec<H: crate::BaoHashing>(
+/// `mode` is the hashing mode for subtree and parent hashes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_selected_rec(
     start_chunk: ChunkNum,
     data: &[u8],
     is_root: bool,
@@ -107,14 +107,14 @@ pub(crate) fn encode_selected_rec<H: crate::BaoHashing>(
     min_level: u32,
     emit_data: bool,
     res: &mut Vec<u8>,
-    hash_strategy: H,
+    mode: crate::HashMode,
 ) -> blake3::Hash {
     use blake3::CHUNK_LEN;
     if data.len() <= CHUNK_LEN {
         if emit_data && !query.is_empty() {
             res.extend_from_slice(data);
         }
-        hash_strategy.hash_subtree(start_chunk.0, data, is_root)
+        mode.hash_subtree(start_chunk.0, data, is_root)
     } else {
         let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
@@ -146,7 +146,7 @@ pub(crate) fn encode_selected_rec<H: crate::BaoHashing>(
             min_level,
             emit_data,
             res,
-            hash_strategy,
+            mode,
         );
         let right = encode_selected_rec(
             mid_chunk,
@@ -156,14 +156,14 @@ pub(crate) fn encode_selected_rec<H: crate::BaoHashing>(
             min_level,
             emit_data,
             res,
-            hash_strategy,
+            mode,
         );
         // backfill the hashes if needed
         if let Some(o) = hash_offset {
             res[o..o + 32].copy_from_slice(left.as_bytes());
             res[o + 32..o + 64].copy_from_slice(right.as_bytes());
         }
-        hash_strategy.parent_cv(&left, &right, is_root)
+        mode.parent_cv(&left, &right, is_root)
     }
 }
 
@@ -281,7 +281,7 @@ mod test_support {
             0,
             false,
             &mut res,
-            crate::Standard,
+            crate::HashMode::Standard,
         );
         (res, hash)
     }
@@ -297,7 +297,7 @@ mod test_support {
             0,
             true,
             &mut res,
-            crate::Standard,
+            crate::HashMode::Standard,
         );
         (res, hash)
     }
@@ -438,7 +438,7 @@ mod test_support {
             block_size.to_u32(),
             true,
             &mut res,
-            crate::Standard,
+            crate::HashMode::Standard,
         );
         (res, hash)
     }

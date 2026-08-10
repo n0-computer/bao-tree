@@ -8,8 +8,7 @@ use smallvec::SmallVec;
 
 use super::{sync::Outboard, EncodeError, Leaf, Parent};
 use crate::{
-    iter::BaoChunk, rec::truncate_ranges, split_inner, BaoHashing, ChunkNum, ChunkRangesRef, Keyed,
-    Standard, TreeNode,
+    iter::BaoChunk, rec::truncate_ranges, split_inner, ChunkNum, ChunkRangesRef, HashMode, TreeNode,
 };
 
 /// A content item for the bao streaming protocol.
@@ -84,7 +83,7 @@ where
     O: Outboard,
     F: Sender,
 {
-    traverse_ranges_validated_impl(data, outboard, ranges, send, Standard).await
+    traverse_ranges_validated_impl(data, outboard, ranges, send, HashMode::Standard).await
 }
 
 /// Traverse ranges relevant to a query from a reader and keyed outboard to a stream
@@ -106,21 +105,20 @@ where
     O: Outboard,
     F: Sender,
 {
-    traverse_ranges_validated_impl(data, outboard, ranges, send, Keyed(*key)).await
+    traverse_ranges_validated_impl(data, outboard, ranges, send, HashMode::Keyed(*key)).await
 }
 
-async fn traverse_ranges_validated_impl<D, O, F, H>(
+async fn traverse_ranges_validated_impl<D, O, F>(
     data: D,
     outboard: O,
     ranges: &ChunkRangesRef,
     send: &mut F,
-    hash_strategy: H,
+    mode: HashMode,
 ) -> std::result::Result<(), F::Error>
 where
     D: ReadBytesAt,
     O: Outboard,
     F: Sender,
-    H: BaoHashing,
 {
     send.send(EncodedItem::Size(outboard.tree().size())).await?;
     let res: result::Result<std::result::Result<(), F::Error>, EncodeError> = async {
@@ -143,7 +141,7 @@ where
                     ..
                 } => {
                     let (l_hash, r_hash) = outboard.load(node)?.unwrap();
-                    let actual = hash_strategy.parent_cv(&l_hash, &r_hash, is_root);
+                    let actual = mode.parent_cv(&l_hash, &r_hash, is_root);
                     let expected = stack.pop().unwrap();
                     if actual != expected {
                         return Err(EncodeError::ParentHashMismatch(node));
@@ -186,7 +184,7 @@ where
                             tree.block_size.to_u32(),
                             true,
                             &mut out_buf,
-                            hash_strategy,
+                            mode,
                         );
                         if actual != expected {
                             return Err(EncodeError::LeafHashMismatch(start_chunk));
@@ -197,7 +195,7 @@ where
                             }
                         }
                     } else {
-                        let actual = hash_strategy.hash_subtree(start_chunk.0, &buffer, is_root);
+                        let actual = mode.hash_subtree(start_chunk.0, &buffer, is_root);
                         #[allow(clippy::redundant_slicing)]
                         if actual != expected {
                             return Err(EncodeError::LeafHashMismatch(start_chunk));
@@ -259,7 +257,7 @@ pub fn traverse_selected_rec(
         min_level,
         emit_data,
         res,
-        Standard,
+        HashMode::Standard,
     )
 }
 
@@ -283,12 +281,12 @@ pub fn keyed_traverse_selected_rec(
         min_level,
         emit_data,
         res,
-        Keyed(*key),
+        HashMode::Keyed(*key),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn traverse_selected_rec_impl<H: BaoHashing>(
+fn traverse_selected_rec_impl(
     start_chunk: ChunkNum,
     data: Bytes,
     is_root: bool,
@@ -296,7 +294,7 @@ fn traverse_selected_rec_impl<H: BaoHashing>(
     min_level: u32,
     emit_data: bool,
     res: &mut Vec<EncodedItem>,
-    hash_strategy: H,
+    mode: HashMode,
 ) -> blake3::Hash {
     use blake3::CHUNK_LEN;
     if data.len() <= CHUNK_LEN {
@@ -309,7 +307,7 @@ fn traverse_selected_rec_impl<H: BaoHashing>(
                 .into(),
             );
         }
-        hash_strategy.hash_subtree(start_chunk.0, &data, is_root)
+        mode.hash_subtree(start_chunk.0, &data, is_root)
     } else {
         let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
@@ -345,7 +343,7 @@ fn traverse_selected_rec_impl<H: BaoHashing>(
             min_level,
             emit_data,
             res,
-            hash_strategy,
+            mode,
         );
         let right = traverse_selected_rec_impl(
             mid_chunk,
@@ -355,7 +353,7 @@ fn traverse_selected_rec_impl<H: BaoHashing>(
             min_level,
             emit_data,
             res,
-            hash_strategy,
+            mode,
         );
         // backfill the hashes if needed
         if let Some(o) = hash_offset {
@@ -367,7 +365,7 @@ fn traverse_selected_rec_impl<H: BaoHashing>(
             }
             .into();
         }
-        hash_strategy.parent_cv(&left, &right, is_root)
+        mode.parent_cv(&left, &right, is_root)
     }
 }
 

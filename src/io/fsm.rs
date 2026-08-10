@@ -30,7 +30,7 @@ use crate::{
     },
     iter::{BaoChunk, ResponseIter},
     rec::{encode_selected_rec, truncate_ranges, truncate_ranges_owned},
-    BaoHashing, BaoTree, BlockSize, ChunkRanges, ChunkRangesRef, Keyed, Standard, TreeNode,
+    BaoTree, BlockSize, ChunkRanges, ChunkRangesRef, HashMode, TreeNode,
 };
 
 /// A binary merkle tree for blake3 hashes of a blob.
@@ -402,20 +402,20 @@ pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::H
 }
 
 #[derive(Debug)]
-struct ResponseDecoderInner<R, H: BaoHashing + Copy = Standard> {
+struct ResponseDecoderInner<R> {
     iter: ResponseIter,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
-    hash_strategy: H,
+    mode: HashMode,
 }
 
-impl<R, H: BaoHashing + Copy> ResponseDecoderInner<R, H> {
-    fn with_hash_strategy(
+impl<R> ResponseDecoderInner<R> {
+    fn with_mode(
         tree: BaoTree,
         hash: blake3::Hash,
         ranges: ChunkRanges,
         encoded: R,
-        hash_strategy: H,
+        mode: HashMode,
     ) -> Self {
         // now that we know the size, we can canonicalize the ranges
         let ranges = truncate_ranges_owned(ranges, tree.size());
@@ -423,7 +423,7 @@ impl<R, H: BaoHashing + Copy> ResponseDecoderInner<R, H> {
             iter: ResponseIter::new(tree, ranges),
             stack: SmallVec::new(),
             encoded,
-            hash_strategy,
+            mode,
         };
         res.stack.push(hash);
         res
@@ -432,22 +432,17 @@ impl<R, H: BaoHashing + Copy> ResponseDecoderInner<R, H> {
 
 /// Response decoder.
 ///
-/// Keyed callers should use [KeyedResponseDecoder] via [Self::new_keyed].
+/// Keyed callers should use [Self::new_keyed].
 #[derive(Debug)]
-pub struct ResponseDecoder<R, H: BaoHashing + Copy = Standard>(Box<ResponseDecoderInner<R, H>>);
-
-/// Keyed response decoder.
-///
-/// See [ResponseDecoder::new_keyed].
-pub type KeyedResponseDecoder<R> = ResponseDecoder<R, Keyed>;
+pub struct ResponseDecoder<R>(Box<ResponseDecoderInner<R>>);
 
 /// Next type for [ResponseDecoder].
 #[derive(Debug)]
-pub enum ResponseDecoderNext<R, H: BaoHashing + Copy = Standard> {
+pub enum ResponseDecoderNext<R> {
     /// One more item, and you get back the state machine in the next state
     More(
         (
-            ResponseDecoder<R, H>,
+            ResponseDecoder<R>,
             std::result::Result<BaoContentItem, DecodeError>,
         ),
     ),
@@ -455,18 +450,17 @@ pub enum ResponseDecoderNext<R, H: BaoHashing + Copy = Standard> {
     Done(R),
 }
 
-/// Next type for [KeyedResponseDecoder].
-///
-/// See [ResponseDecoder::new_keyed].
-pub type KeyedResponseDecoderNext<R> = ResponseDecoderNext<R, Keyed>;
-
 impl<R: AsyncStreamReader> ResponseDecoder<R> {
     /// Create a new response decoder state machine, when you have already read the size.
     ///
     /// The size as well as the chunk size is given in the `tree` parameter.
     pub fn new(hash: blake3::Hash, ranges: ChunkRanges, tree: BaoTree, encoded: R) -> Self {
-        Self(Box::new(ResponseDecoderInner::with_hash_strategy(
-            tree, hash, ranges, encoded, Standard,
+        Self(Box::new(ResponseDecoderInner::with_mode(
+            tree,
+            hash,
+            ranges,
+            encoded,
+            HashMode::Standard,
         )))
     }
 
@@ -477,36 +471,32 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
         tree: BaoTree,
         encoded: R,
         key: &[u8; 32],
-    ) -> KeyedResponseDecoder<R> {
-        ResponseDecoder(Box::new(ResponseDecoderInner::with_hash_strategy(
+    ) -> Self {
+        Self(Box::new(ResponseDecoderInner::with_mode(
             tree,
             hash,
             ranges,
             encoded,
-            Keyed(*key),
+            HashMode::Keyed(*key),
         )))
     }
 }
 
-impl<R: AsyncStreamReader, H: BaoHashing + Copy> ResponseDecoder<R, H> {
-    pub(crate) fn with_hash_strategy(
+impl<R: AsyncStreamReader> ResponseDecoder<R> {
+    pub(crate) fn with_mode(
         hash: blake3::Hash,
         ranges: ChunkRanges,
         tree: BaoTree,
         encoded: R,
-        hash_strategy: H,
+        mode: HashMode,
     ) -> Self {
-        Self(Box::new(ResponseDecoderInner::with_hash_strategy(
-            tree,
-            hash,
-            ranges,
-            encoded,
-            hash_strategy,
+        Self(Box::new(ResponseDecoderInner::with_mode(
+            tree, hash, ranges, encoded, mode,
         )))
     }
 
     /// Proceed to the next state by reading the next chunk from the stream.
-    pub async fn next(mut self) -> ResponseDecoderNext<R, H> {
+    pub async fn next(mut self) -> ResponseDecoderNext<R> {
         if let Some(chunk) = self.0.iter.next() {
             let item = self.next0(chunk).await;
             ResponseDecoderNext::More((self, item))
@@ -547,7 +537,7 @@ impl<R: AsyncStreamReader, H: BaoHashing + Copy> ResponseDecoder<R, H> {
                     .map_err(|e| DecodeError::maybe_parent_not_found(e, node))?;
                 let pair @ (l_hash, r_hash) = read_parent(&buf);
                 let parent_hash = this.stack.pop().unwrap();
-                let actual = this.hash_strategy.parent_cv(&l_hash, &r_hash, is_root);
+                let actual = this.mode.parent_cv(&l_hash, &r_hash, is_root);
                 // Push the children in reverse order so they are popped in the correct order
                 // only push right if the range intersects with the right child
                 if right {
@@ -577,9 +567,7 @@ impl<R: AsyncStreamReader, H: BaoHashing + Copy> ResponseDecoder<R, H> {
                     .await
                     .map_err(|e| DecodeError::maybe_leaf_not_found(e, start_chunk))?;
                 let leaf_hash = this.stack.pop().unwrap();
-                let actual = this
-                    .hash_strategy
-                    .hash_subtree(start_chunk.0, &data, is_root);
+                let actual = this.mode.hash_subtree(start_chunk.0, &data, is_root);
                 if leaf_hash != actual {
                     return Err(DecodeError::LeafHashMismatch(start_chunk));
                 }
@@ -656,7 +644,7 @@ where
     O: Outboard,
     W: AsyncStreamWriter,
 {
-    encode_ranges_validated_impl(data, outboard, ranges, encoded, Standard).await
+    encode_ranges_validated_impl(data, outboard, ranges, encoded, HashMode::Standard).await
 }
 
 /// Encode ranges with BLAKE3 keyed hash validation.
@@ -672,16 +660,16 @@ where
     O: Outboard,
     W: AsyncStreamWriter,
 {
-    encode_ranges_validated_impl(data, outboard, ranges, encoded, Keyed(*key)).await
+    encode_ranges_validated_impl(data, outboard, ranges, encoded, HashMode::Keyed(*key)).await
 }
 
 /// Generic encode body monomorphized over the compile time hashing strategy.
-async fn encode_ranges_validated_impl<D, O, W, H: BaoHashing>(
+async fn encode_ranges_validated_impl<D, O, W>(
     mut data: D,
     mut outboard: O,
     ranges: &ChunkRangesRef,
     encoded: W,
-    hash_strategy: H,
+    mode: HashMode,
 ) -> result::Result<(), EncodeError>
 where
     D: AsyncSliceReader,
@@ -706,7 +694,7 @@ where
                 ..
             } => {
                 let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
-                let actual = hash_strategy.parent_cv(&l_hash, &r_hash, is_root);
+                let actual = mode.parent_cv(&l_hash, &r_hash, is_root);
                 let expected = stack.pop().unwrap();
                 if actual != expected {
                     return Err(EncodeError::ParentHashMismatch(node));
@@ -747,11 +735,11 @@ where
                         tree.block_size.to_u32(),
                         true,
                         &mut out_buf,
-                        hash_strategy,
+                        mode,
                     );
                     (actual, out_buf.clone().into())
                 } else {
-                    let actual = hash_strategy.hash_subtree(start_chunk.0, &bytes, is_root);
+                    let actual = mode.hash_subtree(start_chunk.0, &bytes, is_root);
                     (actual, bytes)
                 };
                 if actual != expected {
@@ -782,7 +770,7 @@ where
     R: AsyncStreamReader,
     W: AsyncSliceWriter,
 {
-    decode_ranges_impl(encoded, ranges, target, outboard, Standard).await
+    decode_ranges_impl(encoded, ranges, target, outboard, HashMode::Standard).await
 }
 
 /// Decode a keyed response into a file while updating an outboard.
@@ -798,29 +786,24 @@ where
     R: AsyncStreamReader,
     W: AsyncSliceWriter,
 {
-    decode_ranges_impl(encoded, ranges, target, outboard, Keyed(*key)).await
+    decode_ranges_impl(encoded, ranges, target, outboard, HashMode::Keyed(*key)).await
 }
 
 /// Generic decode body monomorphized over the compile time hashing strategy.
-async fn decode_ranges_impl<R, O, W, H: BaoHashing + Copy>(
+async fn decode_ranges_impl<R, O, W>(
     encoded: R,
     ranges: ChunkRanges,
     mut target: W,
     mut outboard: O,
-    hash_strategy: H,
+    mode: HashMode,
 ) -> std::result::Result<(), DecodeError>
 where
     O: OutboardMut + Outboard,
     R: AsyncStreamReader,
     W: AsyncSliceWriter,
 {
-    let mut reading = ResponseDecoder::with_hash_strategy(
-        outboard.root(),
-        ranges,
-        outboard.tree(),
-        encoded,
-        hash_strategy,
-    );
+    let mut reading =
+        ResponseDecoder::with_mode(outboard.root(), ranges, outboard.tree(), encoded, mode);
     loop {
         let item = match reading.next().await {
             ResponseDecoderNext::Done(_reader) => break,
@@ -856,7 +839,7 @@ pub async fn outboard(
     tree: BaoTree,
     outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
-    outboard_with_hash_strategy(data, tree, outboard, Standard).await
+    outboard_with_mode(data, tree, outboard, HashMode::Standard).await
 }
 
 /// Compute the keyed outboard for the given data.
@@ -866,27 +849,27 @@ pub async fn keyed_outboard(
     outboard: impl OutboardMut,
     key: &[u8; 32],
 ) -> io::Result<blake3::Hash> {
-    outboard_with_hash_strategy(data, tree, outboard, Keyed(*key)).await
+    outboard_with_mode(data, tree, outboard, HashMode::Keyed(*key)).await
 }
 
 /// Allocates a chunk group buffer and delegates to [outboard_impl].
-async fn outboard_with_hash_strategy<H: BaoHashing>(
+async fn outboard_with_mode(
     data: impl AsyncStreamReader,
     tree: BaoTree,
     mut outboard: impl OutboardMut,
-    hash_strategy: H,
+    mode: HashMode,
 ) -> io::Result<blake3::Hash> {
     let mut buffer = vec![0u8; tree.chunk_group_bytes()];
-    outboard_impl(tree, data, &mut outboard, &mut buffer, hash_strategy).await
+    outboard_impl(tree, data, &mut outboard, &mut buffer, mode).await
 }
 
 /// Generic outboard traversal monomorphized over the compile time hashing strategy.
-async fn outboard_impl<H: BaoHashing>(
+async fn outboard_impl(
     tree: BaoTree,
     mut data: impl AsyncStreamReader,
     mut outboard: impl OutboardMut,
     buffer: &mut [u8],
-    hash_strategy: H,
+    mode: HashMode,
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
@@ -897,7 +880,7 @@ async fn outboard_impl<H: BaoHashing>(
                 let right_hash = stack.pop().unwrap();
                 let left_hash = stack.pop().unwrap();
                 outboard.save(node, &(left_hash, right_hash)).await?;
-                let parent = hash_strategy.parent_cv(&left_hash, &right_hash, is_root);
+                let parent = mode.parent_cv(&left_hash, &right_hash, is_root);
                 stack.push(parent);
             }
             BaoChunk::Leaf {
@@ -907,7 +890,7 @@ async fn outboard_impl<H: BaoHashing>(
                 ..
             } => {
                 let buf = data.read_bytes_exact(size).await?;
-                let hash = hash_strategy.hash_subtree(start_chunk.0, &buf, is_root);
+                let hash = mode.hash_subtree(start_chunk.0, &buf, is_root);
                 stack.push(hash);
             }
         }
@@ -928,7 +911,7 @@ pub async fn outboard_post_order(
     tree: BaoTree,
     outboard: impl AsyncStreamWriter,
 ) -> io::Result<blake3::Hash> {
-    outboard_post_order_with_hash_strategy(data, tree, outboard, Standard).await
+    outboard_post_order_with_mode(data, tree, outboard, HashMode::Standard).await
 }
 
 /// Compute the keyed post order outboard for the given data.
@@ -938,27 +921,27 @@ pub async fn keyed_outboard_post_order(
     outboard: impl AsyncStreamWriter,
     key: &[u8; 32],
 ) -> io::Result<blake3::Hash> {
-    outboard_post_order_with_hash_strategy(data, tree, outboard, Keyed(*key)).await
+    outboard_post_order_with_mode(data, tree, outboard, HashMode::Keyed(*key)).await
 }
 
 /// Allocates a chunk group buffer and delegates to [outboard_post_order_impl].
-async fn outboard_post_order_with_hash_strategy<H: BaoHashing>(
+async fn outboard_post_order_with_mode(
     data: impl AsyncStreamReader,
     tree: BaoTree,
     mut outboard: impl AsyncStreamWriter,
-    hash_strategy: H,
+    mode: HashMode,
 ) -> io::Result<blake3::Hash> {
     let mut buffer = vec![0u8; tree.chunk_group_bytes()];
-    outboard_post_order_impl(tree, data, &mut outboard, &mut buffer, hash_strategy).await
+    outboard_post_order_impl(tree, data, &mut outboard, &mut buffer, mode).await
 }
 
 /// Generic post order outboard traversal monomorphized over the compile time hashing strategy.
-async fn outboard_post_order_impl<H: BaoHashing>(
+async fn outboard_post_order_impl(
     tree: BaoTree,
     mut data: impl AsyncStreamReader,
     mut outboard: impl AsyncStreamWriter,
     buffer: &mut [u8],
-    hash_strategy: H,
+    mode: HashMode,
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
@@ -970,7 +953,7 @@ async fn outboard_post_order_impl<H: BaoHashing>(
                 let left_hash = stack.pop().unwrap();
                 outboard.write(left_hash.as_bytes()).await?;
                 outboard.write(right_hash.as_bytes()).await?;
-                let parent = hash_strategy.parent_cv(&left_hash, &right_hash, is_root);
+                let parent = mode.parent_cv(&left_hash, &right_hash, is_root);
                 stack.push(parent);
             }
             BaoChunk::Leaf {
@@ -980,7 +963,7 @@ async fn outboard_post_order_impl<H: BaoHashing>(
                 ..
             } => {
                 let buf = data.read_bytes_exact(size).await?;
-                let hash = hash_strategy.hash_subtree(start_chunk.0, &buf, is_root);
+                let hash = mode.hash_subtree(start_chunk.0, &buf, is_root);
                 stack.push(hash);
             }
         }
@@ -1014,8 +997,8 @@ mod validate {
 
     use super::Outboard;
     use crate::{
-        blake3, io::LocalBoxFuture, rec::truncate_ranges, split, BaoHashing, BaoTree, ChunkNum,
-        ChunkRangesRef, Keyed, Standard, TreeNode,
+        blake3, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum, ChunkRangesRef,
+        HashMode, TreeNode,
     };
 
     /// Given a data file and an outboard, compute all valid ranges.
@@ -1032,7 +1015,7 @@ mod validate {
         O: Outboard + 'a,
         D: AsyncSliceReader + 'a,
     {
-        valid_ranges_impl(outboard, data, ranges, Standard)
+        valid_ranges_impl(outboard, data, ranges, HashMode::Standard)
     }
 
     /// Given a data file and a keyed outboard, compute all valid ranges.
@@ -1046,15 +1029,15 @@ mod validate {
         O: Outboard + 'a,
         D: AsyncSliceReader + 'a,
     {
-        valid_ranges_impl(outboard, data, ranges, Keyed(*key))
+        valid_ranges_impl(outboard, data, ranges, HashMode::Keyed(*key))
     }
 
     /// Generic validation body monomorphized over the compile time hashing strategy.
-    fn valid_ranges_impl<'a, O, D, H: BaoHashing + Copy + 'a>(
+    fn valid_ranges_impl<'a, O, D>(
         outboard: O,
         data: D,
         ranges: &'a ChunkRangesRef,
-        hash_strategy: H,
+        mode: HashMode,
     ) -> impl Stream<Item = io::Result<Range<ChunkNum>>> + 'a
     where
         O: Outboard + 'a,
@@ -1062,29 +1045,29 @@ mod validate {
     {
         Gen::new(move |co| async move {
             if let Err(cause) =
-                RecursiveDataValidator::validate(outboard, data, ranges, &co, hash_strategy).await
+                RecursiveDataValidator::validate(outboard, data, ranges, &co, mode).await
             {
                 co.yield_(Err(cause)).await;
             }
         })
     }
 
-    struct RecursiveDataValidator<'a, O: Outboard, D: AsyncSliceReader, H: BaoHashing + Copy> {
+    struct RecursiveDataValidator<'a, O: Outboard, D: AsyncSliceReader> {
         tree: BaoTree,
         shifted_filled_size: TreeNode,
         outboard: O,
         data: D,
         co: &'a Co<io::Result<Range<ChunkNum>>>,
-        hash_strategy: H,
+        mode: HashMode,
     }
 
-    impl<O: Outboard, D: AsyncSliceReader, H: BaoHashing + Copy> RecursiveDataValidator<'_, O, D, H> {
+    impl<O: Outboard, D: AsyncSliceReader> RecursiveDataValidator<'_, O, D> {
         async fn validate(
             outboard: O,
             data: D,
             ranges: &ChunkRangesRef,
             co: &Co<io::Result<Range<ChunkNum>>>,
-            hash_strategy: H,
+            mode: HashMode,
         ) -> io::Result<()> {
             let tree = outboard.tree();
             if tree.blocks() == 1 {
@@ -1093,7 +1076,7 @@ mod validate {
                 let data = data
                     .read_exact_at(0, tree.size().try_into().unwrap())
                     .await?;
-                let actual = hash_strategy.hash_subtree(0, &data, true);
+                let actual = mode.hash_subtree(0, &data, true);
                 if actual == outboard.root() {
                     co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
                 }
@@ -1108,7 +1091,7 @@ mod validate {
                 outboard,
                 data,
                 co,
-                hash_strategy,
+                mode,
             };
             validator
                 .validate_rec(&root_hash, shifted_root, true, ranges)
@@ -1124,11 +1107,9 @@ mod validate {
             let len = (range.end - range.start).try_into().unwrap();
             let data = self.data.read_exact_at(range.start, len).await?;
             // is_root is always false because the case of a single chunk group is handled before calling this function
-            let actual = self.hash_strategy.hash_subtree(
-                ChunkNum::full_chunks(range.start).0,
-                &data,
-                is_root,
-            );
+            let actual =
+                self.mode
+                    .hash_subtree(ChunkNum::full_chunks(range.start).0, &data, is_root);
             if &actual == hash {
                 // yield the left range
                 self.co
@@ -1162,7 +1143,7 @@ mod validate {
                     // outboard is incomplete, we can't validate
                     return Ok(());
                 };
-                let actual = self.hash_strategy.parent_cv(&l_hash, &r_hash, is_root);
+                let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);
                 if &actual != parent_hash {
                     // hash mismatch, we can't validate
                     return Ok(());
@@ -1265,7 +1246,7 @@ mod validate {
                     // outboard is incomplete, we can't validate
                     return Ok(());
                 };
-                let actual = Standard.parent_cv(&l_hash, &r_hash, is_root);
+                let actual = HashMode::Standard.parent_cv(&l_hash, &r_hash, is_root);
                 if &actual != parent_hash {
                     // hash mismatch, we can't validate
                     return Ok(());
