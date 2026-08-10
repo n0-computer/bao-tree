@@ -25,7 +25,7 @@ use crate::{
         BaoContentItem, Leaf, Parent,
     },
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
-    keyed_hash_subtree, keyed_parent_cv, prop_assert_tuple_eq,
+    prop_assert_tuple_eq,
     rec::{
         encode_selected_rec, get_leaf_ranges, keyed_outboard_functions_checks, make_test_data,
         partial_chunk_iter_reference, range_union, response_iter_reference, select_nodes_rec,
@@ -145,8 +145,8 @@ fn post_traversal_chunks_iter_proptest(#[strategy(tree())] tree: BaoTree) {
     post_traversal_chunks_iter_impl(tree);
 }
 
-/// Brute force test for a keyed outboard that computes expected hashes for each pair
-fn keyed_outboard_test_sync(data: &[u8], outboard: impl crate::io::sync::Outboard, key: &[u8; 32]) {
+/// Brute force test for an outboard that computes the expected hash for each pair
+fn outboard_test_sync(data: &[u8], outboard: impl crate::io::sync::Outboard, mode: HashMode) {
     let tree = outboard.tree();
     let nodes = tree
         .pre_order_nodes_iter()
@@ -159,37 +159,17 @@ fn keyed_outboard_test_sync(data: &[u8], outboard: impl crate::io::sync::Outboar
         let start_chunk = node.chunk_range().start;
         let byte_range = tree.byte_range(node);
         let data = &data[byte_range.start.try_into().unwrap()..byte_range.end.try_into().unwrap()];
-        let expected = keyed_hash_subtree(start_chunk.0, data, is_root, key);
-        let actual = keyed_parent_cv(&l_hash, &r_hash, is_root, key);
+        let expected = mode.hash_subtree(start_chunk.0, data, is_root);
+        let actual = mode.parent_cv(&l_hash, &r_hash, is_root);
         assert_eq!(actual, expected);
     }
 }
 
-/// Brute force test for an outboard that just computes the expected hash for each pair
-fn outboard_test_sync(data: &[u8], outboard: impl crate::io::sync::Outboard) {
-    let tree = outboard.tree();
-    let nodes = tree
-        .pre_order_nodes_iter()
-        .enumerate()
-        .map(|(i, node)| (node, i == 0))
-        .filter(|(node, _)| tree.is_relevant_for_outboard(*node))
-        .collect::<Vec<_>>();
-    for (node, is_root) in nodes {
-        let (l_hash, r_hash) = outboard.load(node).unwrap().unwrap();
-        let start_chunk = node.chunk_range().start;
-        let byte_range = tree.byte_range(node);
-        let data = &data[byte_range.start.try_into().unwrap()..byte_range.end.try_into().unwrap()];
-        let expected = HashMode::Standard.hash_subtree(start_chunk.0, data, is_root);
-        let actual = HashMode::Standard.parent_cv(&l_hash, &r_hash, is_root);
-        assert_eq!(actual, expected);
-    }
-}
-
-/// Brute force test for a keyed outboard that computes expected hashes for each pair
-async fn keyed_outboard_test_fsm(
+/// Brute force test for an outboard that computes the expected hash for each pair
+async fn outboard_test_fsm(
     data: &[u8],
     mut outboard: impl crate::io::fsm::Outboard,
-    key: &[u8; 32],
+    mode: HashMode,
 ) {
     let tree = outboard.tree();
     let nodes = tree
@@ -203,28 +183,8 @@ async fn keyed_outboard_test_fsm(
         let start_chunk = node.chunk_range().start;
         let byte_range = tree.byte_range(node);
         let data = &data[byte_range.start.try_into().unwrap()..byte_range.end.try_into().unwrap()];
-        let expected = keyed_hash_subtree(start_chunk.0, data, is_root, key);
-        let actual = keyed_parent_cv(&l_hash, &r_hash, is_root, key);
-        assert_eq!(actual, expected);
-    }
-}
-
-/// Brute force test for an outboard that just computes the expected hash for each pair
-async fn outboard_test_fsm(data: &[u8], mut outboard: impl crate::io::fsm::Outboard) {
-    let tree = outboard.tree();
-    let nodes = tree
-        .pre_order_nodes_iter()
-        .enumerate()
-        .map(|(i, node)| (node, i == 0))
-        .filter(|(node, _)| tree.is_relevant_for_outboard(*node))
-        .collect::<Vec<_>>();
-    for (node, is_root) in nodes {
-        let (l_hash, r_hash) = outboard.load(node).await.unwrap().unwrap();
-        let start_chunk = node.chunk_range().start;
-        let byte_range = tree.byte_range(node);
-        let data = &data[byte_range.start.try_into().unwrap()..byte_range.end.try_into().unwrap()];
-        let expected = HashMode::Standard.hash_subtree(start_chunk.0, data, is_root);
-        let actual = HashMode::Standard.parent_cv(&l_hash, &r_hash, is_root);
+        let expected = mode.hash_subtree(start_chunk.0, data, is_root);
+        let actual = mode.parent_cv(&l_hash, &r_hash, is_root);
         assert_eq!(actual, expected);
     }
 }
@@ -236,7 +196,7 @@ fn post_oder_outboard_sync_impl(tree: BaoTree) {
         outboard.data.len() as u64,
         outboard.tree().outboard_hash_pairs() * 64
     );
-    outboard_test_sync(&data, outboard);
+    outboard_test_sync(&data, outboard, HashMode::Standard);
 }
 
 #[test]
@@ -262,7 +222,7 @@ fn post_oder_outboard_fsm_impl(tree: BaoTree) {
     );
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(outboard_test_fsm(&data, outboard));
+        .block_on(outboard_test_fsm(&data, outboard, HashMode::Standard));
 }
 
 #[proptest]
@@ -278,7 +238,7 @@ fn keyed_post_order_outboard_sync_impl(tree: BaoTree) {
         outboard.data.len() as u64,
         outboard.tree().outboard_hash_pairs() * 64
     );
-    keyed_outboard_test_sync(&data, outboard, &key);
+    outboard_test_sync(&data, outboard, HashMode::Keyed(key));
 }
 
 #[proptest]
@@ -296,7 +256,7 @@ fn keyed_post_order_outboard_fsm_impl(tree: BaoTree) {
     );
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(keyed_outboard_test_fsm(&data, outboard, &key));
+        .block_on(outboard_test_fsm(&data, outboard, HashMode::Keyed(key)));
 }
 
 #[proptest]
@@ -312,7 +272,7 @@ fn keyed_pre_order_outboard_sync_impl(tree: BaoTree) {
         outboard.data.len(),
         outboard.tree().outboard_size().try_into().unwrap()
     );
-    keyed_outboard_test_sync(&data, outboard, &key);
+    outboard_test_sync(&data, outboard, HashMode::Keyed(key));
 }
 
 #[proptest]
@@ -330,7 +290,7 @@ fn keyed_pre_order_outboard_fsm_impl(tree: BaoTree) {
     );
     tokio::runtime::Runtime::new()
         .unwrap()
-        .block_on(keyed_outboard_test_fsm(&data, outboard, &key));
+        .block_on(outboard_test_fsm(&data, outboard, HashMode::Keyed(key)));
 }
 
 #[proptest]

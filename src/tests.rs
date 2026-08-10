@@ -89,19 +89,18 @@ fn keyed_encode_decode_roundtrip_sync_impl(data: &[u8], block_size: BlockSize, k
 fn keyed_encode_decode_roundtrip_fsm_impl(data: Vec<u8>, block_size: BlockSize, key: &[u8; 32]) {
     use crate::io::fsm::{keyed_decode_ranges, keyed_encode_ranges_validated};
 
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut outboard = PostOrderMemOutboard::create_keyed(&data, block_size, key);
     let ranges = ChunkRanges::all();
     let mut encoded = Vec::new();
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(keyed_encode_ranges_validated(
-            Bytes::from(data.clone()),
-            &mut outboard,
-            &ranges,
-            &mut encoded,
-            key,
-        ))
-        .unwrap();
+    rt.block_on(keyed_encode_ranges_validated(
+        Bytes::from(data.clone()),
+        &mut outboard,
+        &ranges,
+        &mut encoded,
+        key,
+    ))
+    .unwrap();
     let tree = outboard.tree();
     let mut decoded = bytes::BytesMut::new();
     let mut ob_res = PostOrderMemOutboard {
@@ -109,16 +108,14 @@ fn keyed_encode_decode_roundtrip_fsm_impl(data: Vec<u8>, block_size: BlockSize, 
         tree,
         data: vec![0; tree.outboard_size().try_into().unwrap()],
     };
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(keyed_decode_ranges(
-            Cursor::new(encoded.as_slice()),
-            ranges,
-            &mut decoded,
-            &mut ob_res,
-            key,
-        ))
-        .unwrap();
+    rt.block_on(keyed_decode_ranges(
+        Cursor::new(encoded.as_slice()),
+        ranges,
+        &mut decoded,
+        &mut ob_res,
+        key,
+    ))
+    .unwrap();
     assert_eq!(decoded.to_vec(), data);
     assert_eq!(ob_res.root(), outboard.root());
 }
@@ -1177,75 +1174,14 @@ fn keyed_domain_separation() {
 
 #[test]
 fn keyed_encode_decode_roundtrip_sync() {
-    use crate::io::sync::{keyed_decode_ranges, keyed_encode_ranges_validated};
-
-    let data = make_test_data(50_000);
     let key = blake3::derive_key("bao-tree.test", b"roundtrip");
-    let block_size = BlockSize(2);
-    let outboard = PostOrderMemOutboard::create_keyed(&data, block_size, &key);
-    let ranges = ChunkRanges::all();
-    let mut encoded = Vec::new();
-    keyed_encode_ranges_validated(&data, &outboard, &ranges, &mut encoded, &key).unwrap();
-    let size = outboard.tree.size;
-    let tree = BaoTree::new(size, block_size);
-    let mut decoded = Vec::new();
-    let mut ob_res = PostOrderMemOutboard {
-        root: outboard.root(),
-        tree,
-        data: vec![0; tree.outboard_size().try_into().unwrap()],
-    };
-    keyed_decode_ranges(
-        Cursor::new(encoded),
-        &ranges,
-        &mut decoded,
-        &mut ob_res,
-        &key,
-    )
-    .unwrap();
-    assert_eq!(decoded, data);
-    assert_eq!(ob_res.root(), outboard.root());
+    keyed_encode_decode_roundtrip_sync_impl(&make_test_data(50_000), BlockSize(2), &key);
 }
 
 #[test]
 fn keyed_encode_decode_roundtrip_fsm() {
-    use crate::io::fsm::{keyed_decode_ranges, keyed_encode_ranges_validated};
-
-    let data = make_test_data(50_000);
     let key = blake3::derive_key("bao-tree.test", b"roundtrip");
-    let block_size = BlockSize(2);
-    let mut outboard = PostOrderMemOutboard::create_keyed(&data, block_size, &key);
-    let ranges = ChunkRanges::all();
-    let mut encoded = Vec::new();
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(keyed_encode_ranges_validated(
-            Bytes::from(data.clone()),
-            &mut outboard,
-            &ranges,
-            &mut encoded,
-            &key,
-        ))
-        .unwrap();
-    let size = outboard.tree.size;
-    let tree = BaoTree::new(size, block_size);
-    let mut decoded = bytes::BytesMut::new();
-    let mut ob_res = PostOrderMemOutboard {
-        root: outboard.root(),
-        tree,
-        data: vec![0; tree.outboard_size().try_into().unwrap()],
-    };
-    tokio::runtime::Runtime::new()
-        .unwrap()
-        .block_on(keyed_decode_ranges(
-            Cursor::new(encoded.as_slice()),
-            ranges,
-            &mut decoded,
-            &mut ob_res,
-            &key,
-        ))
-        .unwrap();
-    assert_eq!(decoded.to_vec(), data);
-    assert_eq!(ob_res.root(), outboard.root());
+    keyed_encode_decode_roundtrip_fsm_impl(make_test_data(50_000), BlockSize(2), &key);
 }
 
 #[test]
@@ -1576,59 +1512,42 @@ fn keyed_encode_decode_edge_sizes_fsm() {
     }
 }
 
-fn keyed_bao_tree_slice_roundtrip_case_table(key: &[u8; 32]) {
-    use make_test_data as td;
+const KEYED_SLICE_ROUNDTRIP_CASES: [(usize, std::ops::Range<u64>); 8] = [
+    (0, 0..1),
+    (1, 0..1),
+    (1023, 0..1),
+    (1024, 0..1),
+    (1025, 0..1),
+    (1025, 0..2),
+    (1025, 1..2),
+    (24 * 1024 + 1, 0..25),
+];
 
-    let cases = [
-        (0, 0..1),
-        (1, 0..1),
-        (1023, 0..1),
-        (1024, 0..1),
-        (1025, 0..1),
-        (1025, 0..2),
-        (1025, 1..2),
-        (24 * 1024 + 1, 0..25),
-    ];
+#[test]
+fn keyed_bao_tree_slice_roundtrip_cases() {
+    let key = blake3::derive_key("bao-tree.test", b"slice");
     for chunk_group_log in 0..4 {
         let block_size = BlockSize(chunk_group_log);
-        for (count, range) in cases.clone() {
+        for (count, range) in KEYED_SLICE_ROUNDTRIP_CASES {
             keyed_bao_tree_slice_roundtrip_test(
-                td(count),
+                make_test_data(count),
                 ChunkNum(range.start)..ChunkNum(range.end),
                 block_size,
-                key,
+                &key,
             );
         }
     }
 }
 
-#[test]
-fn keyed_bao_tree_slice_roundtrip_cases() {
-    let key = blake3::derive_key("bao-tree.test", b"slice");
-    keyed_bao_tree_slice_roundtrip_case_table(&key);
-}
-
 #[cfg(feature = "tokio_fsm")]
 #[tokio::test]
 async fn keyed_bao_tree_slice_roundtrip_fsm_cases() {
-    use make_test_data as td;
-
     let key = blake3::derive_key("bao-tree.test", b"slice-fsm");
-    let cases = [
-        (0, 0..1),
-        (1, 0..1),
-        (1023, 0..1),
-        (1024, 0..1),
-        (1025, 0..1),
-        (1025, 0..2),
-        (1025, 1..2),
-        (24 * 1024 + 1, 0..25),
-    ];
     for chunk_group_log in 0..4 {
         let block_size = BlockSize(chunk_group_log);
-        for (count, range) in cases.clone() {
+        for (count, range) in KEYED_SLICE_ROUNDTRIP_CASES {
             keyed_bao_tree_slice_roundtrip_fsm_test(
-                td(count),
+                make_test_data(count),
                 ChunkNum(range.start)..ChunkNum(range.end),
                 block_size,
                 &key,
