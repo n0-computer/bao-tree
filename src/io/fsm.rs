@@ -934,7 +934,7 @@ mod validate {
         outboard: O,
         data: D,
         ranges: &'a ChunkRangesRef,
-        key: &'a [u8; 32],
+        key: &[u8; 32],
     ) -> impl Stream<Item = io::Result<Range<ChunkNum>>> + 'a
     where
         O: Outboard + 'a,
