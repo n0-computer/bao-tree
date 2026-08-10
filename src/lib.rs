@@ -547,7 +547,7 @@ pub(crate) const fn blocks(size: u64, block_size: BlockSize) -> u64 {
 /// You typically don't have to use this, but it can be useful for debugging
 /// and error handling. Hash validation errors contain a `TreeNode` that allows
 /// you to find the position where validation failed.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TreeNode(u64);
 
