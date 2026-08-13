@@ -15,6 +15,9 @@ pub mod mixed;
 pub mod outboard;
 pub mod sync;
 
+#[cfg(feature = "experimental-mixed")]
+pub mod baofile;
+
 /// A parent hash pair.
 #[derive(Debug)]
 pub struct Parent {
