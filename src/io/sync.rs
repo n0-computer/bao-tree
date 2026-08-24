@@ -14,16 +14,15 @@ use smallvec::SmallVec;
 use super::{combine_hash_pair, BaoContentItem, DecodeError};
 pub use crate::rec::truncate_ranges;
 use crate::{
-    blake3, hash_subtree,
+    blake3,
     io::{
         error::EncodeError,
         outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
     iter::{BaoChunk, ResponseIterRef},
-    parent_cv,
     rec::encode_selected_rec,
-    BaoTree, BlockSize, ChunkRangesRef, TreeNode,
+    BaoTree, BlockSize, ChunkRangesRef, HashMode, TreeNode,
 };
 
 /// A binary merkle tree for blake3 hashes of a blob.
@@ -257,13 +256,16 @@ impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
     }
 }
 
-/// Iterator that can be used to decode a response to a range request
+/// Iterator that can be used to decode a response to a range request.
+///
+/// Keyed callers should use [Self::new_keyed].
 #[derive(Debug)]
 pub struct DecodeResponseIter<'a, R> {
     inner: ResponseIterRef<'a>,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
     buf: BytesMut,
+    mode: HashMode,
 }
 
 impl<'a, R: Read> DecodeResponseIter<'a, R> {
@@ -287,6 +289,43 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         ranges: &'a ChunkRangesRef,
         buf: BytesMut,
     ) -> Self {
+        DecodeResponseIter::with_mode(root, tree, encoded, ranges, buf, HashMode::Standard)
+    }
+
+    /// Create a new iterator to decode a keyed response.
+    pub fn new_keyed(
+        root: blake3::Hash,
+        tree: BaoTree,
+        encoded: R,
+        ranges: &'a ChunkRangesRef,
+        key: &[u8; 32],
+    ) -> Self {
+        let buf = BytesMut::with_capacity(tree.block_size().bytes());
+        Self::new_keyed_with_buffer(root, tree, encoded, ranges, buf, key)
+    }
+
+    /// Create a new iterator to decode a keyed response.
+    ///
+    /// This is the same as [Self::new_keyed], but allows you to provide a buffer to use for decoding.
+    /// The buffer will be resized as needed, but it's capacity should be the [crate::BlockSize::bytes].
+    pub fn new_keyed_with_buffer(
+        root: blake3::Hash,
+        tree: BaoTree,
+        encoded: R,
+        ranges: &'a ChunkRangesRef,
+        buf: BytesMut,
+        key: &[u8; 32],
+    ) -> Self {
+        DecodeResponseIter::with_mode(root, tree, encoded, ranges, buf, HashMode::Keyed(*key))
+    }
+    pub(crate) fn with_mode(
+        root: blake3::Hash,
+        tree: BaoTree,
+        encoded: R,
+        ranges: &'a ChunkRangesRef,
+        buf: BytesMut,
+        mode: HashMode,
+    ) -> Self {
         let ranges = truncate_ranges(ranges, tree.size());
         let mut stack = SmallVec::new();
         stack.push(root);
@@ -295,6 +334,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
             inner: ResponseIterRef::new(tree, ranges),
             encoded,
             buf,
+            mode,
         }
     }
 
@@ -322,7 +362,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 let pair @ (l_hash, r_hash) = read_parent(&mut self.encoded)
                     .map_err(|e| DecodeError::maybe_parent_not_found(e, node))?;
                 let parent_hash = self.stack.pop().unwrap();
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);
                 if parent_hash != actual {
                     return Err(DecodeError::ParentHashMismatch(node));
                 }
@@ -344,7 +384,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
                 self.encoded
                     .read_exact(&mut self.buf)
                     .map_err(|e| DecodeError::maybe_leaf_not_found(e, start_chunk))?;
-                let actual = hash_subtree(start_chunk.0, &self.buf, is_root);
+                let actual = self.mode.hash_subtree(start_chunk.0, &self.buf, is_root);
                 let leaf_hash = self.stack.pop().unwrap();
                 if leaf_hash != actual {
                     return Err(DecodeError::LeafHashMismatch(start_chunk));
@@ -420,6 +460,27 @@ pub fn encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
     ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError> {
+    encode_ranges_validated_impl(data, outboard, ranges, encoded, HashMode::Standard)
+}
+
+/// Encode ranges with BLAKE3 keyed hash validation.
+pub fn keyed_encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
+    data: D,
+    outboard: O,
+    ranges: &ChunkRangesRef,
+    encoded: W,
+    key: &[u8; 32],
+) -> result::Result<(), EncodeError> {
+    encode_ranges_validated_impl(data, outboard, ranges, encoded, HashMode::Keyed(*key))
+}
+
+fn encode_ranges_validated_impl<D: ReadAt, O: Outboard, W: Write>(
+    data: D,
+    outboard: O,
+    ranges: &ChunkRangesRef,
+    encoded: W,
+    mode: HashMode,
+) -> result::Result<(), EncodeError> {
     if ranges.is_empty() {
         return Ok(());
     }
@@ -442,7 +503,7 @@ pub fn encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
                 ..
             } => {
                 let (l_hash, r_hash) = outboard.load(node)?.unwrap();
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                let actual = mode.parent_cv(&l_hash, &r_hash, is_root);
                 let expected = stack.pop().unwrap();
                 if actual != expected {
                     return Err(EncodeError::ParentHashMismatch(node));
@@ -481,10 +542,11 @@ pub fn encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
                         tree.block_size.to_u32(),
                         true,
                         &mut out_buf,
+                        mode,
                     );
                     (actual, &out_buf[..])
                 } else {
-                    let actual = hash_subtree(start_chunk.0, buf, is_root);
+                    let actual = mode.hash_subtree(start_chunk.0, buf, is_root);
                     #[allow(clippy::redundant_slicing)]
                     (actual, &buf[..])
                 };
@@ -505,15 +567,53 @@ pub fn encode_ranges_validated<D: ReadAt, O: Outboard, W: Write>(
 pub fn decode_ranges<R, O, W>(
     encoded: R,
     ranges: &ChunkRangesRef,
-    mut target: W,
-    mut outboard: O,
+    target: W,
+    outboard: O,
 ) -> std::result::Result<(), DecodeError>
 where
     O: OutboardMut + Outboard,
     R: Read,
     W: WriteAt,
 {
-    let iter = DecodeResponseIter::new(outboard.root(), outboard.tree(), encoded, ranges);
+    decode_ranges_impl(encoded, ranges, target, outboard, HashMode::Standard)
+}
+
+/// Decode a keyed response into a file while updating an outboard.
+pub fn keyed_decode_ranges<R, O, W>(
+    encoded: R,
+    ranges: &ChunkRangesRef,
+    target: W,
+    outboard: O,
+    key: &[u8; 32],
+) -> std::result::Result<(), DecodeError>
+where
+    O: OutboardMut + Outboard,
+    R: Read,
+    W: WriteAt,
+{
+    decode_ranges_impl(encoded, ranges, target, outboard, HashMode::Keyed(*key))
+}
+
+fn decode_ranges_impl<R, O, W>(
+    encoded: R,
+    ranges: &ChunkRangesRef,
+    mut target: W,
+    mut outboard: O,
+    mode: HashMode,
+) -> std::result::Result<(), DecodeError>
+where
+    O: OutboardMut + Outboard,
+    R: Read,
+    W: WriteAt,
+{
+    let iter = DecodeResponseIter::with_mode(
+        outboard.root(),
+        outboard.tree(),
+        encoded,
+        ranges,
+        BytesMut::with_capacity(outboard.tree().block_size().bytes()),
+        mode,
+    );
     for item in iter {
         match item? {
             BaoContentItem::Parent(Parent { node, pair }) => {
@@ -534,19 +634,38 @@ where
 pub fn outboard(
     data: impl Read,
     tree: BaoTree,
-    mut outboard: impl OutboardMut,
+    outboard: impl OutboardMut,
 ) -> io::Result<blake3::Hash> {
-    let mut buffer = vec![0u8; tree.chunk_group_bytes()];
-    let hash = outboard_impl(tree, data, &mut outboard, &mut buffer)?;
-    Ok(hash)
+    outboard_with_mode(data, tree, outboard, HashMode::Standard)
 }
 
-/// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
+/// Compute the keyed outboard for the given data.
+pub fn keyed_outboard(
+    data: impl Read,
+    tree: BaoTree,
+    outboard: impl OutboardMut,
+    key: &[u8; 32],
+) -> io::Result<blake3::Hash> {
+    outboard_with_mode(data, tree, outboard, HashMode::Keyed(*key))
+}
+
+/// Allocates a chunk group buffer and delegates to [outboard_impl].
+fn outboard_with_mode(
+    data: impl Read,
+    tree: BaoTree,
+    mut outboard: impl OutboardMut,
+    mode: HashMode,
+) -> io::Result<blake3::Hash> {
+    let mut buffer = vec![0u8; tree.chunk_group_bytes()];
+    outboard_impl(tree, data, &mut outboard, &mut buffer, mode)
+}
+
 fn outboard_impl(
     tree: BaoTree,
     mut data: impl Read,
     mut outboard: impl OutboardMut,
     buffer: &mut [u8],
+    mode: HashMode,
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
@@ -557,7 +676,7 @@ fn outboard_impl(
                 let right_hash = stack.pop().unwrap();
                 let left_hash = stack.pop().unwrap();
                 outboard.save(node, &(left_hash, right_hash))?;
-                let parent = parent_cv(&left_hash, &right_hash, is_root);
+                let parent = mode.parent_cv(&left_hash, &right_hash, is_root);
                 stack.push(parent);
             }
             BaoChunk::Leaf {
@@ -568,7 +687,7 @@ fn outboard_impl(
             } => {
                 let buf = &mut buffer[..size];
                 data.read_exact(buf)?;
-                let hash = hash_subtree(start_chunk.0, buf, is_root);
+                let hash = mode.hash_subtree(start_chunk.0, buf, is_root);
                 stack.push(hash);
             }
         }
@@ -587,19 +706,38 @@ fn outboard_impl(
 pub fn outboard_post_order(
     data: impl Read,
     tree: BaoTree,
-    mut outboard: impl Write,
+    outboard: impl Write,
 ) -> io::Result<blake3::Hash> {
-    let mut buffer = vec![0u8; tree.chunk_group_bytes()];
-    let hash = outboard_post_order_impl(tree, data, &mut outboard, &mut buffer)?;
-    Ok(hash)
+    outboard_post_order_with_mode(data, tree, outboard, HashMode::Standard)
 }
 
-/// Internal helper for [outboard_post_order]. This takes a buffer of the chunk group size.
+/// Compute the keyed post order outboard for the given data.
+pub fn keyed_outboard_post_order(
+    data: impl Read,
+    tree: BaoTree,
+    outboard: impl Write,
+    key: &[u8; 32],
+) -> io::Result<blake3::Hash> {
+    outboard_post_order_with_mode(data, tree, outboard, HashMode::Keyed(*key))
+}
+
+/// Allocates a chunk group buffer and delegates to [outboard_post_order_impl].
+fn outboard_post_order_with_mode(
+    data: impl Read,
+    tree: BaoTree,
+    mut outboard: impl Write,
+    mode: HashMode,
+) -> io::Result<blake3::Hash> {
+    let mut buffer = vec![0u8; tree.chunk_group_bytes()];
+    outboard_post_order_impl(tree, data, &mut outboard, &mut buffer, mode)
+}
+
 fn outboard_post_order_impl(
     tree: BaoTree,
     mut data: impl Read,
     mut outboard: impl Write,
     buffer: &mut [u8],
+    mode: HashMode,
 ) -> io::Result<blake3::Hash> {
     // do not allocate for small trees
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
@@ -611,7 +749,7 @@ fn outboard_post_order_impl(
                 let left_hash = stack.pop().unwrap();
                 outboard.write_all(left_hash.as_bytes())?;
                 outboard.write_all(right_hash.as_bytes())?;
-                let parent = parent_cv(&left_hash, &right_hash, is_root);
+                let parent = mode.parent_cv(&left_hash, &right_hash, is_root);
                 stack.push(parent);
             }
             BaoChunk::Leaf {
@@ -622,7 +760,7 @@ fn outboard_post_order_impl(
             } => {
                 let buf = &mut buffer[..size];
                 data.read_exact(buf)?;
-                let hash = hash_subtree(start_chunk.0, buf, is_root);
+                let hash = mode.hash_subtree(start_chunk.0, buf, is_root);
                 stack.push(hash);
             }
         }
@@ -663,8 +801,8 @@ mod validate {
 
     use super::Outboard;
     use crate::{
-        blake3, hash_subtree, io::LocalBoxFuture, parent_cv, rec::truncate_ranges, split, BaoTree,
-        ChunkNum, ChunkRangesRef, TreeNode,
+        blake3, io::LocalBoxFuture, rec::truncate_ranges, split, BaoTree, ChunkNum, ChunkRangesRef,
+        HashMode, TreeNode,
     };
 
     /// Given a data file and an outboard, compute all valid ranges.
@@ -681,8 +819,36 @@ mod validate {
         O: Outboard + 'a,
         D: ReadAt + 'a,
     {
+        valid_ranges_impl(outboard, data, ranges, HashMode::Standard)
+    }
+
+    /// Given a data file and a keyed outboard, compute all valid ranges.
+    pub fn keyed_valid_ranges<'a, O, D>(
+        outboard: O,
+        data: D,
+        ranges: &'a ChunkRangesRef,
+        key: &[u8; 32],
+    ) -> impl IntoIterator<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+        D: ReadAt + 'a,
+    {
+        valid_ranges_impl(outboard, data, ranges, HashMode::Keyed(*key))
+    }
+
+    fn valid_ranges_impl<'a, O, D>(
+        outboard: O,
+        data: D,
+        ranges: &'a ChunkRangesRef,
+        mode: HashMode,
+    ) -> impl IntoIterator<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+        D: ReadAt + 'a,
+    {
         Gen::new(move |co| async move {
-            if let Err(cause) = RecursiveDataValidator::validate(outboard, data, ranges, &co).await
+            if let Err(cause) =
+                RecursiveDataValidator::validate(outboard, data, ranges, &co, mode).await
             {
                 co.yield_(Err(cause)).await;
             }
@@ -696,6 +862,7 @@ mod validate {
         data: D,
         buffer: Vec<u8>,
         co: &'a Co<io::Result<Range<ChunkNum>>>,
+        mode: HashMode,
     }
 
     impl<O: Outboard, D: ReadAt> RecursiveDataValidator<'_, O, D> {
@@ -704,6 +871,7 @@ mod validate {
             data: D,
             ranges: &ChunkRangesRef,
             co: &Co<io::Result<Range<ChunkNum>>>,
+            mode: HashMode,
         ) -> io::Result<()> {
             let tree = outboard.tree();
             let mut buffer = vec![0u8; tree.chunk_group_bytes()];
@@ -711,7 +879,7 @@ mod validate {
                 // special case for a tree that fits in one block / chunk group
                 let tmp = &mut buffer[..tree.size().try_into().unwrap()];
                 data.read_exact_at(0, tmp)?;
-                let actual = hash_subtree(0, tmp, true);
+                let actual = mode.hash_subtree(0, tmp, true);
                 if actual == outboard.root() {
                     co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
                 }
@@ -727,6 +895,7 @@ mod validate {
                 data,
                 buffer,
                 co,
+                mode,
             };
             validator
                 .validate_rec(&root_hash, shifted_root, true, ranges)
@@ -743,7 +912,9 @@ mod validate {
             let tmp = &mut self.buffer[..len];
             self.data.read_exact_at(range.start, tmp)?;
             // is_root is always false because the case of a single chunk group is handled before calling this function
-            let actual = hash_subtree(ChunkNum::full_chunks(range.start).0, tmp, is_root);
+            let actual = self
+                .mode
+                .hash_subtree(ChunkNum::full_chunks(range.start).0, tmp, is_root);
             if &actual == hash {
                 // yield the left range
                 self.co
@@ -777,7 +948,7 @@ mod validate {
                     // outboard is incomplete, we can't validate
                     return Ok(());
                 };
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);
                 if &actual != parent_hash {
                     // hash mismatch, we can't validate
                     return Ok(());
@@ -812,8 +983,35 @@ mod validate {
     where
         O: Outboard + 'a,
     {
+        valid_outboard_ranges_impl(outboard, ranges, HashMode::Standard)
+    }
+
+    /// Given just a keyed outboard, compute all valid ranges.
+    ///
+    /// This is not cheap since it recomputes the hashes for all chunks.
+    pub fn keyed_valid_outboard_ranges<'a, O>(
+        outboard: O,
+        ranges: &'a ChunkRangesRef,
+        key: &[u8; 32],
+    ) -> impl IntoIterator<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+    {
+        valid_outboard_ranges_impl(outboard, ranges, HashMode::Keyed(*key))
+    }
+
+    fn valid_outboard_ranges_impl<'a, O>(
+        outboard: O,
+        ranges: &'a ChunkRangesRef,
+        mode: HashMode,
+    ) -> impl IntoIterator<Item = io::Result<Range<ChunkNum>>> + 'a
+    where
+        O: Outboard + 'a,
+    {
         Gen::new(move |co| async move {
-            if let Err(cause) = RecursiveOutboardValidator::validate(outboard, ranges, &co).await {
+            if let Err(cause) =
+                RecursiveOutboardValidator::validate(outboard, ranges, &co, mode).await
+            {
                 co.yield_(Err(cause)).await;
             }
         })
@@ -824,6 +1022,7 @@ mod validate {
         shifted_filled_size: TreeNode,
         outboard: O,
         co: &'a Co<io::Result<Range<ChunkNum>>>,
+        mode: HashMode,
     }
 
     impl<O: Outboard> RecursiveOutboardValidator<'_, O> {
@@ -831,6 +1030,7 @@ mod validate {
             outboard: O,
             ranges: &ChunkRangesRef,
             co: &Co<io::Result<Range<ChunkNum>>>,
+            mode: HashMode,
         ) -> io::Result<()> {
             let tree = outboard.tree();
             if tree.blocks() == 1 {
@@ -846,6 +1046,7 @@ mod validate {
                 shifted_filled_size,
                 outboard,
                 co,
+                mode,
             };
             validator
                 .validate_rec(&root_hash, shifted_root, true, ranges)
@@ -879,7 +1080,7 @@ mod validate {
                     // outboard is incomplete, we can't validate
                     return Ok(());
                 };
-                let actual = parent_cv(&l_hash, &r_hash, is_root);
+                let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);
                 if &actual != parent_hash {
                     // hash mismatch, we can't validate
                     return Ok(());
@@ -905,4 +1106,6 @@ mod validate {
     }
 }
 #[cfg(feature = "validate")]
-pub use validate::{valid_outboard_ranges, valid_ranges};
+pub use validate::{
+    keyed_valid_outboard_ranges, keyed_valid_ranges, valid_outboard_ranges, valid_ranges,
+};

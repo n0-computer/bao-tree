@@ -193,6 +193,13 @@
 //! # }
 //! ```
 //!
+//! # Keyed hashing
+//!
+//! For domain-separated trees, use the `keyed_*` functions. They mirror the
+//! standard API with an additional `key: &[u8; 32]` argument, like
+//! [`blake3::keyed_hash`] mirrors [`blake3::hash`]. The key is out-of-band
+//! metadata and is not included in the encoded stream.
+//!
 //! # Compatibility with the [bao crate](https://crates.io/crates/bao)
 //!
 //! This crate will be compatible with the bao crate, provided you do the
@@ -232,33 +239,91 @@ pub type ByteRanges = range_collections::RangeSet2<u64>;
 /// [ChunkRanges] implements [`AsRef<ChunkRangesRef>`].
 pub type ChunkRangesRef = range_collections::RangeSetRef<ChunkNum>;
 
-fn hash_subtree(start_chunk: u64, data: &[u8], is_root: bool) -> blake3::Hash {
-    use blake3::hazmat::{ChainingValue, HasherExt};
-    if is_root {
-        debug_assert!(start_chunk == 0);
-        blake3::hash(data)
-    } else {
-        let mut hasher = blake3::Hasher::new();
-        hasher.set_input_offset(start_chunk * 1024);
-        hasher.update(data);
-        let non_root_hash: ChainingValue = hasher.finalize_non_root();
-        blake3::Hash::from(non_root_hash)
+/// Hashing mode for shared encode and decode paths, either standard or keyed BLAKE3.
+#[derive(Clone, Copy)]
+pub(crate) enum HashMode {
+    Standard,
+    Keyed([u8; 32]),
+}
+
+impl std::fmt::Debug for HashMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HashMode::Standard => f.write_str("Standard"),
+            HashMode::Keyed(_) => f.debug_struct("Keyed").finish_non_exhaustive(),
+        }
     }
 }
 
-fn parent_cv(left_child: &blake3::Hash, right_child: &blake3::Hash, is_root: bool) -> blake3::Hash {
-    use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
-    let left_child: ChainingValue = *left_child.as_bytes();
-    let right_child: ChainingValue = *right_child.as_bytes();
-    if is_root {
-        merge_subtrees_root(&left_child, &right_child, Mode::Hash)
-    } else {
-        blake3::Hash::from(merge_subtrees_non_root(
-            &left_child,
-            &right_child,
-            Mode::Hash,
-        ))
+impl HashMode {
+    pub(crate) fn hash_subtree(
+        &self,
+        start_chunk: u64,
+        data: &[u8],
+        is_root: bool,
+    ) -> blake3::Hash {
+        use blake3::hazmat::{ChainingValue, HasherExt};
+        if is_root {
+            debug_assert!(start_chunk == 0);
+            match self {
+                HashMode::Standard => blake3::hash(data),
+                HashMode::Keyed(key) => blake3::keyed_hash(key, data),
+            }
+        } else {
+            let mut hasher = match self {
+                HashMode::Standard => blake3::Hasher::new(),
+                HashMode::Keyed(key) => blake3::Hasher::new_keyed(key),
+            };
+            hasher.set_input_offset(start_chunk * 1024);
+            hasher.update(data);
+            let non_root_hash: ChainingValue = hasher.finalize_non_root();
+            blake3::Hash::from(non_root_hash)
+        }
     }
+
+    pub(crate) fn parent_cv(
+        &self,
+        left_child: &blake3::Hash,
+        right_child: &blake3::Hash,
+        is_root: bool,
+    ) -> blake3::Hash {
+        use blake3::hazmat::{merge_subtrees_non_root, merge_subtrees_root, ChainingValue, Mode};
+        let left_child: ChainingValue = *left_child.as_bytes();
+        let right_child: ChainingValue = *right_child.as_bytes();
+        let mode = match self {
+            HashMode::Standard => Mode::Hash,
+            HashMode::Keyed(key) => Mode::KeyedHash(key),
+        };
+        if is_root {
+            merge_subtrees_root(&left_child, &right_child, mode)
+        } else {
+            blake3::Hash::from(merge_subtrees_non_root(&left_child, &right_child, mode))
+        }
+    }
+}
+
+/// Compute the hash of a subtree using BLAKE3 keyed mode.
+///
+/// See [keyed_parent_cv] for merging child hashes in keyed mode.
+#[inline]
+pub fn keyed_hash_subtree(
+    start_chunk: u64,
+    data: &[u8],
+    is_root: bool,
+    key: &[u8; 32],
+) -> blake3::Hash {
+    HashMode::Keyed(*key).hash_subtree(start_chunk, data, is_root)
+}
+
+/// Merge two child subtree hashes using BLAKE3 keyed mode.
+#[inline]
+pub fn keyed_parent_cv(
+    left_child: &blake3::Hash,
+    right_child: &blake3::Hash,
+    is_root: bool,
+    key: &[u8; 32],
+) -> blake3::Hash {
+    HashMode::Keyed(*key).parent_cv(left_child, right_child, is_root)
 }
 
 /// Defines a Bao tree.

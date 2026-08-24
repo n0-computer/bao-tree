@@ -2,7 +2,7 @@
 //!
 //! Encocding is used to compute hashes, decoding is only used in tests as a
 //! reference implementation.
-use crate::{blake3, hash_subtree, parent_cv, split_inner, ChunkNum, ChunkRangesRef};
+use crate::{blake3, split_inner, ChunkNum, ChunkRangesRef};
 
 /// Given a set of chunk ranges, adapt them for a tree of the given size.
 ///
@@ -96,6 +96,9 @@ fn truncated_len(ranges: &ChunkRangesRef, size: u64) -> usize {
 /// This is used as a reference implementation in tests, but also to compute hashes
 /// below the chunk group size when creating responses for outboards with a chunk group
 /// size of >0.
+///
+/// `mode` is the hashing mode for subtree and parent hashes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_selected_rec(
     start_chunk: ChunkNum,
     data: &[u8],
@@ -104,13 +107,14 @@ pub(crate) fn encode_selected_rec(
     min_level: u32,
     emit_data: bool,
     res: &mut Vec<u8>,
+    mode: crate::HashMode,
 ) -> blake3::Hash {
     use blake3::CHUNK_LEN;
     if data.len() <= CHUNK_LEN {
         if emit_data && !query.is_empty() {
             res.extend_from_slice(data);
         }
-        hash_subtree(start_chunk.0, data, is_root)
+        mode.hash_subtree(start_chunk.0, data, is_root)
     } else {
         let chunks = data.len() / CHUNK_LEN + (data.len() % CHUNK_LEN != 0) as usize;
         let chunks = chunks.next_power_of_two();
@@ -142,6 +146,7 @@ pub(crate) fn encode_selected_rec(
             min_level,
             emit_data,
             res,
+            mode,
         );
         let right = encode_selected_rec(
             mid_chunk,
@@ -151,13 +156,14 @@ pub(crate) fn encode_selected_rec(
             min_level,
             emit_data,
             res,
+            mode,
         );
         // backfill the hashes if needed
         if let Some(o) = hash_offset {
             res[o..o + 32].copy_from_slice(left.as_bytes());
             res[o + 32..o + 64].copy_from_slice(right.as_bytes());
         }
-        parent_cv(&left, &right, is_root)
+        mode.parent_cv(&left, &right, is_root)
     }
 }
 
@@ -275,6 +281,7 @@ mod test_support {
             0,
             false,
             &mut res,
+            crate::HashMode::Standard,
         );
         (res, hash)
     }
@@ -290,6 +297,7 @@ mod test_support {
             0,
             true,
             &mut res,
+            crate::HashMode::Standard,
         );
         (res, hash)
     }
@@ -430,8 +438,187 @@ mod test_support {
             block_size.to_u32(),
             true,
             &mut res,
+            crate::HashMode::Standard,
         );
         (res, hash)
+    }
+
+    use std::io::Cursor;
+
+    use crate::io::outboard::{PostOrderMemOutboard, PreOrderMemOutboard, PreOrderOutboard};
+    use crate::io::sync;
+
+    pub(crate) fn assert_pre_order_outboard_matches_mem(
+        outboard: &PreOrderOutboard<Vec<u8>>,
+        data: &[u8],
+        block_size: BlockSize,
+        key: &[u8; 32],
+    ) {
+        let reference = PreOrderMemOutboard::create_keyed(data, block_size, key);
+        assert_eq!(outboard.root, reference.root);
+        let tree = outboard.tree;
+        let mut copied = PreOrderMemOutboard {
+            root: outboard.root,
+            tree,
+            data: vec![0; tree.outboard_size().try_into().unwrap()],
+        };
+        sync::copy(outboard, &mut copied).unwrap();
+        assert_eq!(copied.data, reference.data);
+    }
+
+    pub(crate) fn keyed_outboard_functions_checks(
+        data: &[u8],
+        block_size: BlockSize,
+        key: &[u8; 32],
+    ) {
+        let tree = BaoTree::new(data.len() as u64, block_size);
+        let expected = blake3::keyed_hash(key, data);
+
+        let mut pre = PreOrderOutboard {
+            root: blake3::Hash::from([0; 32]),
+            tree,
+            data: vec![0; tree.outboard_size().try_into().unwrap()],
+        };
+        let root = sync::keyed_outboard(Cursor::new(data), tree, &mut pre, key).unwrap();
+        pre.root = root;
+        assert_eq!(root, expected);
+        assert_pre_order_outboard_matches_mem(&pre, data, block_size, key);
+
+        let mut post_buf = Vec::new();
+        let root =
+            sync::keyed_outboard_post_order(Cursor::new(data), tree, &mut post_buf, key).unwrap();
+        assert_eq!(root, expected);
+        assert_eq!(post_buf.len(), tree.outboard_size().try_into().unwrap());
+
+        let reference_post = PostOrderMemOutboard::create_keyed(data, block_size, key);
+        assert_eq!(post_buf, reference_post.data);
+
+        let post_mem = PostOrderMemOutboard {
+            root,
+            tree,
+            data: post_buf,
+        };
+        let pre_from_post = post_mem.flip();
+        assert_eq!(pre_from_post.data, pre.data);
+
+        let truncated_size = 1024u64.min(data.len() as u64);
+        if truncated_size < data.len() as u64 {
+            let truncated_tree = BaoTree::new(truncated_size, BlockSize(0));
+            let mut truncated_pre = PreOrderOutboard {
+                root: blake3::Hash::from([0; 32]),
+                tree: truncated_tree,
+                data: vec![0; truncated_tree.outboard_size().try_into().unwrap()],
+            };
+            let root =
+                sync::keyed_outboard(Cursor::new(data), truncated_tree, &mut truncated_pre, key)
+                    .unwrap();
+            truncated_pre.root = root;
+            assert_eq!(
+                root,
+                blake3::keyed_hash(key, &data[..truncated_size as usize])
+            );
+            assert_pre_order_outboard_matches_mem(
+                &truncated_pre,
+                &data[..truncated_size as usize],
+                BlockSize(0),
+                key,
+            );
+        }
+
+        let oversize_tree = BaoTree::new(data.len() as u64 + 100, BlockSize(0));
+        let mut sink = Vec::new();
+        assert!(
+            sync::keyed_outboard_post_order(Cursor::new(data), oversize_tree, &mut sink, key)
+                .is_err()
+        );
+    }
+
+    #[cfg(feature = "tokio_fsm")]
+    pub(crate) async fn keyed_outboard_functions_checks_fsm(
+        data: &[u8],
+        block_size: BlockSize,
+        key: &[u8; 32],
+    ) {
+        use crate::io::fsm::{keyed_outboard, keyed_outboard_post_order};
+        use bytes::Bytes;
+
+        let tree = BaoTree::new(data.len() as u64, block_size);
+        let expected = blake3::keyed_hash(key, data);
+
+        let mut pre = PreOrderOutboard {
+            root: blake3::Hash::from([0; 32]),
+            tree,
+            data: vec![0; tree.outboard_size().try_into().unwrap()],
+        };
+        let root = keyed_outboard(Cursor::new(Bytes::from(data.to_vec())), tree, &mut pre, key)
+            .await
+            .unwrap();
+        pre.root = root;
+        assert_eq!(root, expected);
+        assert_pre_order_outboard_matches_mem(&pre, data, block_size, key);
+
+        let mut post_buf = Vec::new();
+        let root = keyed_outboard_post_order(
+            Cursor::new(Bytes::from(data.to_vec())),
+            tree,
+            &mut post_buf,
+            key,
+        )
+        .await
+        .unwrap();
+        assert_eq!(root, expected);
+        assert_eq!(post_buf.len(), tree.outboard_size().try_into().unwrap());
+
+        let reference_post = PostOrderMemOutboard::create_keyed(data, block_size, key);
+        assert_eq!(post_buf, reference_post.data);
+
+        let post_mem = PostOrderMemOutboard {
+            root,
+            tree,
+            data: post_buf,
+        };
+        let pre_from_post = post_mem.flip();
+        assert_eq!(pre_from_post.data, pre.data);
+
+        let truncated_size = 1024u64.min(data.len() as u64);
+        if truncated_size < data.len() as u64 {
+            let truncated_tree = BaoTree::new(truncated_size, BlockSize(0));
+            let mut truncated_pre = PreOrderOutboard {
+                root: blake3::Hash::from([0; 32]),
+                tree: truncated_tree,
+                data: vec![0; truncated_tree.outboard_size().try_into().unwrap()],
+            };
+            let root = keyed_outboard(
+                Cursor::new(Bytes::from(data.to_vec())),
+                truncated_tree,
+                &mut truncated_pre,
+                key,
+            )
+            .await
+            .unwrap();
+            truncated_pre.root = root;
+            assert_eq!(
+                root,
+                blake3::keyed_hash(key, &data[..truncated_size as usize])
+            );
+            assert_pre_order_outboard_matches_mem(
+                &truncated_pre,
+                &data[..truncated_size as usize],
+                BlockSize(0),
+                key,
+            );
+        }
+
+        let oversize_tree = BaoTree::new(data.len() as u64 + 100, BlockSize(0));
+        let mut sink = Vec::new();
+        assert!(keyed_outboard_post_order(
+            Cursor::new(Bytes::from(data.to_vec())),
+            oversize_tree,
+            &mut sink,
+            key
+        )
+        .await
+        .is_err());
     }
 
     /// Check that l and r of a 2-tuple are equal
