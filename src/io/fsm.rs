@@ -497,8 +497,8 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
 pub async fn encode_ranges<D, O, W>(
-    mut data: D,
-    mut outboard: O,
+    data: D,
+    outboard: O,
     ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError>
@@ -507,8 +507,44 @@ where
     O: Outboard,
     W: AsyncStreamWriter,
 {
+    encode_ranges_impl(data, outboard, ranges, encoded, HashMode::Standard).await
+}
+
+/// Encode ranges relevant to a query from a reader and keyed outboard to a writer
+///
+/// This is the same as [encode_ranges], but uses BLAKE3 keyed hashing for
+/// incomplete chunk groups.
+pub async fn keyed_encode_ranges<D, O, W>(
+    data: D,
+    outboard: O,
+    ranges: &ChunkRangesRef,
+    encoded: W,
+    key: &[u8; 32],
+) -> result::Result<(), EncodeError>
+where
+    D: AsyncSliceReader,
+    O: Outboard,
+    W: AsyncStreamWriter,
+{
+    encode_ranges_impl(data, outboard, ranges, encoded, HashMode::Keyed(*key)).await
+}
+
+async fn encode_ranges_impl<D, O, W>(
+    mut data: D,
+    mut outboard: O,
+    ranges: &ChunkRangesRef,
+    encoded: W,
+    mode: HashMode,
+) -> result::Result<(), EncodeError>
+where
+    D: AsyncSliceReader,
+    O: Outboard,
+    W: AsyncStreamWriter,
+{
+    let mut out_buf = Vec::new();
     let mut encoded = encoded;
     let tree = outboard.tree();
+    let ranges = truncate_ranges(ranges, tree.size());
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
@@ -520,12 +556,31 @@ where
                     .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
             BaoChunk::Leaf {
-                start_chunk, size, ..
+                start_chunk,
+                size,
+                is_root,
+                ranges,
             } => {
                 let start = start_chunk.to_bytes();
                 let bytes = data.read_exact_at(start, size).await?;
+                let to_write = if !ranges.is_all() {
+                    out_buf.clear();
+                    encode_selected_rec(
+                        start_chunk,
+                        &bytes,
+                        is_root,
+                        ranges,
+                        tree.block_size.to_u32(),
+                        true,
+                        &mut out_buf,
+                        mode,
+                    );
+                    out_buf.clone().into()
+                } else {
+                    bytes
+                };
                 encoded
-                    .write_bytes(bytes)
+                    .write_bytes(to_write)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
