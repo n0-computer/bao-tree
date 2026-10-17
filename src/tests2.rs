@@ -1291,6 +1291,31 @@ fn encode_unvalidated_impl(data: &[u8], outboard: PostOrderMemOutboard, ranges: 
     assert_eq!(expected, fsm_encoded);
 }
 
+fn keyed_encode_unvalidated_impl(
+    data: &[u8],
+    outboard: PostOrderMemOutboard,
+    ranges: &ChunkRanges,
+    key: &[u8; 32],
+) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut expected = Vec::new();
+    crate::io::sync::keyed_encode_ranges_validated(data, &outboard, ranges, &mut expected, key)
+        .unwrap();
+    let mut sync_encoded = Vec::new();
+    crate::io::sync::keyed_encode_ranges(data, &outboard, ranges, &mut sync_encoded, key).unwrap();
+    let mut fsm_encoded = Vec::new();
+    rt.block_on(crate::io::fsm::keyed_encode_ranges(
+        Bytes::from(data.to_vec()),
+        outboard,
+        ranges,
+        &mut fsm_encoded,
+        key,
+    ))
+    .unwrap();
+    assert_eq!(expected, sync_encoded);
+    assert_eq!(expected, fsm_encoded);
+}
+
 #[test]
 fn encode_unvalidated_cases() {
     let data = make_test_data(1041);
@@ -1307,6 +1332,18 @@ fn encode_unvalidated_proptest(
     let data = make_test_data(size);
     let outboard = PostOrderMemOutboard::create(&data, block_size);
     encode_unvalidated_impl(&data, outboard, &selection);
+}
+
+#[proptest]
+fn keyed_encode_unvalidated_proptest(
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
+    #[strategy(block_size())] block_size: BlockSize,
+) {
+    let (size, selection) = size_and_selection;
+    let data = make_test_data(size);
+    let key = keyed_test_key(&(size as u64).to_le_bytes());
+    let outboard = PostOrderMemOutboard::create_keyed(&data, block_size, &key);
+    keyed_encode_unvalidated_impl(&data, outboard, &selection, &key);
 }
 
 #[proptest]
