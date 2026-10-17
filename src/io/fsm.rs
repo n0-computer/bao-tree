@@ -507,8 +507,10 @@ where
     O: Outboard,
     W: AsyncStreamWriter,
 {
+    let mut out_buf = Vec::new();
     let mut encoded = encoded;
     let tree = outboard.tree();
+    let ranges = truncate_ranges(ranges, tree.size());
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
@@ -520,12 +522,31 @@ where
                     .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
             BaoChunk::Leaf {
-                start_chunk, size, ..
+                start_chunk,
+                size,
+                is_root,
+                ranges,
             } => {
                 let start = start_chunk.to_bytes();
                 let bytes = data.read_exact_at(start, size).await?;
+                let to_write = if !ranges.is_all() {
+                    out_buf.clear();
+                    encode_selected_rec(
+                        start_chunk,
+                        &bytes,
+                        is_root,
+                        ranges,
+                        tree.block_size.to_u32(),
+                        true,
+                        &mut out_buf,
+                        HashMode::Standard,
+                    );
+                    out_buf.clone().into()
+                } else {
+                    bytes
+                };
                 encoded
-                    .write_bytes(bytes)
+                    .write_bytes(to_write)
                     .await
                     .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }

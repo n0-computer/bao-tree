@@ -427,6 +427,8 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     let mut encoded = encoded;
     let tree = outboard.tree();
     let mut buffer = vec![0u8; tree.chunk_group_bytes()];
+    let mut out_buf = Vec::new();
+    let ranges = truncate_ranges(ranges, tree.size());
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
@@ -435,12 +437,30 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
                 encoded.write_all(&pair)?;
             }
             BaoChunk::Leaf {
-                start_chunk, size, ..
+                start_chunk,
+                size,
+                is_root,
+                ranges,
             } => {
                 let start = start_chunk.to_bytes();
                 let buf = &mut buffer[..size];
                 data.read_exact_at(start, buf)?;
-                encoded.write_all(buf)?;
+                if !ranges.is_all() {
+                    out_buf.clear();
+                    encode_selected_rec(
+                        start_chunk,
+                        buf,
+                        is_root,
+                        ranges,
+                        tree.block_size.to_u32(),
+                        true,
+                        &mut out_buf,
+                        HashMode::Standard,
+                    );
+                    encoded.write_all(&out_buf)?;
+                } else {
+                    encoded.write_all(buf)?;
+                }
             }
         }
     }
