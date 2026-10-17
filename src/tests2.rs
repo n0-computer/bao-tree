@@ -1273,6 +1273,42 @@ fn encode_partial_sync_fsm_proptest(
     encode_partial_sync_fsm_impl(&data, outboard, &selection);
 }
 
+fn encode_unvalidated_impl(data: &[u8], outboard: PostOrderMemOutboard, ranges: &ChunkRanges) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut expected = Vec::new();
+    crate::io::sync::encode_ranges_validated(data, &outboard, ranges, &mut expected).unwrap();
+    let mut sync_encoded = Vec::new();
+    crate::io::sync::encode_ranges(data, &outboard, ranges, &mut sync_encoded).unwrap();
+    let mut fsm_encoded = Vec::new();
+    rt.block_on(crate::io::fsm::encode_ranges(
+        Bytes::from(data.to_vec()),
+        outboard,
+        ranges,
+        &mut fsm_encoded,
+    ))
+    .unwrap();
+    assert_eq!(expected, sync_encoded);
+    assert_eq!(expected, fsm_encoded);
+}
+
+#[test]
+fn encode_unvalidated_cases() {
+    let data = make_test_data(1041);
+    let outboard = PostOrderMemOutboard::create(&data, BlockSize(3));
+    encode_unvalidated_impl(&data, outboard, &ChunkRanges::from(..ChunkNum(1)));
+}
+
+#[proptest]
+fn encode_unvalidated_proptest(
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
+    #[strategy(block_size())] block_size: BlockSize,
+) {
+    let (size, selection) = size_and_selection;
+    let data = make_test_data(size);
+    let outboard = PostOrderMemOutboard::create(&data, block_size);
+    encode_unvalidated_impl(&data, outboard, &selection);
+}
+
 #[proptest]
 fn keyed_encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
