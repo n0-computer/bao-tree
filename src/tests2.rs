@@ -75,7 +75,8 @@ fn size_and_selection(
     let selection = prop_oneof! {
         8 => selection(size_range.end as u64, n),
         1 => Just(ChunkRanges::all()),
-        1 => Just(ChunkRanges::from(ChunkNum(u64::MAX)..))
+        1 => Just(ChunkRanges::from(ChunkNum(u64::MAX)..)),
+        1 => Just(ChunkRanges::empty())
     };
     size_range.prop_flat_map(move |size| (Just(size), selection.clone()))
 }
