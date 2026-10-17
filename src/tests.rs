@@ -1022,7 +1022,7 @@ fn size_and_selection(
 ) -> impl Strategy<Value = (usize, ChunkRanges)> {
     size_range.prop_flat_map(move |size| {
         let selection = prop_oneof! {
-            9 => selection(size as u64, n),
+            49 => selection(size as u64, n),
             1 => Just(ChunkRanges::empty())
         };
         (Just(size), selection)
