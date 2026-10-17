@@ -497,10 +497,44 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
 /// This will either succeed if the requested ranges are all present, or fail
 /// as soon as a range is missing.
 pub async fn encode_ranges<D, O, W>(
+    data: D,
+    outboard: O,
+    ranges: &ChunkRangesRef,
+    encoded: W,
+) -> result::Result<(), EncodeError>
+where
+    D: AsyncSliceReader,
+    O: Outboard,
+    W: AsyncStreamWriter,
+{
+    encode_ranges_impl(data, outboard, ranges, encoded, HashMode::Standard).await
+}
+
+/// Encode ranges relevant to a query from a reader and keyed outboard to a writer
+///
+/// This is the same as [encode_ranges], but uses BLAKE3 keyed hashing for
+/// incomplete chunk groups.
+pub async fn keyed_encode_ranges<D, O, W>(
+    data: D,
+    outboard: O,
+    ranges: &ChunkRangesRef,
+    encoded: W,
+    key: &[u8; 32],
+) -> result::Result<(), EncodeError>
+where
+    D: AsyncSliceReader,
+    O: Outboard,
+    W: AsyncStreamWriter,
+{
+    encode_ranges_impl(data, outboard, ranges, encoded, HashMode::Keyed(*key)).await
+}
+
+async fn encode_ranges_impl<D, O, W>(
     mut data: D,
     mut outboard: O,
     ranges: &ChunkRangesRef,
     encoded: W,
+    mode: HashMode,
 ) -> result::Result<(), EncodeError>
 where
     D: AsyncSliceReader,
@@ -539,7 +573,7 @@ where
                         tree.block_size.to_u32(),
                         true,
                         &mut out_buf,
-                        HashMode::Standard,
+                        mode,
                     );
                     out_buf.clone().into()
                 } else {

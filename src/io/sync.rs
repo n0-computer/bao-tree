@@ -423,6 +423,30 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
     ranges: &ChunkRangesRef,
     encoded: W,
 ) -> result::Result<(), EncodeError> {
+    encode_ranges_impl(data, outboard, ranges, encoded, HashMode::Standard)
+}
+
+/// Encode ranges relevant to a query from a reader and keyed outboard to a writer
+///
+/// This is the same as [encode_ranges], but uses BLAKE3 keyed hashing for
+/// incomplete chunk groups.
+pub fn keyed_encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
+    data: D,
+    outboard: O,
+    ranges: &ChunkRangesRef,
+    encoded: W,
+    key: &[u8; 32],
+) -> result::Result<(), EncodeError> {
+    encode_ranges_impl(data, outboard, ranges, encoded, HashMode::Keyed(*key))
+}
+
+fn encode_ranges_impl<D: ReadAt + Size, O: Outboard, W: Write>(
+    data: D,
+    outboard: O,
+    ranges: &ChunkRangesRef,
+    encoded: W,
+    mode: HashMode,
+) -> result::Result<(), EncodeError> {
     let data = data;
     let mut encoded = encoded;
     let tree = outboard.tree();
@@ -455,7 +479,7 @@ pub fn encode_ranges<D: ReadAt + Size, O: Outboard, W: Write>(
                         tree.block_size.to_u32(),
                         true,
                         &mut out_buf,
-                        HashMode::Standard,
+                        mode,
                     );
                     encoded.write_all(&out_buf)?;
                 } else {
