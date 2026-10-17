@@ -481,9 +481,6 @@ fn encode_ranges_validated_impl<D: ReadAt, O: Outboard, W: Write>(
     encoded: W,
     mode: HashMode,
 ) -> result::Result<(), EncodeError> {
-    if ranges.is_empty() {
-        return Ok(());
-    }
     let mut stack = SmallVec::<[blake3::Hash; 10]>::new();
     stack.push(outboard.root());
     let data = data;

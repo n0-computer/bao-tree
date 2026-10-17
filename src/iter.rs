@@ -513,7 +513,9 @@ impl<'a> PreOrderPartialChunkIterRef<'a> {
     pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef, min_full_level: u8) -> Self {
         let mut stack = SmallVec::new();
         let (shifted_root, shifted_filled_size) = tree.shifted();
-        stack.push((shifted_root, ranges));
+        if !ranges.is_empty() {
+            stack.push((shifted_root, ranges));
+        }
         Self {
             tree,
             min_full_level,

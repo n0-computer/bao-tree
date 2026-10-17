@@ -73,9 +73,10 @@ fn size_and_selection(
     n: usize,
 ) -> impl Strategy<Value = (usize, ChunkRanges)> {
     let selection = prop_oneof! {
-        8 => selection(size_range.end as u64, n),
-        1 => Just(ChunkRanges::all()),
-        1 => Just(ChunkRanges::from(ChunkNum(u64::MAX)..))
+        40 => selection(size_range.end as u64, n),
+        5 => Just(ChunkRanges::all()),
+        5 => Just(ChunkRanges::from(ChunkNum(u64::MAX)..)),
+        1 => Just(ChunkRanges::empty())
     };
     size_range.prop_flat_map(move |size| (Just(size), selection.clone()))
 }
@@ -1127,6 +1128,37 @@ fn encode_decode_full_sync_cases() {
     }
 }
 
+#[test]
+fn encode_decode_empty_ranges_cases() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for size in [0, 1024 * 48] {
+        for block_size in [BlockSize(0), BlockSize(4)] {
+            let data = make_test_data(size);
+            let outboard = PostOrderMemOutboard::create(&data, block_size);
+            let ranges = ChunkRanges::empty();
+            let mut sync_encoded = Vec::new();
+            crate::io::sync::encode_ranges_validated(&data, &outboard, &ranges, &mut sync_encoded)
+                .unwrap();
+            let mut fsm_encoded = Vec::new();
+            rt.block_on(crate::io::fsm::encode_ranges_validated(
+                Bytes::from(data.clone()),
+                outboard.clone(),
+                &ranges,
+                &mut fsm_encoded,
+            ))
+            .unwrap();
+            assert!(sync_encoded.is_empty());
+            assert!(fsm_encoded.is_empty());
+            assert!(encode_decode_partial_sync_impl(
+                &data,
+                outboard.clone(),
+                &ranges
+            ));
+            assert!(rt.block_on(encode_decode_partial_fsm_impl(&data, outboard, ranges)));
+        }
+    }
+}
+
 #[proptest]
 fn encode_decode_full_sync_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
@@ -1202,6 +1234,43 @@ fn encode_decode_partial_fsm_proptest(
         .unwrap()
         .block_on(encode_decode_partial_fsm_impl(&data, outboard, selection));
     prop_assert!(ok);
+}
+
+fn encode_partial_sync_fsm_impl(data: &[u8], outboard: PostOrderMemOutboard, ranges: &ChunkRanges) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut sync_encoded = Vec::new();
+    crate::io::sync::encode_ranges(data, &outboard, ranges, &mut sync_encoded).unwrap();
+    let mut sync_validated = Vec::new();
+    crate::io::sync::encode_ranges_validated(data, &outboard, ranges, &mut sync_validated).unwrap();
+    let mut fsm_encoded = Vec::new();
+    rt.block_on(crate::io::fsm::encode_ranges(
+        Bytes::from(data.to_vec()),
+        outboard.clone(),
+        ranges,
+        &mut fsm_encoded,
+    ))
+    .unwrap();
+    let mut fsm_validated = Vec::new();
+    rt.block_on(crate::io::fsm::encode_ranges_validated(
+        Bytes::from(data.to_vec()),
+        outboard,
+        ranges,
+        &mut fsm_validated,
+    ))
+    .unwrap();
+    assert_eq!(sync_encoded, fsm_encoded);
+    assert_eq!(sync_validated, fsm_validated);
+}
+
+#[proptest]
+fn encode_partial_sync_fsm_proptest(
+    #[strategy(size_and_selection(0..100000, 2))] size_and_selection: (usize, ChunkRanges),
+    #[strategy(block_size())] block_size: BlockSize,
+) {
+    let (size, selection) = size_and_selection;
+    let data = make_test_data(size);
+    let outboard = PostOrderMemOutboard::create(&data, block_size);
+    encode_partial_sync_fsm_impl(&data, outboard, &selection);
 }
 
 #[proptest]
