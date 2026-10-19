@@ -186,11 +186,13 @@ impl ChunkNum {
     }
 
     /// End (exclusive) of the chunk group that this chunk the end for
+    ///
+    /// Saturates at `u64::MAX`.
     pub const fn chunk_group_end(end: ChunkNum, block_size: BlockSize) -> ChunkNum {
-        let mask = (1 << block_size.0) - 1;
-        let part = ((end.0 & mask) != 0) as u64;
-        let whole = end.0 >> block_size.0;
-        ChunkNum((whole + part) << block_size.0)
+        match end.0.checked_next_multiple_of(1 << block_size.0) {
+            Some(end) => ChunkNum(end),
+            None => ChunkNum(u64::MAX),
+        }
     }
 
     /// number of chunks that this number of bytes covers
@@ -211,7 +213,9 @@ impl ChunkNum {
     }
 
     /// number of bytes that this number of chunks covers
+    ///
+    /// Saturates at `u64::MAX`.
     pub const fn to_bytes(&self) -> u64 {
-        self.0 << 10
+        self.0.saturating_mul(1024)
     }
 }
