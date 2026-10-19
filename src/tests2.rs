@@ -1591,6 +1591,84 @@ fn huge_tree_last_leaf_cases() {
     }
 }
 
+#[cfg(feature = "validate")]
+fn valid_outboard_ranges_sync(outboard: impl crate::io::sync::Outboard) -> Vec<Range<ChunkNum>> {
+    crate::io::sync::valid_outboard_ranges(outboard, &ChunkRanges::all())
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[cfg(feature = "validate")]
+async fn valid_outboard_ranges_fsm(
+    outboard: impl crate::io::fsm::Outboard,
+) -> Vec<Range<ChunkNum>> {
+    let ranges = ChunkRanges::all();
+    crate::io::fsm::valid_outboard_ranges(outboard, &ranges)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[cfg(feature = "validate")]
+#[test]
+fn truncated_outboard_cases() {
+    use crate::io::outboard::{PostOrderOutboard, PreOrderOutboard};
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let data = make_test_data(1024 * 33);
+    let post = PostOrderMemOutboard::create(&data, BlockSize(0));
+    let pre = post.flip();
+    let (root, tree) = (post.root, post.tree);
+    for (full, is_pre) in [(pre.data, true), (post.data, false)] {
+        for len in (0..=full.len()).step_by(37) {
+            let truncated = full[..len].to_vec();
+            let mut padded = truncated.clone();
+            padded.resize(full.len(), 0);
+            let (a, b, c) = if is_pre {
+                (
+                    valid_outboard_ranges_sync(PreOrderOutboard {
+                        root,
+                        tree,
+                        data: truncated.clone(),
+                    }),
+                    valid_outboard_ranges_sync(PreOrderOutboard {
+                        root,
+                        tree,
+                        data: padded,
+                    }),
+                    rt.block_on(valid_outboard_ranges_fsm(PreOrderOutboard {
+                        root,
+                        tree,
+                        data: Bytes::from(truncated),
+                    })),
+                )
+            } else {
+                (
+                    valid_outboard_ranges_sync(PostOrderOutboard {
+                        root,
+                        tree,
+                        data: truncated.clone(),
+                    }),
+                    valid_outboard_ranges_sync(PostOrderOutboard {
+                        root,
+                        tree,
+                        data: padded,
+                    }),
+                    rt.block_on(valid_outboard_ranges_fsm(PostOrderOutboard {
+                        root,
+                        tree,
+                        data: Bytes::from(truncated),
+                    })),
+                )
+            };
+            assert_eq!(a, b);
+            assert_eq!(a, c);
+        }
+    }
+}
+
 #[proptest]
 fn keyed_encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
