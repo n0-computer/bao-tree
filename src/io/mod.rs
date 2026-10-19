@@ -15,9 +15,6 @@ pub mod mixed;
 pub mod outboard;
 pub mod sync;
 
-#[cfg(all(test, feature = "tokio_fsm"))]
-mod consistency;
-
 /// A parent hash pair.
 #[derive(Debug)]
 pub struct Parent {
