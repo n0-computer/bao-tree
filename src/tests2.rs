@@ -1995,3 +1995,23 @@ fn canonicalize_ranges_test() {
 fn run_blocking<F: std::future::Future>(f: F) -> F::Output {
     tokio::runtime::Runtime::new().unwrap().block_on(f)
 }
+
+#[cfg(feature = "validate")]
+#[test]
+fn valid_ranges_empty_cases() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let ranges = ChunkRanges::empty();
+    for (size, block_size) in [(3000, BlockSize(2)), (1024 * 40 + 7, BlockSize(2))] {
+        let data = make_test_data(size);
+        let outboard = PreOrderMemOutboard::create(&data, block_size);
+        let sync = crate::io::sync::valid_ranges(&outboard, &data[..], &ranges);
+        assert_eq!(sync.into_iter().count(), 0);
+        let sync = crate::io::sync::valid_outboard_ranges(&outboard, &ranges);
+        assert_eq!(sync.into_iter().count(), 0);
+        let fsm =
+            crate::io::fsm::valid_ranges(outboard.clone(), Bytes::from(data.clone()), &ranges);
+        assert_eq!(rt.block_on(fsm.count()), 0);
+        let fsm = crate::io::fsm::valid_outboard_ranges(outboard.clone(), &ranges);
+        assert_eq!(rt.block_on(fsm.count()), 0);
+    }
+}
