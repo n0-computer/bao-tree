@@ -1437,6 +1437,74 @@ fn fsm_decoder_hash_cases() {
     }
 }
 
+/// An outboard that violates the contract of [crate::io::sync::Outboard::load]
+/// by returning `Ok(None)` for nodes that should be stored.
+struct NoneOutboard(PreOrderMemOutboard);
+
+impl crate::io::sync::Outboard for NoneOutboard {
+    fn root(&self) -> blake3::Hash {
+        self.0.root
+    }
+    fn tree(&self) -> BaoTree {
+        self.0.tree
+    }
+    fn load(&self, node: TreeNode) -> std::io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        if node.level() == 0 {
+            Ok(None)
+        } else {
+            crate::io::sync::Outboard::load(&self.0, node)
+        }
+    }
+}
+
+impl crate::io::fsm::Outboard for NoneOutboard {
+    fn root(&self) -> blake3::Hash {
+        self.0.root
+    }
+    fn tree(&self) -> BaoTree {
+        self.0.tree
+    }
+    async fn load(
+        &mut self,
+        node: TreeNode,
+    ) -> std::io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        crate::io::sync::Outboard::load(self, node)
+    }
+}
+
+fn is_missing_hash_pair(res: Result<(), crate::io::EncodeError>) -> bool {
+    matches!(res, Err(crate::io::EncodeError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData)
+}
+
+#[test]
+fn encode_outboard_none_cases() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let data = make_test_data(1024 * 16);
+    let ranges = ChunkRanges::all();
+    let outboard = || NoneOutboard(PreOrderMemOutboard::create(&data, BlockSize(0)));
+    let mut encoded = Vec::new();
+    assert!(is_missing_hash_pair(crate::io::sync::encode_ranges(
+        &data[..],
+        outboard(),
+        &ranges,
+        &mut encoded,
+    )));
+    assert!(is_missing_hash_pair(
+        crate::io::sync::encode_ranges_validated(&data[..], outboard(), &ranges, &mut encoded)
+    ));
+    assert!(is_missing_hash_pair(rt.block_on(
+        crate::io::fsm::encode_ranges(Bytes::from(data.clone()), outboard(), &ranges, &mut encoded,)
+    )));
+    assert!(is_missing_hash_pair(rt.block_on(
+        crate::io::fsm::encode_ranges_validated(
+            Bytes::from(data.clone()),
+            outboard(),
+            &ranges,
+            &mut encoded,
+        )
+    )));
+}
+
 #[proptest]
 fn keyed_encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());

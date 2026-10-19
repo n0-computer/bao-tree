@@ -64,6 +64,13 @@ pub trait Outboard {
     fn tree(&self) -> BaoTree;
     /// load the hash pair for a node
     ///
+    /// Return `Ok(None)` only for nodes that are not stored in this outboard by
+    /// design, i.e. where [BaoTree::pre_order_offset] or [BaoTree::post_order_offset]
+    /// return `None`. For a node whose hash pair is not available yet, such as an
+    /// unwritten region of a sparse file, return a pair of zero hashes. These
+    /// never verify, so the node is treated like corrupted data. Return an error
+    /// only for io failures.
+    ///
     /// This takes a &mut self not because it mutates the outboard (it doesn't),
     /// but to ensure that there is only one outstanding load at a time.
     fn load(
@@ -558,7 +565,10 @@ where
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
-                let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
+                let (l_hash, r_hash) = outboard
+                    .load(node)
+                    .await?
+                    .ok_or_else(|| EncodeError::missing_hash_pair(node))?;
                 let pair = combine_hash_pair(&l_hash, &r_hash);
                 encoded
                     .write(&pair)
@@ -665,7 +675,10 @@ where
                 node,
                 ..
             } => {
-                let (l_hash, r_hash) = outboard.load(node).await?.unwrap();
+                let (l_hash, r_hash) = outboard
+                    .load(node)
+                    .await?
+                    .ok_or_else(|| EncodeError::missing_hash_pair(node))?;
                 let actual = mode.parent_cv(&l_hash, &r_hash, is_root);
                 let expected = stack.pop().unwrap();
                 if actual != expected {
@@ -1108,7 +1121,7 @@ mod validate {
                     return Ok(());
                 }
                 let Some((l_hash, r_hash)) = self.outboard.load(node).await? else {
-                    // outboard is incomplete, we can't validate
+                    // node is not stored in the outboard, we can't validate
                     return Ok(());
                 };
                 let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);
@@ -1241,7 +1254,7 @@ mod validate {
                     return Ok(());
                 }
                 let Some((l_hash, r_hash)) = self.outboard.load(node).await? else {
-                    // outboard is incomplete, we can't validate
+                    // node is not stored in the outboard, we can't validate
                     return Ok(());
                 };
                 let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);

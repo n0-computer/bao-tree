@@ -48,6 +48,13 @@ pub trait Outboard {
     /// The tree. This contains the information about the size of the file and the block size.
     fn tree(&self) -> BaoTree;
     /// load the hash pair for a node
+    ///
+    /// Return `Ok(None)` only for nodes that are not stored in this outboard by
+    /// design, i.e. where [BaoTree::pre_order_offset] or [BaoTree::post_order_offset]
+    /// return `None`. For a node whose hash pair is not available yet, such as an
+    /// unwritten region of a sparse file, return a pair of zero hashes. These
+    /// never verify, so the node is treated like corrupted data. Return an error
+    /// only for io failures.
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>>;
 }
 
@@ -465,7 +472,9 @@ fn encode_ranges_impl<D: ReadAt + Size, O: Outboard, W: Write>(
     for item in tree.ranges_pre_order_chunks_iter_ref(ranges, 0) {
         match item {
             BaoChunk::Parent { node, .. } => {
-                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                let (l_hash, r_hash) = outboard
+                    .load(node)?
+                    .ok_or_else(|| EncodeError::missing_hash_pair(node))?;
                 let pair = combine_hash_pair(&l_hash, &r_hash);
                 encoded.write_all(&pair)?;
             }
@@ -552,7 +561,9 @@ fn encode_ranges_validated_impl<D: ReadAt, O: Outboard, W: Write>(
                 node,
                 ..
             } => {
-                let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                let (l_hash, r_hash) = outboard
+                    .load(node)?
+                    .ok_or_else(|| EncodeError::missing_hash_pair(node))?;
                 let actual = mode.parent_cv(&l_hash, &r_hash, is_root);
                 let expected = stack.pop().unwrap();
                 if actual != expected {
@@ -995,7 +1006,7 @@ mod validate {
                     return Ok(());
                 }
                 let Some((l_hash, r_hash)) = self.outboard.load(node)? else {
-                    // outboard is incomplete, we can't validate
+                    // node is not stored in the outboard, we can't validate
                     return Ok(());
                 };
                 let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);
@@ -1127,7 +1138,7 @@ mod validate {
                     return Ok(());
                 }
                 let Some((l_hash, r_hash)) = self.outboard.load(node)? else {
-                    // outboard is incomplete, we can't validate
+                    // node is not stored in the outboard, we can't validate
                     return Ok(());
                 };
                 let actual = self.mode.parent_cv(&l_hash, &r_hash, is_root);
