@@ -8,7 +8,8 @@ use smallvec::SmallVec;
 
 use super::{sync::Outboard, EncodeError, Leaf, Parent};
 use crate::{
-    iter::BaoChunk, rec::truncate_ranges, split_inner, ChunkNum, ChunkRangesRef, HashMode, TreeNode,
+    iter::BaoChunk, rec::truncate_ranges, split_inner, BlockSize, ChunkNum, ChunkRangesRef,
+    HashMode, TreeNode,
 };
 
 /// A content item for the bao streaming protocol.
@@ -322,10 +323,11 @@ fn traverse_selected_rec_impl(
         // todo: maybe call into blake3::hazmat::hash_subtree directly for this case? it would be faster.
         let full = query.is_all();
         let emit_parent = !query.is_empty() && (!full || level >= min_level);
+        let node = TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(level as u8));
         let hash_offset = if emit_parent {
             // make some room for the hash pair
             let pair = Parent {
-                node: TreeNode(0),
+                node,
                 pair: ([0; 32].into(), [0; 32].into()),
             };
             res.push(pair.into());
@@ -356,8 +358,6 @@ fn traverse_selected_rec_impl(
         );
         // backfill the hashes if needed
         if let Some(o) = hash_offset {
-            // todo: figure out how to get the tree node from the start chunk!
-            let node = TreeNode(0);
             res[o] = Parent {
                 node,
                 pair: (left, right),

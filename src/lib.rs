@@ -641,9 +641,9 @@ impl TreeNode {
     /// So for level 0, the start chunk must even. For level 1, the start chunk
     /// must be divisible by 4, etc.
     ///
-    /// This is a bridge from the recursive reference implementation to the node
-    /// based implementations, and is therefore only used in tests.
-    #[cfg(all(test, feature = "tokio_fsm"))]
+    /// This is a bridge from the recursive implementations to the node based
+    /// implementations. It is used in tests and in the mixed traversal.
+    #[cfg(any(all(test, feature = "tokio_fsm"), feature = "experimental-mixed"))]
     fn from_start_chunk_and_level(start_chunk: ChunkNum, level: BlockSize) -> Self {
         let start_chunk = start_chunk.0;
         let level = level.0;
