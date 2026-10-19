@@ -1561,6 +1561,36 @@ fn decode_ranges_partial_chunk_group_cases() {
     }
 }
 
+#[test]
+fn huge_tree_last_leaf_cases() {
+    let sizes = [
+        u64::MAX,
+        u64::MAX - 1,
+        u64::MAX - 1023,
+        u64::MAX - 1024,
+        1 << 63,
+        (1 << 63) + 1,
+    ];
+    for size in sizes {
+        for block_size in [BlockSize(0), BlockSize(4)] {
+            let tree = BaoTree::new(size, block_size);
+            let ranges = ChunkRanges::from(ChunkNum(u64::MAX - 5)..);
+            let leaves = crate::iter::ResponseIter::new(tree, ranges)
+                .filter_map(|chunk| match chunk {
+                    BaoChunk::Leaf {
+                        start_chunk, size, ..
+                    } => Some((start_chunk.to_bytes(), size as u64)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(leaves.len(), 1);
+            let (start, len) = leaves[0];
+            assert_eq!(start, ChunkNum::chunks(size).0.saturating_sub(1) * 1024);
+            assert_eq!(start + len, size);
+        }
+    }
+}
+
 #[proptest]
 fn keyed_encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
