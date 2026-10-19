@@ -315,6 +315,7 @@ pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::H
 #[derive(Debug)]
 struct ResponseDecoderInner<R> {
     iter: ResponseIter,
+    hash: blake3::Hash,
     stack: SmallVec<[blake3::Hash; 10]>,
     encoded: R,
     mode: HashMode,
@@ -332,6 +333,7 @@ impl<R> ResponseDecoderInner<R> {
         let ranges = truncate_ranges_owned(ranges, tree.size());
         let mut res = Self {
             iter: ResponseIter::new(tree, ranges),
+            hash,
             stack: SmallVec::new(),
             encoded,
             mode,
@@ -434,7 +436,7 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
 
     /// Hash of the blob we are currently getting
     pub fn hash(&self) -> &blake3::Hash {
-        &self.0.stack[0]
+        &self.0.hash
     }
 
     async fn next0(&mut self, chunk: BaoChunk) -> std::result::Result<BaoContentItem, DecodeError> {
