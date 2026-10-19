@@ -1669,6 +1669,59 @@ fn truncated_outboard_cases() {
     }
 }
 
+#[cfg(feature = "validate")]
+fn valid_ranges_sync(
+    outboard: impl crate::io::sync::Outboard,
+    data: &[u8],
+) -> Vec<Range<ChunkNum>> {
+    crate::io::sync::valid_ranges(outboard, data, &ChunkRanges::all())
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[cfg(feature = "validate")]
+async fn valid_ranges_fsm(
+    outboard: impl crate::io::fsm::Outboard,
+    data: Bytes,
+) -> Vec<Range<ChunkNum>> {
+    let ranges = ChunkRanges::all();
+    crate::io::fsm::valid_ranges(outboard, data, &ranges)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[cfg(feature = "validate")]
+#[test]
+fn truncated_data_cases() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    for (size, block_size) in [
+        (1024 * 40 + 7, BlockSize(0)),
+        (1024 * 40 + 7, BlockSize(2)),
+        (3000, BlockSize(2)),
+    ] {
+        let data = make_test_data(size);
+        let outboard = PreOrderMemOutboard::create(&data, block_size);
+        for len in (0..=size).step_by(311) {
+            let truncated = &data[..len];
+            let mut missing = data.clone();
+            for byte in &mut missing[len..] {
+                *byte = !*byte;
+            }
+            let expected = valid_ranges_sync(&outboard, &missing);
+            assert_eq!(valid_ranges_sync(&outboard, truncated), expected);
+            let fsm = rt.block_on(valid_ranges_fsm(
+                outboard.clone(),
+                Bytes::copy_from_slice(truncated),
+            ));
+            assert_eq!(fsm, expected);
+        }
+    }
+}
+
 #[proptest]
 fn keyed_encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
