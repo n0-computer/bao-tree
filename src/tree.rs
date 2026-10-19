@@ -211,7 +211,9 @@ impl ChunkNum {
     }
 
     /// number of bytes that this number of chunks covers
+    ///
+    /// Saturates at `u64::MAX`.
     pub const fn to_bytes(&self) -> u64 {
-        self.0 << 10
+        self.0.saturating_mul(1024)
     }
 }
