@@ -51,8 +51,10 @@ pub trait Outboard {
     ///
     /// Return `Ok(None)` only for nodes that are not stored in this outboard by
     /// design, i.e. where [BaoTree::pre_order_offset] or [BaoTree::post_order_offset]
-    /// return `None`. If a hash pair that should be stored is not available,
-    /// return an error.
+    /// return `None`. For a node whose hash pair is not available yet, such as an
+    /// unwritten region of a sparse file, return a pair of zero hashes. These
+    /// never verify, so the node is treated like corrupted data. Return an error
+    /// only for io failures.
     fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>>;
 }
 
