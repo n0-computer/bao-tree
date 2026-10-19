@@ -161,6 +161,13 @@ impl From<io::Error> for EncodeError {
 }
 
 impl EncodeError {
+    pub(crate) fn missing_hash_pair(node: TreeNode) -> Self {
+        Self::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("outboard returned no hash pair for node {node}"),
+        ))
+    }
+
     #[cfg(feature = "tokio_fsm")]
     pub(crate) fn maybe_parent_write(e: io::Error, node: TreeNode) -> Self {
         if e.kind() == io::ErrorKind::ConnectionReset {

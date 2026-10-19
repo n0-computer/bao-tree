@@ -140,7 +140,9 @@ where
                     node,
                     ..
                 } => {
-                    let (l_hash, r_hash) = outboard.load(node)?.unwrap();
+                    let (l_hash, r_hash) = outboard
+                        .load(node)?
+                        .ok_or_else(|| EncodeError::missing_hash_pair(node))?;
                     let actual = mode.parent_cv(&l_hash, &r_hash, is_root);
                     let expected = stack.pop().unwrap();
                     if actual != expected {
