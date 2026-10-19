@@ -179,21 +179,23 @@ pub fn full_chunk_groups(ranges: &ChunkRanges, block_size: BlockSize) -> ChunkRa
         value >> shift << shift
     }
 
-    fn ceil(value: u64, shift: u8) -> u64 {
-        (value + (1 << shift) - 1) >> shift << shift
+    fn ceil(value: u64, shift: u8) -> Option<u64> {
+        value.checked_next_multiple_of(1 << shift)
     }
     let mut res = ChunkRanges::empty();
     for item in ranges.iter() {
         match item {
             RangeSetRange::RangeFrom(range) => {
-                let start = ceil(range.start.0, block_size.0);
-                res |= ChunkRanges::from(ChunkNum(start)..)
+                if let Some(start) = ceil(range.start.0, block_size.0) {
+                    res |= ChunkRanges::from(ChunkNum(start)..)
+                }
             }
             RangeSetRange::Range(range) => {
-                let start = ceil(range.start.0, block_size.0);
                 let end = floor(range.end.0, block_size.0);
-                if start < end {
-                    res |= ChunkRanges::from(ChunkNum(start)..ChunkNum(end))
+                if let Some(start) = ceil(range.start.0, block_size.0) {
+                    if start < end {
+                        res |= ChunkRanges::from(ChunkNum(start)..ChunkNum(end))
+                    }
                 }
             }
         }
