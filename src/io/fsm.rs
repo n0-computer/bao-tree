@@ -343,6 +343,9 @@ impl<R> ResponseDecoderInner<R> {
 
 /// Response decoder.
 ///
+/// After an item with an error, the next call to [Self::next] returns
+/// [ResponseDecoderNext::Done].
+///
 /// Keyed callers should use [Self::new_keyed].
 #[derive(Debug)]
 pub struct ResponseDecoder<R>(Box<ResponseDecoderInner<R>>);
@@ -405,8 +408,14 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
 
     /// Proceed to the next state by reading the next chunk from the stream.
     pub async fn next(mut self) -> ResponseDecoderNext<R> {
+        if self.0.stack.is_empty() {
+            return ResponseDecoderNext::Done(self.0.encoded);
+        }
         if let Some(chunk) = self.0.iter.next() {
             let item = self.next0(chunk).await;
+            if item.is_err() {
+                self.0.stack.clear();
+            }
             ResponseDecoderNext::More((self, item))
         } else {
             ResponseDecoderNext::Done(self.0.encoded)
@@ -455,7 +464,6 @@ impl<R: AsyncStreamReader> ResponseDecoder<R> {
                 if left {
                     this.stack.push(l_hash);
                 }
-                // Validate after pushing the children so that we could in principle continue
                 if parent_hash != actual {
                     return Err(DecodeError::ParentHashMismatch(node));
                 }

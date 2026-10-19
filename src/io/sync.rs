@@ -258,6 +258,8 @@ impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
 
 /// Iterator that can be used to decode a response to a range request.
 ///
+/// The iterator ends after the first error.
+///
 /// Keyed callers should use [Self::new_keyed].
 #[derive(Debug)]
 pub struct DecodeResponseIter<'a, R> {
@@ -351,6 +353,9 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
     }
 
     fn next0(&mut self) -> result::Result<Option<BaoContentItem>, DecodeError> {
+        if self.stack.is_empty() {
+            return Ok(None);
+        }
         match self.inner.next() {
             Some(BaoChunk::Parent {
                 is_root,
@@ -406,7 +411,11 @@ impl<R: Read> Iterator for DecodeResponseIter<'_, R> {
     type Item = result::Result<BaoContentItem, DecodeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.next0().transpose()
+        let res = self.next0();
+        if res.is_err() {
+            self.stack.clear();
+        }
+        res.transpose()
     }
 }
 
