@@ -377,6 +377,7 @@ mod tests {
         io::{
             outboard::PreOrderMemOutboard,
             sync::{encode_ranges_validated, keyed_encode_ranges_validated},
+            BaoContentItem,
         },
         BaoTree, BlockSize, ChunkRanges,
     };
@@ -453,6 +454,74 @@ mod tests {
             last,
             Some(EncodedItem::Error(EncodeError::Io(e))) if e.kind() == io::ErrorKind::InvalidData
         ));
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Item {
+        Parent(TreeNode, (blake3::Hash, blake3::Hash)),
+        Leaf(u64, Vec<u8>),
+    }
+
+    fn push(items: &mut Vec<Item>, item: Item) {
+        if let (Some(Item::Leaf(offset, data)), Item::Leaf(next, more)) = (items.last_mut(), &item)
+        {
+            if *offset + data.len() as u64 == *next {
+                data.extend_from_slice(more);
+                return;
+            }
+        }
+        items.push(item);
+    }
+
+    #[tokio::test]
+    async fn items_match_decoder() {
+        for size in [1024 * 16 + 1, 1024 * 40 + 7, 100_000] {
+            let data: Vec<u8> = (0..size).map(|i| (i / 1024) as u8 ^ i as u8).collect();
+            for block_size in [0, 2, 4] {
+                let outboard =
+                    PreOrderMemOutboard::create(&data, BlockSize::from_chunk_log(block_size));
+                for (start, end) in [(0, 1), (1, 2), (3, 9), (5, 40), (17, 18), (30, 1000)] {
+                    let ranges = ChunkRanges::from(ChunkNum(start)..ChunkNum(end));
+                    let mut encoded = Vec::new();
+                    encode_ranges_validated(&data[..], &outboard, &ranges, &mut encoded).unwrap();
+                    let mut expected = Vec::new();
+                    for item in crate::io::sync::DecodeResponseIter::new(
+                        outboard.root,
+                        outboard.tree,
+                        io::Cursor::new(encoded),
+                        &ranges,
+                    ) {
+                        let item = match item.unwrap() {
+                            BaoContentItem::Parent(Parent { node, pair }) => {
+                                Item::Parent(node, pair)
+                            }
+                            BaoContentItem::Leaf(Leaf { offset, data }) => {
+                                Item::Leaf(offset, data.to_vec())
+                            }
+                        };
+                        push(&mut expected, item);
+                    }
+                    let (mut tx, mut rx) = tokio::sync::mpsc::channel(1000);
+                    traverse_ranges_validated(&data[..], &outboard, &ranges, &mut tx)
+                        .await
+                        .unwrap();
+                    drop(tx);
+                    let mut actual = Vec::new();
+                    while let Some(item) = rx.recv().await {
+                        match item {
+                            EncodedItem::Parent(Parent { node, pair }) => {
+                                push(&mut actual, Item::Parent(node, pair))
+                            }
+                            EncodedItem::Leaf(Leaf { offset, data }) => {
+                                push(&mut actual, Item::Leaf(offset, data.to_vec()))
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
     }
 
     #[tokio::test]
