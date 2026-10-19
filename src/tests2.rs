@@ -1346,6 +1346,72 @@ fn keyed_encode_unvalidated_proptest(
     keyed_encode_unvalidated_impl(&data, outboard, &selection, &key);
 }
 
+fn decode_items_sync(
+    root: blake3::Hash,
+    tree: BaoTree,
+    encoded: &[u8],
+    ranges: &ChunkRanges,
+) -> Vec<String> {
+    crate::io::sync::DecodeResponseIter::new(root, tree, std::io::Cursor::new(encoded), ranges)
+        .map(|item| format!("{item:?}"))
+        .collect()
+}
+
+async fn decode_items_fsm(
+    root: blake3::Hash,
+    tree: BaoTree,
+    encoded: &[u8],
+    ranges: ChunkRanges,
+) -> Vec<String> {
+    let mut res = Vec::new();
+    let mut decoder =
+        crate::io::fsm::ResponseDecoder::new(root, ranges, tree, std::io::Cursor::new(encoded));
+    while let ResponseDecoderNext::More((next, item)) = decoder.next().await {
+        res.push(format!("{item:?}"));
+        decoder = next;
+    }
+    res
+}
+
+#[test]
+fn decode_stops_after_error_cases() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let cases = [
+        (1024 * 7 + 13, BlockSize(0), ChunkRanges::all()),
+        (
+            1024 * 33,
+            BlockSize(2),
+            ChunkRanges::from(ChunkNum(3)..ChunkNum(9)),
+        ),
+    ];
+    for (size, block_size, ranges) in cases {
+        let data = make_test_data(size);
+        let outboard = PostOrderMemOutboard::create(&data, block_size);
+        let mut encoded = Vec::new();
+        crate::io::sync::encode_ranges_validated(&data, &outboard, &ranges, &mut encoded).unwrap();
+        let mut broken = Vec::new();
+        for i in (0..encoded.len()).step_by(61) {
+            let mut corrupted = encoded.clone();
+            corrupted[i] ^= 1;
+            broken.push(corrupted);
+            broken.push(encoded[..i].to_vec());
+        }
+        for encoded in broken {
+            let sync = decode_items_sync(outboard.root, outboard.tree, &encoded, &ranges);
+            let fsm = rt.block_on(decode_items_fsm(
+                outboard.root,
+                outboard.tree,
+                &encoded,
+                ranges.clone(),
+            ));
+            assert_eq!(sync, fsm);
+            let errors = sync.iter().filter(|item| item.starts_with("Err")).count();
+            assert_eq!(errors, 1);
+            assert!(sync.last().unwrap().starts_with("Err"));
+        }
+    }
+}
+
 #[proptest]
 fn keyed_encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
