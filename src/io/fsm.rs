@@ -65,11 +65,15 @@ pub trait Outboard {
     /// load the hash pair for a node
     ///
     /// Return `Ok(None)` only for nodes that are not stored in this outboard by
-    /// design, i.e. where [BaoTree::pre_order_offset] or [BaoTree::post_order_offset]
-    /// return `None`. For a node whose hash pair is not available yet, such as an
-    /// unwritten region of a sparse file, return a pair of zero hashes. These
-    /// never verify, so the node is treated like corrupted data. Return an error
-    /// only for io failures.
+    /// design. Usually these are the nodes inside a chunk group, where
+    /// [BaoTree::pre_order_offset] or [BaoTree::post_order_offset] return `None`,
+    /// but an outboard may also store some of them, e.g. to be able to serve
+    /// parts of a chunk group.
+    ///
+    /// For a node whose hash pair is not available yet, such as an unwritten
+    /// region of a sparse file, return a pair of zero hashes. These never
+    /// verify, so the node is treated like corrupted data. Return an error only
+    /// for io failures.
     ///
     /// This takes a &mut self not because it mutates the outboard (it doesn't),
     /// but to ensure that there is only one outstanding load at a time.
@@ -89,6 +93,9 @@ pub trait Outboard {
 /// implementation [super::outboard::EmptyOutboard].
 pub trait OutboardMut: Sized {
     /// Save a hash pair for a node
+    ///
+    /// Nodes that are not stored in this outboard by design, i.e. where
+    /// [Outboard::load] returns `Ok(None)`, must be accepted and ignored.
     fn save(
         &mut self,
         node: TreeNode,
