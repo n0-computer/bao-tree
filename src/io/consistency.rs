@@ -28,6 +28,7 @@ use crate::{
 };
 
 const KEY: [u8; 32] = [7; 32];
+const OTHER_KEY: [u8; 32] = [9; 32];
 
 fn block_on<F: Future>(future: F) -> F::Output {
     futures_lite::future::block_on(future)
@@ -97,11 +98,20 @@ impl Case {
     }
 }
 
-fn other_mode(mode: HashMode) -> HashMode {
-    match mode {
-        HashMode::Standard => HashMode::Keyed(KEY),
-        HashMode::Keyed(_) => HashMode::Standard,
-    }
+/// All hash modes other than `mode`: unkeyed, keyed, and keyed with a different key.
+fn other_modes(mode: HashMode) -> Vec<HashMode> {
+    let all = [
+        HashMode::Standard,
+        HashMode::Keyed(KEY),
+        HashMode::Keyed(OTHER_KEY),
+    ];
+    all.into_iter()
+        .filter(|other| match (mode, other) {
+            (HashMode::Standard, HashMode::Standard) => false,
+            (HashMode::Keyed(a), HashMode::Keyed(b)) => a != *b,
+            _ => true,
+        })
+        .collect()
 }
 
 fn mode() -> impl Strategy<Value = HashMode> {
@@ -1075,21 +1085,30 @@ mod validators {
         }
     }
 
-    /// Validating with the wrong hash mode finds nothing valid.
-    pub(super) fn validate_wrong_mode(case: &Case) {
+    /// Validating with the wrong hash mode finds nothing valid. The outboard of
+    /// a tree with a single chunk group has no hash pairs, so validating just the
+    /// outboard can not detect the wrong mode there.
+    pub(super) fn validate_wrong_mode(case: &Case, wrong: HashMode) {
         let data = case.data();
         let pre = PostOrderMemOutboard::flip(&case.outboard(&data));
-        let wrong = case.with_mode(other_mode(case.mode));
-        let sync_ob = PreOrderOutboard {
+        let wrong = case.with_mode(wrong);
+        let ob = || PreOrderOutboard {
             root: pre.root,
             tree: pre.tree,
             data: pre.data.clone(),
         };
         assert_eq!(
-            valid_ranges_sync(&wrong, sync_ob, &data),
+            valid_ranges_sync(&wrong, ob(), &data),
             ChunkRanges::empty(),
             "{case:?}"
         );
+        if case.tree().blocks() > 1 {
+            assert_eq!(
+                valid_outboard_ranges_sync(&wrong, ob()),
+                ChunkRanges::empty(),
+                "{case:?}"
+            );
+        }
     }
 }
 
@@ -1098,43 +1117,44 @@ mod validators {
 fn wrong_mode_fails(case: &Case) {
     let data = case.data();
     let outboard = case.outboard(&data);
-    let wrong = other_mode(case.mode);
     let (encoded, _) = valid_items(case, &data, &outboard);
     let ranges = truncate_ranges(&case.ranges, case.size as u64);
-    let input = EncodeInput {
-        data: &data,
-        outboard: &outboard,
-        ranges: &case.ranges,
-        mode: wrong,
-    };
-    for (name, encode) in VALIDATING_ENCODERS {
-        let res = encode(&input);
-        if ranges.is_empty() {
-            assert_eq!(res, Ok(Vec::new()), "{name} {case:?}");
-        } else {
-            assert!(res.is_err(), "{name} accepted the wrong mode for {case:?}");
+    for wrong in other_modes(case.mode) {
+        let input = EncodeInput {
+            data: &data,
+            outboard: &outboard,
+            ranges: &case.ranges,
+            mode: wrong,
+        };
+        for (name, encode) in VALIDATING_ENCODERS {
+            let res = encode(&input);
+            if ranges.is_empty() {
+                assert_eq!(res, Ok(Vec::new()), "{name} {case:?}");
+            } else {
+                assert!(res.is_err(), "{name} accepted {wrong:?} for {case:?}");
+            }
         }
-    }
-    let input = DecodeInput {
-        root: outboard.root,
-        tree: outboard.tree,
-        encoded: &encoded,
-        ranges: &case.ranges,
-        mode: wrong,
-    };
-    for (name, decode) in DECODERS {
-        let items = decode(&input);
-        if ranges.is_empty() {
-            assert_eq!(items, Vec::new(), "{name} {case:?}");
-        } else {
-            assert!(
-                matches!(&items[..], [Item::Err(_)]),
-                "{name} accepted the wrong mode for {case:?}: {items:?}"
-            );
+        let input = DecodeInput {
+            root: outboard.root,
+            tree: outboard.tree,
+            encoded: &encoded,
+            ranges: &case.ranges,
+            mode: wrong,
+        };
+        for (name, decode) in DECODERS {
+            let items = decode(&input);
+            if ranges.is_empty() {
+                assert_eq!(items, Vec::new(), "{name} {case:?}");
+            } else {
+                assert!(
+                    matches!(&items[..], [Item::Err(_)]),
+                    "{name} accepted {wrong:?} for {case:?}: {items:?}"
+                );
+            }
         }
+        #[cfg(feature = "validate")]
+        validators::validate_wrong_mode(case, wrong);
     }
-    #[cfg(feature = "validate")]
-    validators::validate_wrong_mode(case);
 }
 
 #[test]
