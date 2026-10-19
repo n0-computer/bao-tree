@@ -947,6 +947,9 @@ mod validate {
             co: &Co<io::Result<Range<ChunkNum>>>,
             mode: HashMode,
         ) -> io::Result<()> {
+            if ranges.is_empty() {
+                return Ok(());
+            }
             let tree = outboard.tree();
             let mut buffer = vec![0u8; tree.chunk_group_bytes()];
             if tree.blocks() == 1 {
@@ -1114,6 +1117,9 @@ mod validate {
             co: &Co<io::Result<Range<ChunkNum>>>,
             mode: HashMode,
         ) -> io::Result<()> {
+            if ranges.is_empty() {
+                return Ok(());
+            }
             let tree = outboard.tree();
             if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
