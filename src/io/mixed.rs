@@ -8,7 +8,8 @@ use smallvec::SmallVec;
 
 use super::{sync::Outboard, EncodeError, Leaf, Parent};
 use crate::{
-    iter::BaoChunk, rec::truncate_ranges, split_inner, ChunkNum, ChunkRangesRef, HashMode, TreeNode,
+    iter::BaoChunk, rec::truncate_ranges, split_inner, BlockSize, ChunkNum, ChunkRangesRef,
+    HashMode, TreeNode,
 };
 
 /// A content item for the bao streaming protocol.
@@ -322,10 +323,11 @@ fn traverse_selected_rec_impl(
         // todo: maybe call into blake3::hazmat::hash_subtree directly for this case? it would be faster.
         let full = query.is_all();
         let emit_parent = !query.is_empty() && (!full || level >= min_level);
+        let node = TreeNode::from_start_chunk_and_level(start_chunk, BlockSize(level as u8));
         let hash_offset = if emit_parent {
             // make some room for the hash pair
             let pair = Parent {
-                node: TreeNode(0),
+                node,
                 pair: ([0; 32].into(), [0; 32].into()),
             };
             res.push(pair.into());
@@ -356,8 +358,6 @@ fn traverse_selected_rec_impl(
         );
         // backfill the hashes if needed
         if let Some(o) = hash_offset {
-            // todo: figure out how to get the tree node from the start chunk!
-            let node = TreeNode(0);
             res[o] = Parent {
                 node,
                 pair: (left, right),
@@ -377,6 +377,7 @@ mod tests {
         io::{
             outboard::PreOrderMemOutboard,
             sync::{encode_ranges_validated, keyed_encode_ranges_validated},
+            BaoContentItem,
         },
         BaoTree, BlockSize, ChunkRanges,
     };
@@ -453,6 +454,74 @@ mod tests {
             last,
             Some(EncodedItem::Error(EncodeError::Io(e))) if e.kind() == io::ErrorKind::InvalidData
         ));
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum Item {
+        Parent(TreeNode, (blake3::Hash, blake3::Hash)),
+        Leaf(u64, Vec<u8>),
+    }
+
+    fn push(items: &mut Vec<Item>, item: Item) {
+        if let (Some(Item::Leaf(offset, data)), Item::Leaf(next, more)) = (items.last_mut(), &item)
+        {
+            if *offset + data.len() as u64 == *next {
+                data.extend_from_slice(more);
+                return;
+            }
+        }
+        items.push(item);
+    }
+
+    #[tokio::test]
+    async fn items_match_decoder() {
+        for size in [1024 * 16 + 1, 1024 * 40 + 7, 100_000] {
+            let data: Vec<u8> = (0..size).map(|i| (i / 1024) as u8 ^ i as u8).collect();
+            for block_size in [0, 2, 4] {
+                let outboard =
+                    PreOrderMemOutboard::create(&data, BlockSize::from_chunk_log(block_size));
+                for (start, end) in [(0, 1), (1, 2), (3, 9), (5, 40), (17, 18), (30, 1000)] {
+                    let ranges = ChunkRanges::from(ChunkNum(start)..ChunkNum(end));
+                    let mut encoded = Vec::new();
+                    encode_ranges_validated(&data[..], &outboard, &ranges, &mut encoded).unwrap();
+                    let mut expected = Vec::new();
+                    for item in crate::io::sync::DecodeResponseIter::new(
+                        outboard.root,
+                        outboard.tree,
+                        io::Cursor::new(encoded),
+                        &ranges,
+                    ) {
+                        let item = match item.unwrap() {
+                            BaoContentItem::Parent(Parent { node, pair }) => {
+                                Item::Parent(node, pair)
+                            }
+                            BaoContentItem::Leaf(Leaf { offset, data }) => {
+                                Item::Leaf(offset, data.to_vec())
+                            }
+                        };
+                        push(&mut expected, item);
+                    }
+                    let (mut tx, mut rx) = tokio::sync::mpsc::channel(1000);
+                    traverse_ranges_validated(&data[..], &outboard, &ranges, &mut tx)
+                        .await
+                        .unwrap();
+                    drop(tx);
+                    let mut actual = Vec::new();
+                    while let Some(item) = rx.recv().await {
+                        match item {
+                            EncodedItem::Parent(Parent { node, pair }) => {
+                                push(&mut actual, Item::Parent(node, pair))
+                            }
+                            EncodedItem::Leaf(Leaf { offset, data }) => {
+                                push(&mut actual, Item::Leaf(offset, data.to_vec()))
+                            }
+                            _ => {}
+                        }
+                    }
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
     }
 
     #[tokio::test]
