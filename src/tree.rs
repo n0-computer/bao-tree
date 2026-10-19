@@ -230,3 +230,26 @@ impl ChunkNum {
         self.0 << 10
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::BlockSize;
+
+    #[test]
+    fn block_size_max() {
+        assert_eq!(BlockSize::from_chunk_log(16), BlockSize::MAX);
+        assert_eq!(BlockSize::MAX.bytes(), 64 * 1024 * 1024);
+        assert_eq!(
+            BlockSize::from_bytes(64 * 1024 * 1024),
+            Some(BlockSize::MAX)
+        );
+        assert_eq!(BlockSize::from_bytes(128 * 1024 * 1024), None);
+        assert_eq!(BlockSize::from_bytes(1 << 63), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "block size too large")]
+    fn block_size_too_large() {
+        BlockSize::from_chunk_log(17);
+    }
+}
