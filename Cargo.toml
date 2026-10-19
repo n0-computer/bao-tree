@@ -40,7 +40,7 @@ hex = "0.4.3"
 bao = "0.12.1"
 tokio = { version = "1", features = ["full"] }
 proptest = "1.0.0"
-rand = "0.8.5"
+rand = "0.9.5"
 criterion = "0.4.0"
 tempfile = "3.6.0"
 iroh-io = { version = "0.6.2" }
