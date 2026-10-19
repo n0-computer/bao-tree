@@ -1505,6 +1505,62 @@ fn encode_outboard_none_cases() {
     )));
 }
 
+fn decode_ranges_sync<O>(encoded: &[u8], ranges: &ChunkRanges, outboard: O) -> Vec<u8>
+where
+    O: crate::io::sync::Outboard + crate::io::sync::OutboardMut,
+{
+    let mut target = Vec::new();
+    crate::io::sync::decode_ranges(encoded, ranges, &mut target, outboard).unwrap();
+    target
+}
+
+async fn decode_ranges_fsm<O>(encoded: &[u8], ranges: &ChunkRanges, outboard: O) -> BytesMut
+where
+    O: crate::io::fsm::Outboard + crate::io::fsm::OutboardMut,
+{
+    let mut target = BytesMut::new();
+    crate::io::fsm::decode_ranges(encoded, ranges.clone(), &mut target, outboard)
+        .await
+        .unwrap();
+    target
+}
+
+#[test]
+fn decode_ranges_partial_chunk_group_cases() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let data = make_test_data(1024 * 64);
+    let ranges = ChunkRanges::from(ChunkNum(1)..ChunkNum(2));
+    let source = PreOrderMemOutboard::create(&data, BlockSize(4));
+    let (root, tree, size) = (source.root, source.tree, source.data.len());
+    let mut encoded = Vec::new();
+    crate::io::sync::encode_ranges_validated(&data[..], &source, &ranges, &mut encoded).unwrap();
+    let pre = || PreOrderMemOutboard {
+        root,
+        tree,
+        data: vec![0u8; size],
+    };
+    let post = || PostOrderMemOutboard {
+        root,
+        tree,
+        data: vec![0u8; size],
+    };
+    let empty = || crate::io::outboard::EmptyOutboard { root, tree };
+    let decoded = [
+        decode_ranges_sync(&encoded, &ranges, pre()),
+        decode_ranges_sync(&encoded, &ranges, post()),
+        decode_ranges_sync(&encoded, &ranges, empty()),
+        rt.block_on(decode_ranges_fsm(&encoded, &ranges, pre()))
+            .to_vec(),
+        rt.block_on(decode_ranges_fsm(&encoded, &ranges, post()))
+            .to_vec(),
+        rt.block_on(decode_ranges_fsm(&encoded, &ranges, empty()))
+            .to_vec(),
+    ];
+    for target in decoded {
+        assert_eq!(target[1024..2048], data[1024..2048]);
+    }
+}
+
 #[proptest]
 fn keyed_encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
