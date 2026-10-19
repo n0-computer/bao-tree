@@ -138,10 +138,18 @@ impl fmt::Display for BlockSize {
 }
 
 impl BlockSize {
+    /// The largest supported block size, chunk groups of 64 MiB.
+    pub const MAX: BlockSize = BlockSize(16);
+
     /// Create a block size from the log2 of the size in bytes / 1024
     ///
     /// 0 is 1024 bytes, 1 is 2048 bytes, etc.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `chunk_log` is larger than [BlockSize::MAX].
     pub const fn from_chunk_log(chunk_log: u8) -> Self {
+        assert!(chunk_log <= Self::MAX.0, "block size too large");
         Self(chunk_log)
     }
 
@@ -161,6 +169,9 @@ impl BlockSize {
     }
 
     /// Compute a block size from bytes
+    ///
+    /// Returns `None` if `bytes` is not a power of 2, smaller than 1024, or
+    /// larger than [BlockSize::MAX].
     pub const fn from_bytes(bytes: u64) -> Option<Self> {
         if bytes.count_ones() != 1 {
             // must be a power of 2
@@ -170,7 +181,11 @@ impl BlockSize {
             // must be at least 1024 bytes
             return None;
         }
-        Some(Self((bytes.trailing_zeros() - 10) as u8))
+        let chunk_log = bytes.trailing_zeros() - 10;
+        if chunk_log > Self::MAX.0 as u32 {
+            return None;
+        }
+        Some(Self(chunk_log as u8))
     }
 
     /// Convert to an u32 for comparison with levels
