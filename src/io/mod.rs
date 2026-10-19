@@ -218,7 +218,8 @@ pub(crate) type LocalBoxFuture<'a, T> =
 
 #[cfg(test)]
 mod tests {
-    use crate::{BlockSize, ChunkNum};
+    use super::{full_chunk_groups, round_up_to_chunks_groups};
+    use crate::{BlockSize, ChunkNum, ChunkRanges};
 
     #[test]
     fn test_chunk_group_start() {
@@ -230,5 +231,29 @@ mod tests {
         assert_eq!(ChunkNum::chunk_group_end(ChunkNum(1), bs), ChunkNum(16));
         assert_eq!(ChunkNum::chunk_group_end(ChunkNum(16), bs), ChunkNum(16));
         assert_eq!(ChunkNum::chunk_group_end(ChunkNum(17), bs), ChunkNum(32));
+        assert_eq!(
+            ChunkNum::chunk_group_end(ChunkNum(u64::MAX - 1), bs),
+            ChunkNum(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn test_chunk_groups_near_max() {
+        let bs = BlockSize(4);
+        let max = u64::MAX;
+        let cr = |start: u64, end: u64| ChunkRanges::from(ChunkNum(start)..ChunkNum(end));
+        let from = |start: u64| ChunkRanges::from(ChunkNum(start)..);
+        assert_eq!(full_chunk_groups(&from(max - 1), bs), ChunkRanges::empty());
+        assert_eq!(full_chunk_groups(&cr(5, max - 1), bs), cr(16, max - 15));
+        assert_eq!(
+            full_chunk_groups(&cr(max - 20, max - 1), bs),
+            ChunkRanges::empty()
+        );
+        assert_eq!(round_up_to_chunks_groups(from(max - 1), bs), from(max - 15));
+        assert_eq!(round_up_to_chunks_groups(cr(5, max - 1), bs), cr(0, max));
+        assert_eq!(
+            round_up_to_chunks_groups(cr(max - 20, max - 1), bs),
+            cr(max - 31, max)
+        );
     }
 }
