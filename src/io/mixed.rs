@@ -373,13 +373,15 @@ fn traverse_selected_rec_impl(
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
     use crate::{
         io::{
             outboard::PreOrderMemOutboard,
             sync::{encode_ranges_validated, keyed_encode_ranges_validated},
         },
-        BlockSize, ChunkRanges,
+        BaoTree, BlockSize, ChunkRanges,
     };
 
     fn flatten(items: Vec<EncodedItem>) -> Vec<u8> {
@@ -416,6 +418,44 @@ mod tests {
         println!("{res:?}");
         let encoded2 = flatten(res);
         assert_eq!(encoded, encoded2);
+    }
+
+    struct NoneOutboard(PreOrderMemOutboard);
+
+    impl Outboard for NoneOutboard {
+        fn root(&self) -> blake3::Hash {
+            self.0.root
+        }
+        fn tree(&self) -> BaoTree {
+            self.0.tree
+        }
+        fn load(&self, node: TreeNode) -> io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+            if node.level() == 0 {
+                Ok(None)
+            } else {
+                self.0.load(node)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn outboard_none() {
+        let data = [0u8; 100000];
+        let outboard = NoneOutboard(PreOrderMemOutboard::create(data, BlockSize::ZERO));
+        let (mut tx, mut rx) = tokio::sync::mpsc::channel(10);
+        tokio::spawn(async move {
+            traverse_ranges_validated(&data[..], &outboard, &ChunkRanges::all(), &mut tx)
+                .await
+                .unwrap();
+        });
+        let mut last = None;
+        while let Some(item) = rx.recv().await {
+            last = Some(item);
+        }
+        assert!(matches!(
+            last,
+            Some(EncodedItem::Error(EncodeError::Io(e))) if e.kind() == io::ErrorKind::InvalidData
+        ));
     }
 
     #[tokio::test]
