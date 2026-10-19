@@ -160,9 +160,7 @@ impl<R: ReadAt> Outboard for PreOrderOutboard<R> {
             return Ok(None);
         };
         let offset = offset * 64;
-        let mut content = [0u8; 64];
-        self.data.read_exact_at(offset, &mut content)?;
-        Ok(Some(parse_hash_pair(content)))
+        read_hash_pair(&self.data, offset).map(Some)
     }
 }
 
@@ -264,9 +262,17 @@ impl<R: ReadAt> Outboard for PostOrderOutboard<R> {
             return Ok(None);
         };
         let offset = offset.value() * 64;
-        let mut content = [0u8; 64];
-        self.data.read_exact_at(offset, &mut content)?;
-        Ok(Some(parse_hash_pair(content)))
+        read_hash_pair(&self.data, offset).map(Some)
+    }
+}
+
+/// Read a hash pair, returning zero hashes if the data ends before the pair.
+fn read_hash_pair(data: &impl ReadAt, offset: u64) -> io::Result<(blake3::Hash, blake3::Hash)> {
+    let mut content = [0u8; 64];
+    match data.read_exact_at(offset, &mut content) {
+        Ok(()) => Ok(parse_hash_pair(content)),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(parse_hash_pair([0u8; 64])),
+        Err(e) => Err(e),
     }
 }
 
