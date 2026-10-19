@@ -122,9 +122,6 @@ where
 {
     send.send(EncodedItem::Size(outboard.tree().size())).await?;
     let res: result::Result<std::result::Result<(), F::Error>, EncodeError> = async {
-        if ranges.is_empty() {
-            return Ok(Ok(()));
-        }
         let mut stack: SmallVec<[_; 10]> = SmallVec::<[blake3::Hash; 10]>::new();
         stack.push(outboard.root());
         let data = data;
