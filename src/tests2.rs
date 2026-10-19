@@ -1412,6 +1412,31 @@ fn decode_stops_after_error_cases() {
     }
 }
 
+#[test]
+fn fsm_decoder_hash_cases() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let data = make_test_data(1024 * 7 + 13);
+    let outboard = PostOrderMemOutboard::create(&data, BlockSize(0));
+    let ranges = ChunkRanges::all();
+    let mut encoded = Vec::new();
+    crate::io::sync::encode_ranges_validated(&data, &outboard, &ranges, &mut encoded).unwrap();
+    let mut corrupted = encoded.clone();
+    corrupted[100] ^= 1;
+    for encoded in [encoded, corrupted] {
+        let mut decoder = crate::io::fsm::ResponseDecoder::new(
+            outboard.root,
+            ranges.clone(),
+            outboard.tree,
+            std::io::Cursor::new(encoded.as_slice()),
+        );
+        assert_eq!(*decoder.hash(), outboard.root);
+        while let ResponseDecoderNext::More((next, _)) = rt.block_on(decoder.next()) {
+            assert_eq!(*next.hash(), outboard.root);
+            decoder = next;
+        }
+    }
+}
+
 #[proptest]
 fn keyed_encode_decode_full_fsm_proptest(#[strategy(tree())] tree: BaoTree) {
     let data = make_test_data(tree.size.try_into().unwrap());
