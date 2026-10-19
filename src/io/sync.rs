@@ -68,6 +68,9 @@ pub trait Outboard {
 /// implementation [super::outboard::EmptyOutboard].
 pub trait OutboardMut: Sized {
     /// Save a hash pair for a node
+    ///
+    /// Nodes that are not stored in this outboard by design, i.e. where
+    /// [Outboard::load] returns `Ok(None)`, must be accepted and ignored.
     fn save(&mut self, node: TreeNode, hash_pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()>;
 
     /// Sync the outboard.

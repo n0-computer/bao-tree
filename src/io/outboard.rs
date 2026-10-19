@@ -54,15 +54,8 @@ impl crate::io::fsm::Outboard for EmptyOutboard {
 }
 
 impl crate::io::sync::OutboardMut for EmptyOutboard {
-    fn save(&mut self, node: TreeNode, _pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
-        if self.tree.is_relevant_for_outboard(node) {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid node for this outboard",
-            ))
-        }
+    fn save(&mut self, _node: TreeNode, _pair: &(blake3::Hash, blake3::Hash)) -> io::Result<()> {
+        Ok(())
     }
 
     fn sync(&mut self) -> io::Result<()> {
@@ -74,17 +67,10 @@ impl crate::io::sync::OutboardMut for EmptyOutboard {
 impl crate::io::fsm::OutboardMut for EmptyOutboard {
     async fn save(
         &mut self,
-        node: TreeNode,
+        _node: TreeNode,
         _pair: &(blake3::Hash, blake3::Hash),
     ) -> io::Result<()> {
-        if self.tree.is_relevant_for_outboard(node) {
-            Ok(())
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid node for this outboard",
-            ))
-        }
+        Ok(())
     }
 
     async fn sync(&mut self) -> io::Result<()> {
@@ -280,10 +266,7 @@ impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PostOrderMemOutboard<T> {
                 data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
                 Ok(())
             }
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid node for this outboard",
-            )),
+            None => Ok(()),
         }
     }
 
@@ -307,10 +290,7 @@ impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PostOrderMemOutboard<T> {
                 data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
                 Ok(())
             }
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid node for this outboard",
-            )),
+            None => Ok(()),
         }
     }
 
@@ -451,10 +431,7 @@ impl<T: AsMut<[u8]>> crate::io::sync::OutboardMut for PreOrderMemOutboard<T> {
                 data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
                 Ok(())
             }
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid node for this outboard",
-            )),
+            None => Ok(()),
         }
     }
 
@@ -492,10 +469,7 @@ impl<T: AsMut<[u8]>> crate::io::fsm::OutboardMut for PreOrderMemOutboard<T> {
                 data[offset + 32..offset + 64].copy_from_slice(pair.1.as_bytes());
                 Ok(())
             }
-            None => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid node for this outboard",
-            )),
+            None => Ok(()),
         }
     }
 
