@@ -952,7 +952,11 @@ mod validate {
             if tree.blocks() == 1 {
                 // special case for a tree that fits in one block / chunk group
                 let tmp = &mut buffer[..tree.size().try_into().unwrap()];
-                data.read_exact_at(0, tmp)?;
+                match data.read_exact_at(0, tmp) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+                    Err(e) => return Err(e),
+                }
                 let actual = mode.hash_subtree(0, tmp, true);
                 if actual == outboard.root() {
                     co.yield_(Ok(ChunkNum(0)..tree.chunks())).await;
@@ -984,7 +988,11 @@ mod validate {
         ) -> io::Result<()> {
             let len = (range.end - range.start).try_into().unwrap();
             let tmp = &mut self.buffer[..len];
-            self.data.read_exact_at(range.start, tmp)?;
+            match self.data.read_exact_at(range.start, tmp) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+                Err(e) => return Err(e),
+            }
             // is_root is always false because the case of a single chunk group is handled before calling this function
             let actual = self
                 .mode
