@@ -17,6 +17,7 @@ use proptest::prelude::*;
 use test_strategy::proptest;
 use testresult::TestResult;
 
+use super::reference::make_test_data;
 use super::tree::last_chunk;
 use crate::{
     blake3,
@@ -28,7 +29,7 @@ use crate::{
         },
         sync, BaoContentItem, DecodeError, EncodeError, Leaf, Parent,
     },
-    rec::{encode_selected_rec, make_test_data, truncate_ranges},
+    rec::{encode_selected_rec, truncate_ranges},
     BaoTree, BlockSize, ChunkNum, ChunkRanges, HashMode, TreeNode,
 };
 

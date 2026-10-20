@@ -9,15 +9,15 @@ use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use test_strategy::proptest;
 
+use super::reference::{
+    get_leaf_ranges, make_test_data, partial_chunk_iter_reference, range_union,
+    response_iter_reference, select_nodes_rec, ReferencePreOrderPartialChunkIterRef,
+};
 use crate::{
     assert_tuple_eq, blake3,
     io::full_chunk_groups,
     iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
-    rec::{
-        encode_selected_rec, get_leaf_ranges, make_test_data, partial_chunk_iter_reference,
-        range_union, response_iter_reference, select_nodes_rec, truncate_ranges,
-        ReferencePreOrderPartialChunkIterRef,
-    },
+    rec::{encode_selected_rec, truncate_ranges},
     BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, HashMode, ResponseIter, TreeNode,
 };
 
