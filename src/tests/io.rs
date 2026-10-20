@@ -73,10 +73,7 @@ impl Case {
     }
 
     fn outboard(&self, data: &[u8]) -> PostOrderMemOutboard {
-        match self.mode {
-            HashMode::Standard => PostOrderMemOutboard::create(data, self.block_size),
-            HashMode::Keyed(key) => PostOrderMemOutboard::create_keyed(data, self.block_size, &key),
-        }
+        reference_outboard(data, self.block_size, self.mode)
     }
 
     #[cfg(feature = "validate")]
@@ -770,8 +767,108 @@ fn outboard_shape(outboard: impl sync::Outboard) -> (blake3::Hash, Pairs) {
     (outboard.root(), pairs)
 }
 
-/// Property 5: every way to create an outboard gives the same outboard, and
-/// the root is the BLAKE3 hash of the data.
+/// Root and stored hash pairs of an outboard, in pre order, read with fsm.
+fn outboard_shape_fsm(mut outboard: impl fsm::Outboard) -> (blake3::Hash, Pairs) {
+    let tree = outboard.tree();
+    let mut pairs = Vec::new();
+    block_on(async {
+        for node in tree.pre_order_nodes_iter() {
+            pairs.push(outboard.load(node).await.unwrap());
+        }
+    });
+    (outboard.root(), pairs)
+}
+
+fn reference_outboard(data: &[u8], block_size: BlockSize, mode: HashMode) -> PostOrderMemOutboard {
+    match mode {
+        HashMode::Standard => PostOrderMemOutboard::create(data, block_size),
+        HashMode::Keyed(key) => PostOrderMemOutboard::create_keyed(data, block_size, &key),
+    }
+}
+
+/// Create an outboard for `tree` from `data` with each outboard function.
+fn created_outboards(
+    data: &[u8],
+    tree: BaoTree,
+    mode: HashMode,
+) -> Vec<(&'static str, std::io::Result<(blake3::Hash, Pairs)>)> {
+    let size = tree.outboard_size() as usize;
+    let mut res = Vec::new();
+
+    let mut pre = PreOrderMemOutboard {
+        root: blake3::Hash::from([0; 32]),
+        tree,
+        data: vec![0u8; size],
+    };
+    let root = match mode {
+        HashMode::Standard => sync::outboard(data, tree, &mut pre),
+        HashMode::Keyed(key) => sync::keyed_outboard(data, tree, &mut pre, &key),
+    };
+    res.push((
+        "sync outboard",
+        root.map(|root| outboard_shape(PreOrderMemOutboard { root, ..pre })),
+    ));
+
+    let mut post = Vec::new();
+    let root = match mode {
+        HashMode::Standard => sync::outboard_post_order(data, tree, &mut post),
+        HashMode::Keyed(key) => sync::keyed_outboard_post_order(data, tree, &mut post, &key),
+    };
+    res.push((
+        "sync outboard_post_order",
+        root.map(|root| {
+            outboard_shape(PostOrderMemOutboard {
+                root,
+                tree,
+                data: post,
+            })
+        }),
+    ));
+
+    let mut pre = PreOrderMemOutboard {
+        root: blake3::Hash::from([0; 32]),
+        tree,
+        data: vec![0u8; size],
+    };
+    let root = block_on(async {
+        let reader = Cursor::new(Bytes::copy_from_slice(data));
+        match mode {
+            HashMode::Standard => fsm::outboard(reader, tree, &mut pre).await,
+            HashMode::Keyed(key) => fsm::keyed_outboard(reader, tree, &mut pre, &key).await,
+        }
+    });
+    res.push((
+        "fsm outboard",
+        root.map(|root| outboard_shape(PreOrderMemOutboard { root, ..pre })),
+    ));
+
+    let mut post = Vec::new();
+    let root = block_on(async {
+        let reader = Cursor::new(Bytes::copy_from_slice(data));
+        match mode {
+            HashMode::Standard => fsm::outboard_post_order(reader, tree, &mut post).await,
+            HashMode::Keyed(key) => {
+                fsm::keyed_outboard_post_order(reader, tree, &mut post, &key).await
+            }
+        }
+    });
+    res.push((
+        "fsm outboard_post_order",
+        root.map(|root| {
+            outboard_shape(PostOrderMemOutboard {
+                root,
+                tree,
+                data: post,
+            })
+        }),
+    ));
+    res
+}
+
+/// Property 5: every way to create or read an outboard gives the same
+/// outboard, and the root is the BLAKE3 hash of the data. Creating an
+/// outboard for a tree that is larger than the data fails, and for a smaller
+/// tree only uses the start of the data.
 fn outboards_agree(case: &Case) {
     let data = case.data();
     let tree = case.tree();
@@ -779,74 +876,36 @@ fn outboards_agree(case: &Case) {
         HashMode::Standard => blake3::hash(&data),
         HashMode::Keyed(key) => blake3::keyed_hash(&key, &data),
     };
-    let expected = outboard_shape(case.outboard(&data));
+    let mut post = case.outboard(&data);
+    let expected = outboard_shape(&post);
     assert_eq!(expected.0, root, "{case:?}");
-    let size = tree.outboard_size() as usize;
+    let mut pre = post.flip();
     let mut shapes = Vec::new();
 
-    let pre = match case.mode {
+    let created = match case.mode {
         HashMode::Standard => PreOrderMemOutboard::create(&data, case.block_size),
         HashMode::Keyed(key) => PreOrderMemOutboard::create_keyed(&data, case.block_size, &key),
     };
-    shapes.push(("pre mem create", outboard_shape(pre)));
+    shapes.push(("pre mem create", outboard_shape(created)));
+    for (name, shape) in created_outboards(&data, tree, case.mode) {
+        shapes.push((name, shape.unwrap()));
+    }
 
-    let mut pre = PreOrderMemOutboard {
+    shapes.push(("sync load through &mut", outboard_shape(&mut post)));
+    shapes.push(("fsm load pre mem", outboard_shape_fsm(&mut pre)));
+    shapes.push(("fsm load post mem", outboard_shape_fsm(&mut post)));
+    let pre_file = PreOrderOutboard {
         root,
         tree,
-        data: vec![0u8; size],
+        data: Bytes::from(pre.data.clone()),
     };
-    pre.root = match case.mode {
-        HashMode::Standard => sync::outboard(&data[..], tree, &mut pre),
-        HashMode::Keyed(key) => sync::keyed_outboard(&data[..], tree, &mut pre, &key),
-    }
-    .unwrap();
-    shapes.push(("sync outboard", outboard_shape(pre)));
-
-    let mut post = Vec::new();
-    let root2 = match case.mode {
-        HashMode::Standard => sync::outboard_post_order(&data[..], tree, &mut post),
-        HashMode::Keyed(key) => sync::keyed_outboard_post_order(&data[..], tree, &mut post, &key),
-    }
-    .unwrap();
-    let post = PostOrderMemOutboard {
-        root: root2,
-        tree,
-        data: post,
-    };
-    shapes.push(("sync outboard_post_order", outboard_shape(post)));
-
-    let mut pre = PreOrderMemOutboard {
+    shapes.push(("fsm load pre file", outboard_shape_fsm(pre_file)));
+    let post_file = PostOrderOutboard {
         root,
         tree,
-        data: vec![0u8; size],
+        data: Bytes::from(post.data.clone()),
     };
-    pre.root = block_on(async {
-        let reader = Cursor::new(Bytes::copy_from_slice(&data));
-        match case.mode {
-            HashMode::Standard => fsm::outboard(reader, tree, &mut pre).await,
-            HashMode::Keyed(key) => fsm::keyed_outboard(reader, tree, &mut pre, &key).await,
-        }
-    })
-    .unwrap();
-    shapes.push(("fsm outboard", outboard_shape(pre)));
-
-    let mut post = Vec::new();
-    let root2 = block_on(async {
-        let reader = Cursor::new(Bytes::copy_from_slice(&data));
-        match case.mode {
-            HashMode::Standard => fsm::outboard_post_order(reader, tree, &mut post).await,
-            HashMode::Keyed(key) => {
-                fsm::keyed_outboard_post_order(reader, tree, &mut post, &key).await
-            }
-        }
-    })
-    .unwrap();
-    let post = PostOrderMemOutboard {
-        root: root2,
-        tree,
-        data: post,
-    };
-    shapes.push(("fsm outboard_post_order", outboard_shape(post)));
+    shapes.push(("fsm load post file", outboard_shape_fsm(post_file)));
 
     if let HashMode::Standard = case.mode {
         let pre = <PreOrderOutboard<Vec<u8>> as sync::CreateOutboard>::create(
@@ -890,6 +949,99 @@ fn outboards_agree(case: &Case) {
     for (name, shape) in shapes {
         assert_eq!(shape, expected, "{name} differs for {case:?}");
     }
+
+    let larger = BaoTree::new(case.size as u64 + 1, case.block_size);
+    for (name, res) in created_outboards(&data, larger, case.mode) {
+        assert!(
+            res.is_err(),
+            "{name} accepted a tree larger than the data for {case:?}"
+        );
+    }
+    if case.size > 0 {
+        let small = case.size / 2;
+        let smaller = BaoTree::new(small as u64, case.block_size);
+        let expected = outboard_shape(reference_outboard(
+            &data[..small],
+            case.block_size,
+            case.mode,
+        ));
+        for (name, res) in created_outboards(&data, smaller, case.mode) {
+            assert_eq!(
+                res.unwrap(),
+                expected,
+                "{name} for a smaller tree, {case:?}"
+            );
+        }
+    }
+}
+
+/// Property 8: hash pairs past the end of a truncated outboard file read as
+/// zero hashes, in pre and post order, with sync and fsm.
+fn truncated_outboards_read_zeros(case: &Case, pos: u64) {
+    let data = case.data();
+    let post = case.outboard(&data);
+    let pre = post.flip();
+    let (root, tree) = (post.root, post.tree);
+    let full = outboard_shape(&post).1;
+    if pre.data.is_empty() {
+        return;
+    }
+    let len = select(pos, pre.data.len());
+    let zero = (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]));
+    let expected = |offset: &dyn Fn(TreeNode) -> Option<u64>| -> Pairs {
+        tree.pre_order_nodes_iter()
+            .zip(&full)
+            .map(|(node, pair)| {
+                let pair = (*pair)?;
+                let end = offset(node)? as usize * 64 + 64;
+                Some(if end <= len { pair } else { zero })
+            })
+            .collect()
+    };
+    let expected_pre = expected(&|node| tree.pre_order_offset(node));
+    let expected_post = expected(&|node| tree.post_order_offset(node).map(|o| o.value()));
+    let pre_data = &pre.data[..len];
+    let post_data = &post.data[..len];
+    let sync_pre = PreOrderOutboard {
+        root,
+        tree,
+        data: pre_data.to_vec(),
+    };
+    assert_eq!(
+        outboard_shape(sync_pre).1,
+        expected_pre,
+        "sync pre {case:?} len {len}"
+    );
+    let sync_post = PostOrderOutboard {
+        root,
+        tree,
+        data: post_data.to_vec(),
+    };
+    assert_eq!(
+        outboard_shape(sync_post).1,
+        expected_post,
+        "sync post {case:?} len {len}"
+    );
+    let fsm_pre = PreOrderOutboard {
+        root,
+        tree,
+        data: Bytes::copy_from_slice(pre_data),
+    };
+    assert_eq!(
+        outboard_shape_fsm(fsm_pre).1,
+        expected_pre,
+        "fsm pre {case:?} len {len}"
+    );
+    let fsm_post = PostOrderOutboard {
+        root,
+        tree,
+        data: Bytes::copy_from_slice(post_data),
+    };
+    assert_eq!(
+        outboard_shape_fsm(fsm_post).1,
+        expected_post,
+        "fsm post {case:?} len {len}"
+    );
 }
 
 #[cfg(feature = "validate")]
@@ -1225,6 +1377,18 @@ fn validators_agree_cases() {
 #[proptest]
 fn validators_agree_proptest(#[strategy(case())] case: Case, pos: u64) {
     validators::validators_agree(&case, pos);
+}
+
+#[test]
+fn truncated_outboards_read_zeros_cases() {
+    for case in fixed_cases() {
+        positions(8).for_each(|pos| truncated_outboards_read_zeros(&case, pos));
+    }
+}
+
+#[proptest]
+fn truncated_outboards_read_zeros_proptest(#[strategy(case())] case: Case, pos: u64) {
+    truncated_outboards_read_zeros(&case, pos);
 }
 
 #[test]
