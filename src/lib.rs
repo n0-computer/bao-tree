@@ -225,8 +225,6 @@ pub use blake3;
 
 #[cfg(all(test, feature = "tokio_fsm"))]
 mod tests;
-#[cfg(all(test, feature = "tokio_fsm"))]
-mod tests2;
 
 /// A set of chunk ranges
 pub type ChunkRanges = range_collections::RangeSet2<ChunkNum>;

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ab5e4292a0abf13054c9e9356249ba86687f036fb6a8358456f625ba128567a3 # shrinks to input = _ValidatorsAgreeProptestArgs { case: Case { size: 1, block_size: BlockSize(0), ranges: RangeSet{1..2}, mode: Standard }, pos: 0 }
+cc 68fe17bc635bc0c8245d73939b2e7eb4a333bb5d0c765731545ecc02eb9dbf54 # shrinks to input = _DecodersAgreeProptestArgs { case: Case { size: 2049, block_size: BlockSize(3), ranges: RangeSet{0..2}, mode: Keyed { .. } } }
+cc 5ce0cc4b8f0a7600740ab5fcb6c0736d9b4de16e5309446a316568366a8f7a6a # shrinks to input = _DecodeRangesRoundTripProptestArgs { case: Case { size: 2063, block_size: BlockSize(1), ranges: RangeSet{0..1}, mode: Standard } }
+cc e5fbd0e20a1e0144c8729e5eea245b54377dc9b45bd7facae02bf79f2f07b048 # shrinks to input = _WrongModeFailsProptestArgs { case: Case { size: 1, block_size: BlockSize(0), ranges: RangeSet{0..1}, mode: Standard } }
