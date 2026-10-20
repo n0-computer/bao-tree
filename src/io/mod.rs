@@ -170,7 +170,8 @@ pub fn round_up_to_chunks_groups(ranges: ChunkRanges, chunk_size: BlockSize) -> 
     res
 }
 
-/// Given a range set of byte ranges, round it up to chunk groups.
+/// Given a range set of chunk ranges, keep only the chunk groups that are
+/// completely covered.
 ///
 /// If we store outboard data at a level of granularity of `block_size`, we can only
 /// share full chunk groups because we don't have proofs for anything below a chunk group.

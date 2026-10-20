@@ -17,7 +17,7 @@
 //! and [BlockSize] is the log base 2 of the chunk group size.
 //!
 //! All this is then used in the [io] module to implement the actual io, both
-//! [synchronous](io::sync) and [asynchronous](io::tokio).
+//! [synchronous](io::sync) and [asynchronous](io::fsm).
 //!
 //! # Basic usage
 //!
@@ -130,7 +130,7 @@
 //!
 //! The async version is very similar to the sync version, except that it needs
 //! an async context. All functions that do IO are async. The file has to be
-//! an [iroh_io::File], which is just a wrapper for [std::fs::File] that implements
+//! an `iroh_io::File`, which is just a wrapper for [std::fs::File] that implements
 //! async random access via the [AsyncSliceReader](iroh_io::AsyncSliceReader) trait.
 //!
 //! We use [futures_lite] crate, but using the normal futures crate will also work.
@@ -702,13 +702,13 @@ impl TreeNode {
         self.next_left_ancestor0().map(Self)
     }
 
-    /// Get the left child of this node, or None if it is a child node.
+    /// Get the left child of this node, or None if it is a leaf node.
     pub fn left_child(&self) -> Option<Self> {
         let offset = 1 << self.level().checked_sub(1)?;
         Some(Self(self.0 - offset))
     }
 
-    /// Get the right child of this node, or None if it is a child node.
+    /// Get the right child of this node, or None if it is a leaf node.
     pub fn right_child(&self) -> Option<Self> {
         let offset = 1 << self.level().checked_sub(1)?;
         Some(Self(self.0 + offset))

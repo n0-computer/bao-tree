@@ -139,7 +139,7 @@ pub trait CreateOutboard {
     /// So this can be used to initialize an outboard that does not have a default,
     /// such as a file based one.
     ///
-    /// It will only include data up the the current tree size.
+    /// It will only include data up to the current tree size.
     fn init_from(&mut self, data: impl AsyncStreamReader) -> impl Future<Output = io::Result<()>>;
 }
 
