@@ -16,7 +16,6 @@ use crate::{
         sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter, Outboard},
         BaoContentItem, Leaf,
     },
-    pre_order_offset_loop,
     rec::{encode_ranges_reference, make_test_data},
     BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, TreeNode,
 };
@@ -292,114 +291,19 @@ fn create_permutation_reference(size: usize) -> Vec<(TreeNode, usize)> {
     res
 }
 
-/// Count valid parents of a node in a tree of a given size.
-fn count_parents(node: u64, len: u64) -> u64 {
-    // node level, 0 for leaf nodes
-    let level = (!node).trailing_zeros();
-    // span of the node, 1 for leaf nodes
-    let span = 1u64 << level;
-    // count the parents with a loop
-    let mut parent_count = 0;
-    let mut offset = node;
-    let mut span = span;
-    // loop until we reach the root, adding valid parents
-    loop {
-        let pspan = span * 2;
-        // find parent
-        offset = if (offset & pspan) == 0 {
-            offset + span
-        } else {
-            offset - span
-        };
-        // if parent is inside the tree, increase parent count
-        if offset < len {
-            parent_count += 1;
-        }
-        if pspan >= len {
-            // we are at the root
-            break;
-        }
-        span = pspan;
-    }
-    parent_count
-}
-
+/// The pre order offsets of the nodes are their positions in the pre order
+/// outboard of the bao crate.
 fn compare_pre_order_outboard(size: usize) {
     let tree = BaoTree::new(size as u64, BlockSize::ZERO);
-    let perm = create_permutation_reference(size);
-
-    // print!("{:08b}", perm.len());
-    for (k, v) in perm {
-        // let expected = v as u64;
-        // repr of node number where trailing zeros indicate level
-        // let x = k.0 + 1;
-        // clear lowest bit, since we don't want to count left children below the node itself
-        // let without_lowest_bit = x & (x - 1);
-        // subtract all nodes that go to the right themselves
-        // this is 0 for every bit where we go left, and left_below for every bit where we go right,
-        // where left_below is the count of the left child of the node
-        // let full_lefts = without_lowest_bit - (without_lowest_bit.count_ones() as u64);
-        // count the parents for the node
-        // let parents = (tree.root().level() - k.level()) as u64;
-        // add the parents
-        // let actual = full_lefts + parents;
-
-        // let corrected = full_lefts + count_parents(k.0, tree.filled_size().0);
-        // this works for full trees!
-        // println!(
-        //     "{:09b}\t{}\t{}\t{}",
-        //     k.0,
-        //     expected,
-        //     corrected,
-        //     actual - corrected
-        // );
-        // let depth = tree.root().level() as u64;
-        // println!("{} {}", depth, k.0);
-        assert_eq!(v as u64, pre_order_offset_loop(k.0, tree.filled_size().0));
+    for (node, offset) in create_permutation_reference(size) {
+        assert_eq!(tree.pre_order_offset(node), Some(offset as u64), "{node:?}");
     }
-    println!();
-}
-
-fn pre_order_outboard_line(case: usize) {
-    let size = case as u64;
-    let tree = BaoTree::new(size, BlockSize::ZERO);
-    let perm = create_permutation_reference(case);
-    print!("{:08b}", perm.len());
-    for (k, _v) in perm {
-        // repr of node number where trailing zeros indicate level
-        let x = k.0 + 1;
-        // clear lowest bit, since we don't want to count left children below the node itself
-        let without_lowest_bit = x & (x - 1);
-        // subtract all nodes that go to the right themselves
-        // this is 0 for every bit where we go left, and left_below for every bit where we go right,
-        // where left_below is the count of the left child of the node
-        let full_lefts = without_lowest_bit - (without_lowest_bit.count_ones() as u64);
-        // count the parents for the node
-        let parents = (tree.root().level() - k.level()) as u64;
-        // add the parents
-        let actual = full_lefts + parents;
-
-        let corrected = full_lefts + count_parents(k.0, tree.filled_size().0);
-        let delta = actual - corrected;
-        if delta == 0 {
-            print!(" ");
-        } else {
-            print!("{delta}");
-        }
-    }
-    println!();
 }
 
 #[test]
-#[ignore]
-fn test_pre_order_outboard_fast() {
-    let cases = [1024 * 78];
-    for case in cases {
-        compare_pre_order_outboard(case);
-    }
-
-    for case in 0..256 {
-        pre_order_outboard_line(case * 1024);
+fn pre_order_outboard_cases() {
+    for size in [0, 1, 1024, 1025, 78 * 1024, 256 * 1024 + 1] {
+        compare_pre_order_outboard(size);
     }
 }
 
@@ -529,8 +433,7 @@ mod fsm_tests {
     }
 
     #[test]
-    #[ignore]
-    fn pre_post_outboard(n in 0usize..1000000) {
+    fn pre_post_outboard(n in 0usize..100_000) {
         compare_pre_order_outboard(n);
     }
 }
