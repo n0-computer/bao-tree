@@ -127,6 +127,33 @@ jobs:
           command: check
           command-arguments: "-Dwarnings"
 
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-llvm-cov
+      - name: cargo llvm-cov
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --locked --all-features --lib --ignore-filename-regex 'src/tests' --summary-only | tee coverage.txt
+          {
+            echo '## Coverage'
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check line coverage
+        run: cargo llvm-cov report --ignore-filename-regex 'src/tests' --fail-under-lines 85
+
   wasm_build:
     name: Build wasm32
     runs-on: ubuntu-latest

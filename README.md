@@ -23,6 +23,19 @@ append only files.
 
 For more detailed info, see the [docs](https://docs.rs/bao-tree/latest/bao_tree/)
 
+## Coverage
+
+Coverage is measured with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov):
+
+```sh
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov --locked
+# summary per file
+cargo llvm-cov --all-features --lib --ignore-filename-regex 'src/tests' --summary-only
+# line by line report in the browser
+cargo llvm-cov --all-features --lib --ignore-filename-regex 'src/tests' --html --open
+```
+
 ## License
 
 Copyright 2025 N0, INC.
