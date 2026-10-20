@@ -32,7 +32,7 @@ mod serde_support {
     impl Serialize for Parent {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             let (l, r) = self.pair;
-            let mut seq = serializer.serialize_seq(Some(2))?;
+            let mut seq = serializer.serialize_seq(Some(3))?;
             seq.serialize_element(&self.node)?;
             seq.serialize_element(l.as_bytes())?;
             seq.serialize_element(r.as_bytes())?;
