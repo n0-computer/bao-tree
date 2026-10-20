@@ -217,3 +217,19 @@ fn mixed() {
     );
     assert_eq!(hash, blake3::keyed_hash(&key, &data));
 }
+
+/// Deserializing from a value of the wrong type formats an error message
+/// with the `expecting` text of the visitor.
+#[cfg(feature = "serde")]
+#[test]
+fn serde_expecting() {
+    use serde::{
+        de::{value::Error, IntoDeserializer},
+        Deserialize,
+    };
+    let res = Parent::deserialize(IntoDeserializer::<Error>::into_deserializer(5u32));
+    formatted(res.unwrap_err().to_string());
+    let res =
+        crate::io_error_serde::deserialize(IntoDeserializer::<Error>::into_deserializer(5u32));
+    formatted(res.unwrap_err().to_string());
+}
