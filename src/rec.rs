@@ -171,13 +171,13 @@ pub(crate) fn encode_selected_rec(
 mod test_support {
     #[cfg(feature = "tokio_fsm")]
     use {
-        crate::{split_inner, TreeNode},
+        crate::{split_inner, BaoChunk, BaoTree, TreeNode},
         range_collections::{range_set::RangeSetEntry, RangeSet2},
         std::ops::Range,
     };
 
     use super::{encode_selected_rec, truncate_ranges};
-    use crate::{blake3, BaoChunk, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef};
+    use crate::{blake3, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef};
 
     /// Select nodes relevant to a query
     ///
@@ -346,26 +346,21 @@ mod test_support {
     /// This is not a proper iterator since it computes all elements at once, but it is useful for
     /// testing.
     #[derive(Debug)]
+    #[cfg(feature = "tokio_fsm")]
     pub struct ReferencePreOrderPartialChunkIterRef<'a> {
         iter: std::vec::IntoIter<BaoChunk<&'a ChunkRangesRef>>,
-        tree: BaoTree,
     }
 
+    #[cfg(feature = "tokio_fsm")]
     impl<'a> ReferencePreOrderPartialChunkIterRef<'a> {
         /// Create a new iterator over the tree.
-        #[cfg(feature = "tokio_fsm")]
         pub fn new(tree: BaoTree, ranges: &'a ChunkRangesRef, min_full_level: u8) -> Self {
             let iter = partial_chunk_iter_reference(tree, ranges, min_full_level).into_iter();
-            Self { iter, tree }
-        }
-
-        /// Return a reference to the underlying tree.
-        #[allow(dead_code)]
-        pub fn tree(&self) -> &BaoTree {
-            &self.tree
+            Self { iter }
         }
     }
 
+    #[cfg(feature = "tokio_fsm")]
     impl<'a> Iterator for ReferencePreOrderPartialChunkIterRef<'a> {
         type Item = BaoChunk<&'a ChunkRangesRef>;
 
