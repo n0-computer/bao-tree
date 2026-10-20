@@ -715,3 +715,34 @@ fn canonicalize_ranges_test() {
         prop_assert_eq!(&iter1, &iter2);
     }
 }
+
+fn byte_ranges() -> impl Strategy<Value = crate::ByteRanges> {
+    let ranges = proptest::collection::vec((0..12_000u64, 0..12_000u64), 0..4);
+    (ranges, proptest::option::of(0..12_000u64)).prop_map(|(ranges, open)| {
+        let mut res = crate::ByteRanges::empty();
+        for (a, b) in ranges {
+            res |= crate::ByteRanges::from(a.min(b)..a.max(b));
+        }
+        if let Some(start) = open {
+            res |= crate::ByteRanges::from(start..);
+        }
+        res
+    })
+}
+
+/// A chunk is in the result of round_up_to_chunks if and only if it overlaps
+/// the byte ranges.
+#[proptest]
+fn round_up_to_chunks_proptest(#[strategy(byte_ranges())] ranges: crate::ByteRanges) {
+    let chunks = crate::io::round_up_to_chunks(&ranges);
+    for chunk in 0..14u64 {
+        let bytes = crate::ByteRanges::from(chunk * 1024..(chunk + 1) * 1024);
+        let overlaps = !(&ranges & &bytes).is_empty();
+        prop_assert_eq!(
+            chunks.contains(&ChunkNum(chunk)),
+            overlaps,
+            "chunk {}",
+            chunk
+        );
+    }
+}

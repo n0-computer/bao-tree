@@ -396,6 +396,86 @@ mod mixed_adapter {
         }
         res
     }
+
+    struct FailAfter {
+        items: Vec<EncodedItem>,
+        limit: usize,
+    }
+
+    impl mixed::Sender for FailAfter {
+        type Error = ();
+        fn send(&mut self, item: EncodedItem) -> impl Future<Output = Result<(), ()>> + '_ {
+            let res = if self.items.len() < self.limit {
+                self.items.push(item);
+                Ok(())
+            } else {
+                Err(())
+            };
+            std::future::ready(res)
+        }
+    }
+
+    /// Property 9: when sending fails, the mixed traversal returns the send
+    /// error and does not send anything after it.
+    pub(super) fn mixed_send_fails(case: &Case, pos: u64) {
+        let data = case.data();
+        let outboard = case.outboard(&data);
+        let input = EncodeInput {
+            data: &data,
+            outboard: &outboard,
+            ranges: &case.ranges,
+            mode: case.mode,
+        };
+        let all = traverse(&input);
+        let limit = select(pos, all.len());
+        let mut send = FailAfter {
+            items: Vec::new(),
+            limit,
+        };
+        let res = block_on(async {
+            match case.mode {
+                HashMode::Standard => {
+                    mixed::traverse_ranges_validated(&data[..], &outboard, &case.ranges, &mut send)
+                        .await
+                }
+                HashMode::Keyed(key) => {
+                    mixed::keyed_traverse_ranges_validated(
+                        &data[..],
+                        &outboard,
+                        &case.ranges,
+                        &mut send,
+                        &key,
+                    )
+                    .await
+                }
+            }
+        });
+        assert_eq!(res, Err(()), "{case:?} limit {limit}");
+        assert_eq!(
+            format!("{:?}", send.items),
+            format!("{:?}", &all[..limit]),
+            "{case:?} limit {limit}"
+        );
+    }
+
+    /// Property 10: the items of the mixed traversal survive a serialization
+    /// round trip.
+    pub(super) fn encoded_items_round_trip(case: &Case) {
+        let data = case.data();
+        let outboard = case.outboard(&data);
+        let input = EncodeInput {
+            data: &data,
+            outboard: &outboard,
+            ranges: &case.ranges,
+            mode: case.mode,
+        };
+        for item in traverse(&input) {
+            let bytes = postcard::to_allocvec(&item).unwrap();
+            let back: EncodedItem = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(postcard::to_allocvec(&back).unwrap(), bytes, "{case:?}");
+            assert_eq!(format!("{back:?}"), format!("{item:?}"), "{case:?}");
+        }
+    }
 }
 
 const ENCODERS: &[(&str, Encoder)] = &[
@@ -906,6 +986,13 @@ fn outboards_agree(case: &Case) {
         data: Bytes::from(post.data.clone()),
     };
     shapes.push(("fsm load post file", outboard_shape_fsm(post_file)));
+    let mut copied = PreOrderMemOutboard {
+        root,
+        tree,
+        data: vec![0u8; tree.outboard_size() as usize],
+    };
+    block_on(fsm::copy(&mut post, &mut copied)).unwrap();
+    shapes.push(("fsm copy", outboard_shape(copied)));
 
     if let HashMode::Standard = case.mode {
         let pre = <PreOrderOutboard<Vec<u8>> as sync::CreateOutboard>::create(
@@ -1389,6 +1476,79 @@ fn truncated_outboards_read_zeros_cases() {
 #[proptest]
 fn truncated_outboards_read_zeros_proptest(#[strategy(case())] case: Case, pos: u64) {
     truncated_outboards_read_zeros(&case, pos);
+}
+
+#[cfg(feature = "experimental-mixed")]
+#[test]
+fn mixed_send_fails_cases() {
+    for case in fixed_cases() {
+        positions(4).for_each(|pos| mixed_adapter::mixed_send_fails(&case, pos));
+    }
+}
+
+#[cfg(feature = "experimental-mixed")]
+#[proptest]
+fn mixed_send_fails_proptest(#[strategy(case())] case: Case, pos: u64) {
+    mixed_adapter::mixed_send_fails(&case, pos);
+}
+
+#[cfg(feature = "experimental-mixed")]
+#[test]
+fn encoded_items_round_trip_cases() {
+    fixed_cases()
+        .iter()
+        .for_each(mixed_adapter::encoded_items_round_trip);
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn decoded_items_round_trip_cases() {
+    for case in fixed_cases() {
+        let data = case.data();
+        let outboard = case.outboard(&data);
+        let (encoded, _) = valid_items(&case, &data, &outboard);
+        let (root, tree, ranges) = (outboard.root, outboard.tree, &case.ranges);
+        let encoded = Cursor::new(&encoded);
+        let iter = match case.mode {
+            HashMode::Standard => sync::DecodeResponseIter::new(root, tree, encoded, ranges),
+            HashMode::Keyed(key) => {
+                sync::DecodeResponseIter::new_keyed(root, tree, encoded, ranges, &key)
+            }
+        };
+        for item in iter {
+            let item = item.unwrap();
+            let bytes = postcard::to_allocvec(&item).unwrap();
+            let back: BaoContentItem = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded_item(Ok(back)), decoded_item(Ok(item)), "{case:?}");
+        }
+    }
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn encode_error_round_trip() {
+    let errors = [
+        EncodeError::ParentHashMismatch(TreeNode(5)),
+        EncodeError::LeafHashMismatch(ChunkNum(3)),
+        EncodeError::ParentWrite(TreeNode(7)),
+        EncodeError::LeafWrite(ChunkNum(9)),
+        EncodeError::SizeMismatch,
+    ];
+    for error in errors {
+        let bytes = postcard::to_allocvec(&error).unwrap();
+        let back: EncodeError = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(format!("{back:?}"), format!("{error:?}"));
+    }
+    let error = EncodeError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "broken",
+    ));
+    let bytes = postcard::to_allocvec(&error).unwrap();
+    let back: EncodeError = postcard::from_bytes(&bytes).unwrap();
+    let EncodeError::Io(back) = back else {
+        panic!("expected an io error, got {back:?}");
+    };
+    assert!(back.to_string().contains("broken"), "{back}");
 }
 
 #[test]
