@@ -156,6 +156,37 @@ fn outboards() -> testresult::TestResult {
 
 #[cfg(feature = "experimental-mixed")]
 #[test]
+fn read_bytes_at() -> testresult::TestResult {
+    use crate::io::mixed::ReadBytesAt;
+    let data = vec![1u8; 100];
+    let mut bytes = Bytes::from(data.clone());
+    assert_eq!(
+        <Vec<u8> as ReadBytesAt>::read_bytes_at(&data, 10, 5)?.len(),
+        5
+    );
+    assert_eq!(
+        <&Bytes as ReadBytesAt>::read_bytes_at(&&bytes, 10, 5)?.len(),
+        5
+    );
+    assert_eq!(
+        <&mut Bytes as ReadBytesAt>::read_bytes_at(&&mut bytes, 10, 5)?.len(),
+        5
+    );
+    #[cfg(feature = "fs")]
+    {
+        use std::io::Write;
+        let mut file = tempfile::tempfile()?;
+        file.write_all(&data)?;
+        assert_eq!(
+            <std::fs::File as ReadBytesAt>::read_bytes_at(&file, 10, 5)?.len(),
+            5
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "experimental-mixed")]
+#[test]
 fn mixed() {
     use crate::io::mixed::{keyed_traverse_selected_rec, traverse_selected_rec, EncodedItem};
     let item = EncodedItem::from(EncodeError::SizeMismatch);
