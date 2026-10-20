@@ -246,6 +246,10 @@ mod tests {
         assert_eq!(full_chunk_groups(&from(max - 1), bs), ChunkRanges::empty());
         assert_eq!(full_chunk_groups(&cr(5, max - 1), bs), cr(16, max - 15));
         assert_eq!(
+            full_chunk_groups(&cr(max - 1, max), bs),
+            ChunkRanges::empty()
+        );
+        assert_eq!(
             full_chunk_groups(&cr(max - 20, max - 1), bs),
             ChunkRanges::empty()
         );

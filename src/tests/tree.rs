@@ -746,3 +746,57 @@ fn round_up_to_chunks_proptest(#[strategy(byte_ranges())] ranges: crate::ByteRan
         );
     }
 }
+
+/// All nodes of a tree with 64 leaf pairs.
+fn small_tree_nodes() -> impl Iterator<Item = TreeNode> {
+    (0..127).map(TreeNode)
+}
+
+/// The node range of a node contains exactly the node and the nodes below it.
+#[test]
+fn node_range() {
+    for node in small_tree_nodes() {
+        let chunks = node.chunk_range();
+        let below = small_tree_nodes()
+            .filter(|other| {
+                let range = other.chunk_range();
+                chunks.start <= range.start && range.end <= chunks.end
+            })
+            .collect::<Vec<_>>();
+        let range = node.node_range();
+        let expected = (range.start.0..range.end.0)
+            .map(TreeNode)
+            .collect::<Vec<_>>();
+        assert_eq!(below, expected, "{node:?}");
+    }
+}
+
+/// The post order range of a node contains exactly the post order offsets of
+/// the node and the nodes below it.
+#[test]
+fn post_order_range() {
+    for node in small_tree_nodes() {
+        let range = node.node_range();
+        let mut offsets = (range.start.0..range.end.0)
+            .map(|n| TreeNode(n).post_order_offset())
+            .collect::<Vec<_>>();
+        offsets.sort();
+        let expected = node.post_order_range().collect::<Vec<_>>();
+        assert_eq!(offsets, expected, "{node:?}");
+    }
+}
+
+/// The next left ancestor is the closest ancestor with a smaller node number.
+#[test]
+fn next_left_ancestor() {
+    for node in small_tree_nodes() {
+        let mut ancestor = node.parent();
+        while let Some(candidate) = ancestor {
+            if candidate < node {
+                break;
+            }
+            ancestor = candidate.parent();
+        }
+        assert_eq!(node.next_left_ancestor(), ancestor, "{node:?}");
+    }
+}

@@ -1471,6 +1471,28 @@ fn decoded_items_round_trip_proptest(#[strategy(case())] case: Case) {
     check(decoded_items_round_trip(&case));
 }
 
+/// Deserializing a parent from malformed data fails instead of panicking.
+#[cfg(feature = "serde")]
+#[test]
+fn parent_malformed() -> TestResult {
+    let parent = Parent {
+        node: TreeNode(3),
+        pair: (blake3::hash(b"l"), blake3::hash(b"r")),
+    };
+    let bytes = postcard::to_allocvec(&parent)?;
+    for len in 0..bytes.len() {
+        let res = postcard::from_bytes::<Parent>(&bytes[..len]);
+        assert!(res.is_err(), "prefix of {len} bytes");
+    }
+    for elements in 0..3 {
+        let mut bytes = bytes.clone();
+        bytes[0] = elements;
+        let res = postcard::from_bytes::<Parent>(&bytes);
+        assert!(res.is_err(), "sequence of {elements} elements");
+    }
+    Ok(())
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn encode_error_round_trip() -> TestResult {

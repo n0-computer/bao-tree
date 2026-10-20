@@ -474,6 +474,125 @@ fn broken_files(case: &Case, pos: u64) -> TestResult {
     Ok(())
 }
 
+/// Encoders report the same error if the data ends before the tree.
+fn encoders_on_truncated_data(case: &Case, pos: u64) -> TestResult {
+    let blob = case.blob();
+    if blob.data.is_empty() {
+        return Ok(());
+    }
+    let len = select(pos, blob.data.len());
+    let input = EncodeInput {
+        data: &blob.data[..len],
+        ..case.encode_input(&blob)
+    };
+    let expected = encode_reference(&case.encode_input(&blob))?;
+    let mut results = Vec::new();
+    for (name, encode) in ENCODERS {
+        if *name != "reference" {
+            results.push((name, encode(&input)));
+        }
+    }
+    let (_, first) = &results[0];
+    if first.is_ok() {
+        assert_eq!(first, &Ok(expected), "{case:?} len {len}");
+    }
+    for (name, res) in &results {
+        assert_eq!(res, first, "{name} differs for {case:?} len {len}");
+    }
+    Ok(())
+}
+
+#[test]
+fn encoders_on_truncated_data_cases() -> TestResult {
+    for case in fixed_cases() {
+        for pos in positions(4) {
+            encoders_on_truncated_data(&case, pos)?;
+        }
+    }
+    Ok(())
+}
+
+/// The io error kinds that decode and encode errors convert to. Callers
+/// check these kinds, e.g. `UnexpectedEof` for data the remote does not have.
+#[test]
+fn error_kinds() {
+    use io::ErrorKind::*;
+    use std::error::Error as _;
+    let decode = [
+        (DecodeError::ParentNotFound(TreeNode(1)), UnexpectedEof),
+        (DecodeError::LeafNotFound(ChunkNum(1)), UnexpectedEof),
+        (DecodeError::ParentHashMismatch(TreeNode(1)), InvalidData),
+        (DecodeError::LeafHashMismatch(ChunkNum(1)), InvalidData),
+        (DecodeError::Io(BrokenPipe.into()), BrokenPipe),
+    ];
+    for (error, kind) in decode {
+        let has_source = matches!(error, DecodeError::Io(_));
+        assert_eq!(error.source().is_some(), has_source, "{error:?}");
+        assert_eq!(io::Error::from(error).kind(), kind);
+    }
+    let encode = [
+        (EncodeError::ParentHashMismatch(TreeNode(1)), InvalidData),
+        (EncodeError::LeafHashMismatch(ChunkNum(1)), InvalidData),
+        (EncodeError::ParentWrite(TreeNode(1)), ConnectionReset),
+        (EncodeError::LeafWrite(ChunkNum(1)), ConnectionReset),
+        (EncodeError::SizeMismatch, InvalidData),
+        (EncodeError::Io(BrokenPipe.into()), BrokenPipe),
+    ];
+    for (error, kind) in encode {
+        let has_source = matches!(error, EncodeError::Io(_));
+        assert_eq!(error.source().is_some(), has_source, "{error:?}");
+        assert_eq!(io::Error::from(error).kind(), kind);
+    }
+}
+
+/// A writer that fails with `BrokenPipe`.
+struct BrokenPipe;
+
+impl Write for BrokenPipe {
+    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+        Err(io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl AsyncStreamWriter for BrokenPipe {
+    async fn write(&mut self, _: &[u8]) -> io::Result<()> {
+        Err(io::ErrorKind::BrokenPipe.into())
+    }
+
+    async fn write_bytes(&mut self, _: Bytes) -> io::Result<()> {
+        Err(io::ErrorKind::BrokenPipe.into())
+    }
+
+    async fn sync(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A write error other than `ConnectionReset` is reported as an io error,
+/// when writing a parent first and when writing a leaf first.
+#[test]
+fn other_write_error() {
+    for size in [4096, 1024] {
+        let data = test_data(size);
+        let outboard = PostOrderMemOutboard::create(&data, BlockSize(0));
+        let ranges = ChunkRanges::all();
+        let sync = sync::encode_ranges_validated(&data[..], &outboard, &ranges, BrokenPipe);
+        let fsm = block_on(fsm::encode_ranges_validated(
+            Bytes::from(data.clone()),
+            outboard.clone(),
+            &ranges,
+            BrokenPipe,
+        ));
+        let expected = Err("Io(BrokenPipe)".to_string());
+        assert_eq!(sync.map_err(encode_error), expected, "size {size}");
+        assert_eq!(fsm.map_err(encode_error), expected, "size {size}");
+    }
+}
+
 #[test]
 fn decoders_on_broken_stream_cases() -> TestResult {
     for case in fixed_cases() {
