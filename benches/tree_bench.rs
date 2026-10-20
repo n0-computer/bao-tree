@@ -1,5 +1,7 @@
+use std::hint::black_box;
+
 use bao_tree::{blake3, BaoTree, BlockSize, ChunkRanges};
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 
 fn offset_benches(c: &mut Criterion) {
     let tree = BaoTree::new(1024 * 1024 * 1024, BlockSize::ZERO);

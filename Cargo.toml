@@ -41,7 +41,7 @@ bao = "0.12.1"
 tokio = { version = "1", features = ["full"] }
 proptest = "1.0.0"
 rand = "0.9.5"
-criterion = "0.4.0"
+criterion = "0.8.2"
 tempfile = "3.6.0"
 iroh-io = { version = "0.6.2" }
 warp = "0.4.3"
