@@ -3,14 +3,15 @@
 //! Streams that break after a number of bytes, like a peer that disconnects,
 //! and files that fail to read at a given offset, like a broken disk. All
 //! implementations must report the same errors at the same point.
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
-use iroh_io::{AsyncSliceReader, AsyncStreamReader};
+use iroh_io::{AsyncSliceReader, AsyncStreamReader, AsyncStreamWriter};
 use positioned_io::{ReadAt, Size};
 
 use super::*;
 
-/// A stream that fails with `ConnectionReset` after `limit` bytes.
+/// A stream that fails with `ConnectionReset` after `limit` bytes were read
+/// or written.
 struct FailingStream {
     data: Vec<u8>,
     pos: usize,
@@ -24,6 +25,19 @@ impl FailingStream {
             pos: 0,
             limit,
         }
+    }
+
+    fn writer(limit: usize) -> Self {
+        Self::new(&[], limit)
+    }
+
+    fn put(&mut self, data: &[u8]) -> io::Result<()> {
+        if self.pos + data.len() > self.limit {
+            return Err(io::ErrorKind::ConnectionReset.into());
+        }
+        self.data.extend_from_slice(data);
+        self.pos += data.len();
+        Ok(())
     }
 
     fn take(&mut self, len: usize) -> io::Result<Bytes> {
@@ -49,6 +63,35 @@ impl Read for FailingStream {
         buf[..n].copy_from_slice(&self.data[self.pos..end]);
         self.pos += n;
         Ok(n)
+    }
+}
+
+impl Write for FailingStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.pos >= self.limit {
+            return Err(io::ErrorKind::ConnectionReset.into());
+        }
+        let n = buf.len().min(self.limit - self.pos);
+        self.put(&buf[..n])?;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl AsyncStreamWriter for FailingStream {
+    async fn write(&mut self, data: &[u8]) -> io::Result<()> {
+        self.put(data)
+    }
+
+    async fn write_bytes(&mut self, data: Bytes) -> io::Result<()> {
+        self.put(&data)
+    }
+
+    async fn sync(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -185,6 +228,75 @@ fn decoders_on_broken_stream(case: &Case, pos: u64) -> TestResult {
         }
     });
     assert_eq!(actual, expected, "fsm differs for {case:?} limit {limit}");
+    Ok(())
+}
+
+/// Property 14: all encoders report the same error for a writer that breaks,
+/// and report it as a failed write of a parent or a leaf.
+fn encoders_on_broken_writer(case: &Case, pos: u64) -> TestResult {
+    let blob = case.blob();
+    let (encoded, _) = valid_items(case, &blob)?;
+    if encoded.is_empty() {
+        return Ok(());
+    }
+    let limit = select(pos, encoded.len());
+    let i = case.encode_input(&blob);
+    let mut results = Vec::new();
+
+    let r = with_mode!(
+        i.mode,
+        sync::encode_ranges,
+        sync::keyed_encode_ranges,
+        (i.data, i.outboard, i.ranges, FailingStream::writer(limit))
+    );
+    results.push(("sync", r.map_err(encode_error)));
+    let r = with_mode!(
+        i.mode,
+        sync::encode_ranges_validated,
+        sync::keyed_encode_ranges_validated,
+        (i.data, i.outboard, i.ranges, FailingStream::writer(limit))
+    );
+    results.push(("sync validated", r.map_err(encode_error)));
+    let r = block_on(async {
+        with_mode!(
+            i.mode,
+            fsm::encode_ranges,
+            fsm::keyed_encode_ranges,
+            (
+                Bytes::copy_from_slice(i.data),
+                i.outboard.clone(),
+                i.ranges,
+                FailingStream::writer(limit)
+            )
+                .await
+        )
+    });
+    results.push(("fsm", r.map_err(encode_error)));
+    let r = block_on(async {
+        with_mode!(
+            i.mode,
+            fsm::encode_ranges_validated,
+            fsm::keyed_encode_ranges_validated,
+            (
+                Bytes::copy_from_slice(i.data),
+                i.outboard.clone(),
+                i.ranges,
+                FailingStream::writer(limit)
+            )
+                .await
+        )
+    });
+    results.push(("fsm validated", r.map_err(encode_error)));
+
+    let (_, expected) = &results[0];
+    let Err(error) = expected else {
+        panic!("sync accepted a broken writer for {case:?} limit {limit}");
+    };
+    let write_error = error.starts_with("ParentWrite") || error.starts_with("LeafWrite");
+    assert!(write_error, "{error} for {case:?} limit {limit}");
+    for (name, res) in &results {
+        assert_eq!(res, expected, "{name} differs for {case:?} limit {limit}");
+    }
     Ok(())
 }
 
@@ -375,6 +487,21 @@ fn decoders_on_broken_stream_cases() -> TestResult {
 #[proptest]
 fn decoders_on_broken_stream_proptest(#[strategy(case())] case: Case, pos: u64) {
     check(decoders_on_broken_stream(&case, pos));
+}
+
+#[test]
+fn encoders_on_broken_writer_cases() -> TestResult {
+    for case in fixed_cases() {
+        for pos in positions(8) {
+            encoders_on_broken_writer(&case, pos)?;
+        }
+    }
+    Ok(())
+}
+
+#[proptest]
+fn encoders_on_broken_writer_proptest(#[strategy(case())] case: Case, pos: u64) {
+    check(encoders_on_broken_writer(&case, pos));
 }
 
 #[test]
