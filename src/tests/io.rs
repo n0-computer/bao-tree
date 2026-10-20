@@ -1,4 +1,4 @@
-//! Consistency tests for the io implementations.
+//! Tests for the io implementations.
 //!
 //! Every way to encode, decode, create or validate an outboard is wrapped in an
 //! adapter with a uniform signature and a normalized result. Each property runs
@@ -7,6 +7,9 @@
 //!
 //! A case is a blob size, a block size, a query and a hash mode, so keyed
 //! hashing is covered by every property.
+//!
+//! At the end are cases the properties do not cover: an outboard that
+//! violates its contract, large blobs, and the size of encodings.
 use std::{future::Future, io::Cursor};
 
 use bytes::{Bytes, BytesMut};
