@@ -196,7 +196,7 @@ impl<'a> Iterator for ReferencePreOrderPartialChunkIterRef<'a> {
     }
 }
 
-/// Make test data that has each chunk filled with the cunk number as an u8
+/// Make test data that has each chunk filled with the chunk number as an u8
 ///
 /// This makes sure that every chunk has a different hash, and makes it easy
 /// to see pages in hex dumps.
