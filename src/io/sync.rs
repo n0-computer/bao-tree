@@ -108,7 +108,7 @@ pub trait CreateOutboard {
     /// So this can be used to initialize an outboard that does not have a default,
     /// such as a file based one.
     ///
-    /// It will only include data up the the current tree size.
+    /// It will only include data up to the current tree size.
     fn init_from(&mut self, data: impl Read) -> io::Result<()>;
 }
 
@@ -365,9 +365,7 @@ impl<'a, R: Read> DecodeResponseIter<'a, R> {
         &self.buf
     }
 
-    /// Get a reference to the tree used for decoding.
-    ///
-    /// This is only available after the first chunk has been decoded.
+    /// Get the tree used for decoding.
     pub fn tree(&self) -> BaoTree {
         self.inner.tree()
     }

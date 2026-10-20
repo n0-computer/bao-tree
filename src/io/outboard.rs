@@ -92,7 +92,7 @@ pub struct PreOrderOutboard<D = Vec<u8>> {
     pub root: blake3::Hash,
     /// tree defining the data
     pub tree: BaoTree,
-    /// hashes with length prefix
+    /// hash pairs in pre order, without a size prefix
     pub data: D,
 }
 
@@ -117,7 +117,7 @@ pub struct PostOrderOutboard<D = Vec<u8>> {
     pub root: blake3::Hash,
     /// tree defining the data
     pub tree: BaoTree,
-    /// hashes with length prefix
+    /// hash pairs in post order, without a size suffix
     pub data: D,
 }
 
@@ -146,7 +146,9 @@ pub struct PostOrderMemOutboard<T = Vec<u8>> {
     pub root: blake3::Hash,
     /// tree defining the data
     pub tree: BaoTree,
-    /// hashes without length suffix
+    /// hash pairs in post order, without a size suffix
+    ///
+    /// Must be exactly [BaoTree::outboard_size] bytes.
     pub data: T,
 }
 
@@ -320,7 +322,9 @@ pub struct PreOrderMemOutboard<T = Vec<u8>> {
     pub root: blake3::Hash,
     /// tree defining the data
     pub tree: BaoTree,
-    /// hashes with length prefix
+    /// hash pairs in pre order, without a size prefix
+    ///
+    /// Must be exactly [BaoTree::outboard_size] bytes.
     pub data: T,
 }
 

@@ -22,7 +22,7 @@ use crate::{blake3, split_inner, ChunkNum, ChunkRangesRef};
 /// 0..10, 11.12 will become 0.. (the entire blob)
 /// 0..6, 7..10 will become 0.. (the entire blob). the last chunk will be included and the hole filled
 /// 3..6, 7..10 will become 3.. the last chunk will be included and the hole filled
-/// 0..5, 7..10 will become 0..5, 7.. (the last chunk will be included, but chunkk 5 will not be sent)
+/// 0..5, 7..10 will become 0..5, 7.. (the last chunk will be included, but chunk 5 will not be sent)
 pub fn truncate_ranges(ranges: &ChunkRangesRef, size: u64) -> &ChunkRangesRef {
     let bs = ranges.boundaries();
     ChunkRangesRef::new_unchecked(&bs[..truncated_len(ranges, size)])
