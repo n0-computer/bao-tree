@@ -47,6 +47,8 @@ macro_rules! with_mode {
     };
 }
 
+mod errors;
+
 fn block_on<F: Future>(future: F) -> F::Output {
     futures_lite::future::block_on(future)
 }
@@ -387,7 +389,7 @@ mod mixed_adapter {
     use super::*;
     use crate::io::mixed::{self, EncodedItem, ReadBytesAt};
 
-    struct Collect(Vec<EncodedItem>);
+    pub(super) struct Collect(pub(super) Vec<EncodedItem>);
 
     impl mixed::Sender for Collect {
         type Error = Infallible;
@@ -431,17 +433,27 @@ mod mixed_adapter {
         })
     }
 
-    fn items(i: &EncodeInput) -> Vec<EncodedItem> {
+    fn items(i: &EncodeInput, data: impl ReadBytesAt) -> Vec<EncodedItem> {
         let mut send = Collect(Vec::new());
-        if let Err(e) = traverse(i, i.data, &mut send) {
+        if let Err(e) = traverse(i, data, &mut send) {
             match e {}
         }
         send.0
     }
 
     pub(super) fn encode_mixed(i: &EncodeInput) -> Encoded {
+        flatten(items(i, i.data))
+    }
+
+    /// The mixed traversal with `Bytes` as the data, which is read without copying.
+    pub(super) fn encode_mixed_bytes(i: &EncodeInput) -> Encoded {
+        flatten(items(i, Bytes::copy_from_slice(i.data)))
+    }
+
+    /// The bytes of an encoding, or the error at its end.
+    pub(super) fn flatten(items: Vec<EncodedItem>) -> Encoded {
         let mut res = Vec::new();
-        for item in items(i) {
+        for item in items {
             match item {
                 EncodedItem::Parent(Parent { pair: (l, r), .. }) => {
                     res.extend_from_slice(l.as_bytes());
@@ -457,7 +469,7 @@ mod mixed_adapter {
 
     pub(super) fn mixed_items(i: &EncodeInput) -> Vec<Item> {
         let mut res = Vec::new();
-        for item in items(i) {
+        for item in items(i, i.data) {
             let item = match item {
                 EncodedItem::Parent(Parent { node, pair }) => Item::Parent(node, pair),
                 EncodedItem::Leaf(Leaf { offset, data }) => Item::Leaf(offset, data.to_vec()),
@@ -474,7 +486,7 @@ mod mixed_adapter {
     pub(super) fn mixed_send_fails(case: &Case, pos: u64) -> TestResult {
         let blob = case.blob();
         let input = case.encode_input(&blob);
-        let all = items(&input);
+        let all = items(&input, input.data);
         let limit = select(pos, all.len());
         let mut send = FailAfter {
             items: Vec::new(),
@@ -494,7 +506,8 @@ mod mixed_adapter {
     /// round trip.
     pub(super) fn encoded_items_round_trip(case: &Case) -> TestResult {
         let blob = case.blob();
-        for item in items(&case.encode_input(&blob)) {
+        let input = case.encode_input(&blob);
+        for item in items(&input, input.data) {
             let bytes = postcard::to_allocvec(&item)?;
             let back: EncodedItem = postcard::from_bytes(&bytes)?;
             assert_eq!(postcard::to_allocvec(&back)?, bytes, "{case:?}");
@@ -512,6 +525,8 @@ const ENCODERS: &[(&str, Encoder)] = &[
     ("fsm validated", encode_fsm_validated),
     #[cfg(feature = "experimental-mixed")]
     ("mixed", mixed_adapter::encode_mixed),
+    #[cfg(feature = "experimental-mixed")]
+    ("mixed bytes", mixed_adapter::encode_mixed_bytes),
 ];
 
 const VALIDATING_ENCODERS: &[(&str, Encoder)] = &[
