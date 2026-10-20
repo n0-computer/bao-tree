@@ -545,6 +545,32 @@ fn error_kinds() {
     }
 }
 
+/// An io error inside an encode error keeps its kind and message when
+/// serialized. Kinds without a wire representation become `Other`.
+#[cfg(feature = "serde")]
+#[test]
+fn io_error_round_trip() -> TestResult {
+    use io::ErrorKind::*;
+    let kinds = [
+        (ConnectionReset, ConnectionReset),
+        (NotFound, NotFound),
+        (UnexpectedEof, UnexpectedEof),
+        (StorageFull, StorageFull),
+        (Other, Other),
+        (InvalidFilename, Other),
+    ];
+    for (kind, expected) in kinds {
+        let error = EncodeError::Io(io::Error::new(kind, "message"));
+        let bytes = postcard::to_allocvec(&error)?;
+        let EncodeError::Io(back) = postcard::from_bytes(&bytes)? else {
+            panic!("not an io error: {kind:?}");
+        };
+        assert_eq!(back.kind(), expected);
+        assert_eq!(back.to_string(), "message");
+    }
+    Ok(())
+}
+
 /// A writer that fails with `BrokenPipe`.
 struct BrokenPipe;
 

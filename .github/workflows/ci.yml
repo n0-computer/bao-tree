@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  MSRV: "1.75"
+  MSRV: "1.85"
   RUST_BACKTRACE: 1
   RUSTFLAGS: -Dwarnings
 

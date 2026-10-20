@@ -902,16 +902,108 @@ mod io_error_serde {
     use std::{fmt, io};
 
     use serde::{
-        de::{self, Visitor},
+        de::{self, SeqAccess, Visitor},
+        ser::SerializeTuple,
         Deserializer, Serializer,
     };
+
+    fn error_kind_to_u8(kind: io::ErrorKind) -> u8 {
+        match kind {
+            io::ErrorKind::AddrInUse => 0,
+            io::ErrorKind::AddrNotAvailable => 1,
+            io::ErrorKind::AlreadyExists => 2,
+            io::ErrorKind::ArgumentListTooLong => 3,
+            io::ErrorKind::BrokenPipe => 4,
+            io::ErrorKind::ConnectionAborted => 5,
+            io::ErrorKind::ConnectionRefused => 6,
+            io::ErrorKind::ConnectionReset => 7,
+            io::ErrorKind::CrossesDevices => 8,
+            io::ErrorKind::Deadlock => 9,
+            io::ErrorKind::DirectoryNotEmpty => 10,
+            io::ErrorKind::ExecutableFileBusy => 11,
+            io::ErrorKind::FileTooLarge => 12,
+            io::ErrorKind::HostUnreachable => 13,
+            io::ErrorKind::Interrupted => 14,
+            io::ErrorKind::InvalidData => 15,
+            io::ErrorKind::InvalidInput => 17,
+            io::ErrorKind::IsADirectory => 18,
+            io::ErrorKind::NetworkDown => 19,
+            io::ErrorKind::NetworkUnreachable => 20,
+            io::ErrorKind::NotADirectory => 21,
+            io::ErrorKind::NotConnected => 22,
+            io::ErrorKind::NotFound => 23,
+            io::ErrorKind::NotSeekable => 24,
+            io::ErrorKind::Other => 25,
+            io::ErrorKind::OutOfMemory => 26,
+            io::ErrorKind::PermissionDenied => 27,
+            io::ErrorKind::QuotaExceeded => 28,
+            io::ErrorKind::ReadOnlyFilesystem => 29,
+            io::ErrorKind::ResourceBusy => 30,
+            io::ErrorKind::StaleNetworkFileHandle => 31,
+            io::ErrorKind::StorageFull => 32,
+            io::ErrorKind::TimedOut => 33,
+            io::ErrorKind::TooManyLinks => 34,
+            io::ErrorKind::UnexpectedEof => 35,
+            io::ErrorKind::Unsupported => 36,
+            io::ErrorKind::WouldBlock => 37,
+            io::ErrorKind::WriteZero => 38,
+            _ => 25,
+        }
+    }
+
+    fn u8_to_error_kind(num: u8) -> io::ErrorKind {
+        match num {
+            0 => io::ErrorKind::AddrInUse,
+            1 => io::ErrorKind::AddrNotAvailable,
+            2 => io::ErrorKind::AlreadyExists,
+            3 => io::ErrorKind::ArgumentListTooLong,
+            4 => io::ErrorKind::BrokenPipe,
+            5 => io::ErrorKind::ConnectionAborted,
+            6 => io::ErrorKind::ConnectionRefused,
+            7 => io::ErrorKind::ConnectionReset,
+            8 => io::ErrorKind::CrossesDevices,
+            9 => io::ErrorKind::Deadlock,
+            10 => io::ErrorKind::DirectoryNotEmpty,
+            11 => io::ErrorKind::ExecutableFileBusy,
+            12 => io::ErrorKind::FileTooLarge,
+            13 => io::ErrorKind::HostUnreachable,
+            14 => io::ErrorKind::Interrupted,
+            15 => io::ErrorKind::InvalidData,
+            // 16 => io::ErrorKind::InvalidFilename,
+            17 => io::ErrorKind::InvalidInput,
+            18 => io::ErrorKind::IsADirectory,
+            19 => io::ErrorKind::NetworkDown,
+            20 => io::ErrorKind::NetworkUnreachable,
+            21 => io::ErrorKind::NotADirectory,
+            22 => io::ErrorKind::NotConnected,
+            23 => io::ErrorKind::NotFound,
+            24 => io::ErrorKind::NotSeekable,
+            25 => io::ErrorKind::Other,
+            26 => io::ErrorKind::OutOfMemory,
+            27 => io::ErrorKind::PermissionDenied,
+            28 => io::ErrorKind::QuotaExceeded,
+            29 => io::ErrorKind::ReadOnlyFilesystem,
+            30 => io::ErrorKind::ResourceBusy,
+            31 => io::ErrorKind::StaleNetworkFileHandle,
+            32 => io::ErrorKind::StorageFull,
+            33 => io::ErrorKind::TimedOut,
+            34 => io::ErrorKind::TooManyLinks,
+            35 => io::ErrorKind::UnexpectedEof,
+            36 => io::ErrorKind::Unsupported,
+            37 => io::ErrorKind::WouldBlock,
+            38 => io::ErrorKind::WriteZero,
+            _ => io::ErrorKind::Other,
+        }
+    }
 
     pub fn serialize<S>(error: &io::Error, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        // Serialize the error kind and message
-        serializer.serialize_str(&format!("{:?}:{}", error.kind(), error))
+        let mut tup = serializer.serialize_tuple(2)?;
+        tup.serialize_element(&error_kind_to_u8(error.kind()))?;
+        tup.serialize_element(&error.to_string())?;
+        tup.end()
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<io::Error, D::Error>
@@ -920,23 +1012,28 @@ mod io_error_serde {
     {
         struct IoErrorVisitor;
 
-        impl Visitor<'_> for IoErrorVisitor {
+        impl<'de> Visitor<'de> for IoErrorVisitor {
             type Value = io::Error;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("an io::Error string representation")
+                formatter.write_str("a tuple of (u8, String) representing io::Error")
             }
 
-            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
             where
-                E: de::Error,
+                A: SeqAccess<'de>,
             {
-                // For simplicity, create a generic error
-                // In a real app, you might want to parse the kind from the string
-                Ok(io::Error::other(value))
+                let num: u8 = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let message: String = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                let kind = u8_to_error_kind(num);
+                Ok(io::Error::new(kind, message))
             }
         }
 
-        deserializer.deserialize_str(IoErrorVisitor)
+        deserializer.deserialize_tuple(2, IoErrorVisitor)
     }
 }
