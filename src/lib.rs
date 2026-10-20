@@ -411,9 +411,7 @@ impl BaoTree {
     fn leaf_byte_ranges3(&self, leaf: TreeNode) -> (u64, u64, u64) {
         let Range { start, end } = leaf.byte_range();
         let mid = leaf.mid().to_bytes();
-        if !(start < self.size || (start == 0 && self.size == 0)) {
-            debug_assert!(start < self.size || (start == 0 && self.size == 0));
-        }
+        debug_assert!(start < self.size || (start == 0 && self.size == 0));
         (start, mid.min(self.size), end.min(self.size))
     }
 
@@ -510,7 +508,7 @@ impl BaoTree {
         self.outboard_hash_pairs() * 64
     }
 
-    #[allow(dead_code)]
+    #[cfg(all(test, feature = "tokio_fsm"))]
     fn filled_size(&self) -> TreeNode {
         let blocks = self.chunks();
         let n = blocks.0.div_ceil(2);
