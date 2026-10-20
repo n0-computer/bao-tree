@@ -2,7 +2,7 @@
 name = "bao-tree"
 version = "0.16.1"
 authors = ["Rüdiger Klaehn <rklaehn@protonmail.com>"]
-description = "BLAKE3 verfiied streaming with custom chunk groups and range set queries"
+description = "BLAKE3 verified streaming with custom chunk groups and range set queries"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/n0-computer/bao-tree"
 edition = "2021"
@@ -66,3 +66,11 @@ all-features = true
 [[example]]
 name = "cli"
 required-features = ["tokio_fsm"]
+
+[[example]]
+name = "encode_decode_sync"
+required-features = ["validate"]
+
+[[example]]
+name = "encode_decode_async"
+required-features = ["tokio_fsm", "validate"]
