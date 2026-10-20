@@ -14,7 +14,6 @@ use std::{
     result,
 };
 
-use bytes::Bytes;
 pub use iroh_io::{AsyncSliceReader, AsyncSliceWriter};
 use iroh_io::{AsyncStreamReader, AsyncStreamWriter};
 use smallvec::SmallVec;
@@ -25,7 +24,7 @@ use crate::{
     blake3,
     io::{
         error::EncodeError,
-        outboard::{PostOrderOutboard, PreOrderOutboard},
+        outboard::{parse_hash_pair, PostOrderOutboard, PreOrderOutboard},
         Leaf, Parent,
     },
     iter::{BaoChunk, ResponseIter},
@@ -173,11 +172,7 @@ impl<R: AsyncSliceReader> Outboard for PreOrderOutboard<R> {
         };
         let offset = offset * 64;
         let content = self.data.read_at(offset, 64).await?;
-        Ok(Some(if content.len() != 64 {
-            (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
-        } else {
-            parse_hash_pair(content)?
-        }))
+        Ok(Some(hash_pair(&content)))
     }
 }
 
@@ -306,24 +301,14 @@ impl<R: AsyncSliceReader> Outboard for PostOrderOutboard<R> {
         };
         let offset = offset.value() * 64;
         let content = self.data.read_at(offset, 64).await?;
-        Ok(Some(if content.len() != 64 {
-            (blake3::Hash::from([0; 32]), blake3::Hash::from([0; 32]))
-        } else {
-            parse_hash_pair(content)?
-        }))
+        Ok(Some(hash_pair(&content)))
     }
 }
 
-pub(crate) fn parse_hash_pair(buf: Bytes) -> io::Result<(blake3::Hash, blake3::Hash)> {
-    if buf.len() != 64 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "hash pair must be 64 bytes",
-        ));
-    }
-    let l_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[..32]).unwrap());
-    let r_hash = blake3::Hash::from(<[u8; 32]>::try_from(&buf[32..]).unwrap());
-    Ok((l_hash, r_hash))
+/// The hash pair in `content`, or zero hashes if the data ended before the
+/// pair, like an unwritten region of a sparse file.
+fn hash_pair(content: &[u8]) -> (blake3::Hash, blake3::Hash) {
+    parse_hash_pair(content.try_into().unwrap_or([0u8; 64]))
 }
 
 #[derive(Debug)]

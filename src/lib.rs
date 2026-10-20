@@ -411,9 +411,7 @@ impl BaoTree {
     fn leaf_byte_ranges3(&self, leaf: TreeNode) -> (u64, u64, u64) {
         let Range { start, end } = leaf.byte_range();
         let mid = leaf.mid().to_bytes();
-        if !(start < self.size || (start == 0 && self.size == 0)) {
-            debug_assert!(start < self.size || (start == 0 && self.size == 0));
-        }
+        debug_assert!(start < self.size || (start == 0 && self.size == 0));
         (start, mid.min(self.size), end.min(self.size))
     }
 
@@ -452,23 +450,6 @@ impl BaoTree {
         let (root, len) = self.shifted();
         let shift = self.block_size.0;
         PreOrderNodeIter::new(root, len).map(move |x| x.subtract_block_size(shift))
-    }
-
-    /// Traverse the part of the tree that is relevant for a ranges querys
-    /// in pre order as [NodeInfo]s
-    ///
-    /// This is mostly used internally.
-    ///
-    /// When `min_level` is set to a value greater than 0, the iterator will
-    /// skip all branch nodes that are at a level < min_level if they are fully
-    /// covered by the ranges.
-    #[cfg(test)]
-    pub fn ranges_pre_order_nodes_iter<'a>(
-        &self,
-        ranges: &'a RangeSetRef<ChunkNum>,
-        min_level: u8,
-    ) -> PreOrderPartialIterRef<'a> {
-        PreOrderPartialIterRef::new(*self, ranges, min_level)
     }
 
     /// Root of the tree
@@ -510,30 +491,11 @@ impl BaoTree {
         self.outboard_hash_pairs() * 64
     }
 
-    #[allow(dead_code)]
+    #[cfg(all(test, feature = "tokio_fsm"))]
     fn filled_size(&self) -> TreeNode {
         let blocks = self.chunks();
         let n = blocks.0.div_ceil(2);
         TreeNode(n + n.saturating_sub(1))
-    }
-
-    /// true if the node is a leaf for this tree
-    ///
-    /// If a tree has a non-zero block size, this is different than the node
-    /// being a leaf (level=0).
-    #[cfg(test)]
-    const fn is_leaf(&self, node: TreeNode) -> bool {
-        node.level() == self.block_size.to_u32()
-    }
-
-    /// true if the given node is persisted
-    ///
-    /// the only node that is not persisted is the last leaf node, if it is
-    /// less than half full
-    #[inline]
-    #[cfg(test)]
-    const fn is_persisted(&self, node: TreeNode) -> bool {
-        !self.is_leaf(node) || node.mid().to_bytes() < self.size
     }
 
     /// true if this is a node that is relevant for the outboard

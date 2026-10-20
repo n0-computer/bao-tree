@@ -5,7 +5,6 @@ use std::ops::Range;
 
 use proptest::prelude::*;
 
-use super::bao::size_and_slice_overlapping;
 use range_collections::{RangeSet2, RangeSetRef};
 use smallvec::SmallVec;
 use test_strategy::proptest;
@@ -13,84 +12,14 @@ use test_strategy::proptest;
 use crate::{
     assert_tuple_eq, blake3,
     io::full_chunk_groups,
-    iter::{
-        BaoChunk, NodeInfo, PostOrderChunkIter, PreOrderPartialChunkIterRef,
-        PreOrderPartialIterRef, ResponseIterRef,
-    },
-    prop_assert_tuple_eq,
+    iter::{BaoChunk, PreOrderPartialChunkIterRef, ResponseIterRef},
     rec::{
         encode_selected_rec, get_leaf_ranges, make_test_data, partial_chunk_iter_reference,
         range_union, response_iter_reference, select_nodes_rec, truncate_ranges,
         ReferencePreOrderPartialChunkIterRef,
     },
-    split, BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, HashMode, ResponseIter,
-    TreeNode,
+    BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, HashMode, ResponseIter, TreeNode,
 };
-
-type Pair<A> = (A, A);
-
-/// iterate over all nodes in the tree in depth first, left to right, pre order
-/// that are required to validate the given ranges
-///
-/// Recursive reference implementation, just used in tests
-fn iterate_part_preorder_reference<'a>(
-    tree: &BaoTree,
-    ranges: &'a ChunkRangesRef,
-    max_skip_level: u8,
-) -> Vec<NodeInfo<'a>> {
-    fn iterate_part_rec<'a>(
-        tree: &BaoTree,
-        node: TreeNode,
-        ranges: &'a ChunkRangesRef,
-        max_skip_level: u32,
-        is_root: bool,
-        res: &mut Vec<NodeInfo<'a>>,
-    ) {
-        if ranges.is_empty() {
-            return;
-        }
-        let is_half_leaf = !tree.is_relevant_for_outboard(node);
-        // check if the node is fully included
-        let full = ranges.is_all();
-        // split the ranges into left and right
-        let (l_ranges, r_ranges) = if !is_half_leaf {
-            split(ranges, node)
-        } else {
-            (ranges, ranges)
-        };
-
-        let query_leaf = tree.is_leaf(node) || (full && node.level() <= max_skip_level);
-        // push no matter if leaf or not
-        res.push(NodeInfo {
-            node,
-            ranges,
-            l_ranges,
-            r_ranges,
-            full,
-            query_leaf,
-            is_root,
-            is_half_leaf,
-        });
-        // if not leaf, recurse
-        if !query_leaf {
-            let valid_nodes = tree.filled_size();
-            let l = node.left_child().unwrap();
-            let r = node.right_descendant(valid_nodes).unwrap();
-            iterate_part_rec(tree, l, l_ranges, max_skip_level, false, res);
-            iterate_part_rec(tree, r, r_ranges, max_skip_level, false, res);
-        }
-    }
-    let mut res = Vec::new();
-    iterate_part_rec(
-        tree,
-        tree.root(),
-        ranges,
-        max_skip_level as u32,
-        true,
-        &mut res,
-    );
-    res
-}
 
 pub(super) fn last_chunk(size: u64) -> Range<u64> {
     const CHUNK_LEN: u64 = 1024;
@@ -122,86 +51,6 @@ fn select_last_chunk_impl(size: u64, block_size: u8) -> (Vec<Range<u64>>, Vec<Ra
 #[test]
 fn select_last_chunk_0() {
     assert_tuple_eq!(select_last_chunk_impl(1, 0));
-}
-
-/// Compares the PostOrderNodeIter with a simple stack-based reference implementation.
-#[test]
-#[ignore]
-fn test_post_order_node_iter() {
-    let cases = [8193];
-    for size in cases {
-        for i in 0..5 {
-            let tree = BaoTree::new(size, BlockSize(i));
-            let items = tree.post_order_nodes_iter().collect::<Vec<_>>();
-            println!("{i}");
-            for item in items {
-                println!("{item:?}");
-            }
-            println!();
-        }
-    }
-}
-
-#[test]
-#[ignore]
-fn test_pre_order_chunks_iter_ref() {
-    let cases = [
-        // (8193, ChunkRanges::all()),
-        (8193, ChunkRanges::from(..ChunkNum(1))),
-    ];
-    for (size, ranges) in cases {
-        for i in 0..5 {
-            let tree = BaoTree::new(size, BlockSize(i));
-            let items = PreOrderPartialIterRef::new(tree, &ranges, tree.block_size.0);
-            println!("{i}");
-            for item in items {
-                println!("{:?} {:?}", item.node.byte_range(), item);
-            }
-            println!();
-        }
-        for i in 0..5 {
-            let tree = BaoTree::new(size, BlockSize(i));
-            let items = ReferencePreOrderPartialChunkIterRef::new(tree, &ranges, tree.block_size.0);
-            println!("{i}");
-            for item in items {
-                println!("{item:?}");
-            }
-            println!();
-        }
-    }
-}
-
-/// Compares the PostOrderNodeIter with a simple stack-based reference implementation.
-#[test]
-#[ignore]
-fn test_post_order_chunk_iter() {
-    for i in 1..5 {
-        let tree = BaoTree::new(1, BlockSize(i));
-        let items = PostOrderChunkIter::new(tree).collect::<Vec<_>>();
-        println!("{i}");
-        for item in items {
-            println!("{item:?}");
-        }
-        println!();
-    }
-}
-
-fn pre_order_iter_comparison_impl(len: u64, level: u8) -> Pair<Vec<TreeNode>> {
-    let tree = BaoTree::new(len, BlockSize(level));
-    let iter1 = tree.pre_order_nodes_iter().collect::<Vec<_>>();
-    let iter2 = tree
-        .ranges_pre_order_nodes_iter(&ChunkRanges::all(), 0)
-        .map(|x| x.node)
-        .collect::<Vec<_>>();
-    (iter1, iter2)
-}
-
-#[test]
-fn pre_order_iter_comparison_cases() {
-    let cases = [(2049, 1)];
-    for (len, level) in cases {
-        assert_tuple_eq!(pre_order_iter_comparison_impl(len, level));
-    }
 }
 
 #[test]
@@ -697,21 +546,4 @@ fn canonicalize_ranges_test() {
         prop_assert_eq!(range_union(leaf_ranges), Some(RangeSet2::from(0..size)));
     }
 
-    /// Check that the unrestricted pre-order iterator is the same as the
-    /// restricted pre-order iterator for the entire tree.
-    #[test]
-    fn pre_order_iter_comparison(len in 0..1000000u64, level in 0u8..4) {
-        prop_assert_tuple_eq!(pre_order_iter_comparison_impl(len, level));
-    }
-
-    /// Compares the ranges iter with a recursive reference implementation.
-    #[test]
-    fn partial_iterator_reference_comparison((len, start, size) in size_and_slice_overlapping()) {
-        let tree = BaoTree::new(len, BlockSize::ZERO);
-        let chunk_range = start .. start + size;
-        let rs = ChunkRanges::from(chunk_range);
-        let iter1 = iterate_part_preorder_reference(&tree, &rs, 0);
-        let iter2 = tree.ranges_pre_order_nodes_iter(&rs, 0).collect::<Vec<_>>();
-        prop_assert_eq!(&iter1, &iter2);
-    }
 }
