@@ -1,11 +1,10 @@
 //! Tests for the keyed hash primitives against BLAKE3.
 
+use super::reference::make_test_data;
 use crate::{
     blake3,
     io::{outboard::PostOrderMemOutboard, sync::Outboard},
-    keyed_hash_subtree, keyed_parent_cv,
-    rec::make_test_data,
-    BlockSize, HashMode,
+    keyed_hash_subtree, keyed_parent_cv, BlockSize, HashMode,
 };
 
 #[test]

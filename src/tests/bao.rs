@@ -9,6 +9,7 @@ use std::{
 use proptest::prelude::*;
 use range_collections::RangeSet2;
 
+use super::reference::{encode_ranges_reference, make_test_data};
 use crate::{
     blake3,
     io::{
@@ -16,7 +17,6 @@ use crate::{
         sync::{encode_ranges, encode_ranges_validated, DecodeResponseIter, Outboard},
         BaoContentItem, Leaf,
     },
-    rec::{encode_ranges_reference, make_test_data},
     BaoTree, BlockSize, ChunkNum, ChunkRanges, ChunkRangesRef, TreeNode,
 };
 
@@ -336,8 +336,9 @@ fn size_and_slice() -> impl Strategy<Value = (u64, ChunkNum, ChunkNum)> {
 #[cfg(feature = "tokio_fsm")]
 mod fsm_tests {
 
+    use super::super::reference::make_test_data;
     use super::*;
-    use crate::{io::fsm::*, rec::make_test_data};
+    use crate::io::fsm::*;
 
     /// range is a range of chunks. Just using u64 for convenience in tests
     async fn bao_tree_decode_slice_fsm_impl(data: Vec<u8>, range: Range<u64>) {
