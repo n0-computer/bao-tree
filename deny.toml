@@ -3,7 +3,6 @@ yanked = "deny"
 ignore = [
     "RUSTSEC-2024-0370", # unmaintained: proc-macro-error via genawaiter, no maintained genawaiter release
     "RUSTSEC-2023-0089", # unmaintained: atomic-polyfill via postcard -> heapless 0.7, dev-dependency only
-    "RUSTSEC-2024-0375", # unmaintained: atty via criterion 0.4, dev-dependency only
 ]
 
 [bans]
