@@ -32,7 +32,7 @@ mod serde_support {
     impl Serialize for Parent {
         fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             let (l, r) = self.pair;
-            let mut seq = serializer.serialize_seq(Some(2))?;
+            let mut seq = serializer.serialize_seq(Some(3))?;
             seq.serialize_element(&self.node)?;
             seq.serialize_element(l.as_bytes())?;
             seq.serialize_element(r.as_bytes())?;
@@ -245,6 +245,10 @@ mod tests {
         let from = |start: u64| ChunkRanges::from(ChunkNum(start)..);
         assert_eq!(full_chunk_groups(&from(max - 1), bs), ChunkRanges::empty());
         assert_eq!(full_chunk_groups(&cr(5, max - 1), bs), cr(16, max - 15));
+        assert_eq!(
+            full_chunk_groups(&cr(max - 1, max), bs),
+            ChunkRanges::empty()
+        );
         assert_eq!(
             full_chunk_groups(&cr(max - 20, max - 1), bs),
             ChunkRanges::empty()

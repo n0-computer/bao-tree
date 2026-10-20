@@ -147,6 +147,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "test-strategy",
+ "testresult",
  "tokio",
  "warp",
 ]
@@ -1877,6 +1878,12 @@ dependencies = [
  "structmeta",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "testresult"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ad5f489c3aa16cefe5a90ee2d0390b1f8b31065a9a6694b36d85f2b96da7b27"
 
 [[package]]
 name = "textwrap"

@@ -252,6 +252,15 @@ mod tests {
     }
 
     #[test]
+    fn block_size_from_bytes() {
+        assert_eq!(BlockSize::from_bytes(1024), Some(BlockSize::ZERO));
+        assert_eq!(BlockSize::from_bytes(16 * 1024), Some(BlockSize(4)));
+        assert_eq!(BlockSize::from_bytes(0), None);
+        assert_eq!(BlockSize::from_bytes(512), None);
+        assert_eq!(BlockSize::from_bytes(3 * 1024), None);
+    }
+
+    #[test]
     #[should_panic(expected = "block size too large")]
     fn block_size_too_large() {
         BlockSize::from_chunk_log(17);
