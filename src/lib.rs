@@ -455,6 +455,7 @@ impl BaoTree {
     /// Root of the tree
     ///
     /// Does not consider block size
+    #[deprecated(note = "does not consider the block size of the tree")]
     pub fn root(&self) -> TreeNode {
         let shift = 10;
         let mask = (1 << shift) - 1;
