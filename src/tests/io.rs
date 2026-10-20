@@ -13,8 +13,9 @@ use bytes::{Bytes, BytesMut};
 use proptest::prelude::*;
 use test_strategy::proptest;
 
+use super::tree::last_chunk;
 use crate::{
-    blake3,
+    assert_tuple_eq, blake3,
     io::{
         fsm,
         outboard::{
@@ -23,7 +24,7 @@ use crate::{
         },
         sync, BaoContentItem, DecodeError, EncodeError, Leaf, Parent,
     },
-    rec::{encode_selected_rec, truncate_ranges},
+    rec::{encode_selected_rec, make_test_data, truncate_ranges},
     BaoTree, BlockSize, ChunkNum, ChunkRanges, HashMode, TreeNode,
 };
 
@@ -1231,4 +1232,200 @@ fn wrong_mode_fails_cases() {
 #[proptest]
 fn wrong_mode_fails_proptest(#[strategy(case())] case: Case) {
     wrong_mode_fails(&case);
+}
+
+/// An outboard that violates the contract of [crate::io::sync::Outboard::load]
+/// by returning `Ok(None)` for nodes that should be stored.
+struct NoneOutboard(PreOrderMemOutboard);
+
+impl crate::io::sync::Outboard for NoneOutboard {
+    fn root(&self) -> blake3::Hash {
+        self.0.root
+    }
+    fn tree(&self) -> BaoTree {
+        self.0.tree
+    }
+    fn load(&self, node: TreeNode) -> std::io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        if node.level() == 0 {
+            Ok(None)
+        } else {
+            crate::io::sync::Outboard::load(&self.0, node)
+        }
+    }
+}
+
+impl crate::io::fsm::Outboard for NoneOutboard {
+    fn root(&self) -> blake3::Hash {
+        self.0.root
+    }
+    fn tree(&self) -> BaoTree {
+        self.0.tree
+    }
+    async fn load(
+        &mut self,
+        node: TreeNode,
+    ) -> std::io::Result<Option<(blake3::Hash, blake3::Hash)>> {
+        crate::io::sync::Outboard::load(self, node)
+    }
+}
+
+#[test]
+fn outboard_wrong_hash() {
+    let data = make_test_data(100000000);
+    let expected = blake3::hash(&data);
+    let actual = PostOrderMemOutboard::create(&data, BlockSize(4)).root;
+    assert_eq!(expected, actual);
+}
+
+#[test]
+fn encode_selected_rec_cases() {
+    let data = make_test_data(1024 * 3);
+    let overhead = |data, min_level: u32| {
+        let mut actual_encoded = Vec::new();
+        encode_selected_rec(
+            ChunkNum(0),
+            data,
+            true,
+            &ChunkRanges::all(),
+            min_level,
+            true,
+            &mut actual_encoded,
+            HashMode::Standard,
+        );
+        actual_encoded.len() - data.len()
+    };
+    assert_eq!(overhead(&data, 0), 64 * 2);
+    assert_eq!(overhead(&data, 1), 64);
+    assert_eq!(overhead(&data, 2), 0);
+}
+
+/// Encode a small subset of a large blob, and check that the encoded data is small
+#[test]
+fn encode_single_chunk_large() {
+    // a rather big piece of data
+    let data = make_test_data(1024 * 1024 * 16 + 12345);
+    // compute an outboard at a block size of 2^4 = 16 chunks
+    let outboard = PostOrderMemOutboard::create(&data, BlockSize(4));
+
+    // encode the given ranges
+    let get_encoded = |ranges| {
+        let mut actual_encoded = Vec::new();
+        crate::io::sync::encode_ranges_validated(&data, &outboard, ranges, &mut actual_encoded)
+            .unwrap();
+        actual_encoded
+    };
+
+    // check the expected size for various ranges
+    let ranges = ChunkRanges::from(..ChunkNum(1));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len(), 15 * 64 + 1024);
+
+    let ranges = ChunkRanges::from(ChunkNum(1000)..ChunkNum(1001));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len(), 15 * 64 + 1024);
+
+    let ranges = ChunkRanges::from(ChunkNum(3000)..ChunkNum(3001));
+    let encoded = get_encoded(&ranges);
+    assert_eq!(encoded.len(), 15 * 64 + 1024);
+}
+
+fn encode_last_chunk_impl(size: u64, block_size: u8) -> (Vec<u8>, Vec<u8>) {
+    let data = make_test_data(size as usize);
+    let outboard = PostOrderMemOutboard::create(&data, BlockSize(block_size));
+
+    let range = ChunkRanges::from(ChunkNum(u64::MAX)..);
+    let mut encoded1 = Vec::new();
+    sync::encode_ranges_validated(&data, &outboard, &range, &mut encoded1).unwrap();
+
+    let lc = last_chunk(size);
+    let sc = ChunkNum::chunks(lc.start);
+    let ec = ChunkNum::chunks(lc.end);
+    let range = ChunkRanges::from(sc..ec);
+    let mut encoded2 = Vec::new();
+    sync::encode_ranges_validated(&data, &outboard, &range, &mut encoded2).unwrap();
+    (encoded1, encoded2)
+}
+
+#[test]
+fn outboard_hash() {
+    for i in 1..4 {
+        let data = &[0u8];
+        let outboard = PostOrderMemOutboard::create(data, BlockSize(i));
+        let hash = outboard.root;
+        assert_eq!(hash, blake3::hash(data));
+    }
+}
+
+/// Check that a query outside the valid range always encodes the last chunk
+#[test]
+fn encode_last_chunk_cases() {
+    let cases = [
+        // (1, 0),
+        // (1, 1),
+        (4096, 0),
+        // (8192, 0),
+    ];
+    for (size, block_size) in cases {
+        assert_tuple_eq!(encode_last_chunk_impl(size, block_size));
+    }
+}
+
+fn is_missing_hash_pair(res: Result<(), crate::io::EncodeError>) -> bool {
+    matches!(res, Err(crate::io::EncodeError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData)
+}
+
+#[test]
+fn encode_outboard_none_cases() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let data = make_test_data(1024 * 16);
+    let ranges = ChunkRanges::all();
+    let outboard = || NoneOutboard(PreOrderMemOutboard::create(&data, BlockSize(0)));
+    let mut encoded = Vec::new();
+    assert!(is_missing_hash_pair(crate::io::sync::encode_ranges(
+        &data[..],
+        outboard(),
+        &ranges,
+        &mut encoded,
+    )));
+    assert!(is_missing_hash_pair(
+        crate::io::sync::encode_ranges_validated(&data[..], outboard(), &ranges, &mut encoded)
+    ));
+    assert!(is_missing_hash_pair(rt.block_on(
+        crate::io::fsm::encode_ranges(Bytes::from(data.clone()), outboard(), &ranges, &mut encoded,)
+    )));
+    assert!(is_missing_hash_pair(rt.block_on(
+        crate::io::fsm::encode_ranges_validated(
+            Bytes::from(data.clone()),
+            outboard(),
+            &ranges,
+            &mut encoded,
+        )
+    )));
+}
+
+/// Validate a large blob with the fsm validator.
+#[cfg(feature = "validate")]
+#[test]
+fn validate_bug() {
+    use futures_lite::StreamExt;
+    let data = Bytes::from(make_test_data(19308432));
+    let outboard = crate::io::outboard::PostOrderMemOutboard::create(&data, BlockSize(4));
+    let expected = ChunkRanges::from(..ChunkNum::chunks(data.len() as u64));
+    let ranges = ChunkRanges::all();
+    let actual = futures_lite::future::block_on(
+        crate::io::fsm::valid_ranges(outboard, data, &ranges).collect::<Vec<_>>(),
+    );
+    let mut res = ChunkRanges::empty();
+    for range in actual {
+        res |= ChunkRanges::from(range.unwrap());
+    }
+    assert_eq!(res, expected);
+}
+
+::proptest::proptest! {
+    /// Check that a query outside the valid range always encodes the last chunk
+    #[test]
+    fn encode_last_chunk(size in 1..100000u64, block_size in 0..4u8) {
+        assert_tuple_eq!(encode_last_chunk_impl(size, block_size));
+    }
 }
