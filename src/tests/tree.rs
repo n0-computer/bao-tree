@@ -632,3 +632,20 @@ fn next_left_ancestor() {
         assert_eq!(node.next_left_ancestor(), ancestor, "{node:?}");
     }
 }
+
+/// The root covers all chunks of the tree, and its left child does not. The
+/// block size is ignored.
+#[test]
+#[allow(deprecated)]
+fn root() {
+    for size in [0u64, 1, 1024, 1025, 2048, 2049, 16 * 1024, 100_000] {
+        let tree = BaoTree::new(size, BlockSize::ZERO);
+        let root = tree.root();
+        let chunks = tree.chunks().max(ChunkNum(1));
+        assert!(root.chunk_range().end >= chunks, "size {size}");
+        if let Some(left) = root.left_child() {
+            assert!(left.chunk_range().end < chunks, "size {size}");
+        }
+        assert_eq!(BaoTree::new(size, BlockSize(4)).root(), root);
+    }
+}

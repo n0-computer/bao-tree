@@ -1550,6 +1550,32 @@ impl fsm::Outboard for NoneOutboard {
     }
 }
 
+/// The validators skip the subtree of a node that the outboard does not return,
+/// report what they can still check, and do not fail. With five chunks, the
+/// nodes above chunks 0 to 3 are missing, and chunk 4 is the last leaf, which
+/// is checked against its parent without loading anything.
+#[cfg(feature = "validate")]
+#[test]
+fn validate_outboard_none() -> TestResult {
+    use futures_lite::StreamExt;
+    let data = make_test_data(5 * 1024);
+    let ranges = ChunkRanges::all();
+    let outboard = || NoneOutboard(PreOrderMemOutboard::create(&data, BlockSize(0)));
+    let expected = vec![ChunkNum(4)..ChunkNum(5)];
+    let collect = |items: Vec<std::io::Result<std::ops::Range<ChunkNum>>>| {
+        items.into_iter().collect::<std::io::Result<Vec<_>>>()
+    };
+    let items = sync::valid_ranges(outboard(), &data[..], &ranges);
+    assert_eq!(collect(items.into_iter().collect())?, expected);
+    let items = sync::valid_outboard_ranges(outboard(), &ranges);
+    assert_eq!(collect(items.into_iter().collect())?, expected);
+    let items = fsm::valid_ranges(outboard(), Bytes::from(data.clone()), &ranges);
+    assert_eq!(collect(block_on(items.collect()))?, expected);
+    let items = fsm::valid_outboard_ranges(outboard(), &ranges);
+    assert_eq!(collect(block_on(items.collect()))?, expected);
+    Ok(())
+}
+
 fn is_missing_hash_pair(res: Result<(), EncodeError>) -> bool {
     matches!(res, Err(EncodeError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData)
 }
