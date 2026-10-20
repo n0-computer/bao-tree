@@ -489,7 +489,9 @@ fn encode_ranges_impl<D: ReadAt + Size, O: Outboard, W: Write>(
                     .load(node)?
                     .ok_or_else(|| EncodeError::missing_hash_pair(node))?;
                 let pair = combine_hash_pair(&l_hash, &r_hash);
-                encoded.write_all(&pair)?;
+                encoded
+                    .write_all(&pair)
+                    .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
             BaoChunk::Leaf {
                 start_chunk,
@@ -512,9 +514,13 @@ fn encode_ranges_impl<D: ReadAt + Size, O: Outboard, W: Write>(
                         &mut out_buf,
                         mode,
                     );
-                    encoded.write_all(&out_buf)?;
+                    encoded
+                        .write_all(&out_buf)
+                        .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
                 } else {
-                    encoded.write_all(buf)?;
+                    encoded
+                        .write_all(buf)
+                        .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
                 }
             }
         }
@@ -589,7 +595,9 @@ fn encode_ranges_validated_impl<D: ReadAt, O: Outboard, W: Write>(
                     stack.push(l_hash);
                 }
                 let pair = combine_hash_pair(&l_hash, &r_hash);
-                encoded.write_all(&pair)?;
+                encoded
+                    .write_all(&pair)
+                    .map_err(|e| EncodeError::maybe_parent_write(e, node))?;
             }
             BaoChunk::Leaf {
                 start_chunk,
@@ -627,7 +635,9 @@ fn encode_ranges_validated_impl<D: ReadAt, O: Outboard, W: Write>(
                 if actual != expected {
                     return Err(EncodeError::LeafHashMismatch(start_chunk));
                 }
-                encoded.write_all(to_write)?;
+                encoded
+                    .write_all(to_write)
+                    .map_err(|e| EncodeError::maybe_leaf_write(e, start_chunk))?;
             }
         }
     }
