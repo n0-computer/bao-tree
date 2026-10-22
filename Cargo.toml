@@ -74,3 +74,6 @@ required-features = ["validate"]
 [[example]]
 name = "encode_decode_async"
 required-features = ["tokio_fsm", "validate"]
+
+[package.metadata.release]
+pre-release-hook = ["git", "cliff", "--unreleased", "--tag", "v{{version}}", "--prepend", "CHANGELOG.md"]
