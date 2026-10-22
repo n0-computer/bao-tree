@@ -2,6 +2,12 @@
 
 All notable changes to bao-tree will be documented in this file.
 
+## [0.17.0](https://github.com/n0-computer/bao-tree/compare/v0.16.1..v0.17.0) - 2026-10-22
+
+### ⚙️ Miscellaneous Tasks
+
+- Add a changelog and the cargo-release changelog hook ([#111](https://github.com/n0-computer/bao-tree/issues/111)) - ([899aeea](https://github.com/n0-computer/bao-tree/commit/899aeeaffbd6f72823d0a4028b131319776a9ff8))
+
 ### ⚠️ Breaking Changes
 
 - The serde impl of `Parent` wrote a sequence length of 2 for its 3 elements, so length prefixed formats like postcard could not deserialize parents. It now writes 3, which changes the wire format of `experimental-mixed` ([#103](https://github.com/n0-computer/bao-tree/issues/103))
