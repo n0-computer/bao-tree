@@ -46,7 +46,7 @@ tempfile = "3.6.0"
 iroh-io = { version = "0.6.2" }
 warp = "0.4.3"
 proc-macro2 = "1.0.66"
-test-strategy = "0.3.1"
+test-strategy = "0.4.5"
 serde = "1"
 clap = { version = "4", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
