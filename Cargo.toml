@@ -37,7 +37,7 @@ default = ["tokio_fsm", "validate", "serde", "fs"]
 
 [dev-dependencies]
 hex = "0.4.3"
-bao = "0.12.1"
+bao = "0.13.1"
 tokio = { version = "1", features = ["full"] }
 proptest = "1.0.0"
 rand = "0.9.5"

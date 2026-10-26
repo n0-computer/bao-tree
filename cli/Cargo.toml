@@ -10,7 +10,7 @@ publish = false
 bao-tree = { path = "../" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1.0.72"
-bao = "0.12.1"
+bao = "0.13.1"
 
 [[bin]]
 name = "bao-tree"
