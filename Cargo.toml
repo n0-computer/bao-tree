@@ -22,7 +22,7 @@ futures-lite = { version = "2.3", optional = true }
 self_cell = { version = "1" }
 iroh-io = { version = "0.6.2", default-features = false, optional = true }
 positioned-io = { version = "0.3.5", default-features = false }
-genawaiter = { version = "0.99.1", features = ["futures03"], optional = true }
+genawaiter = { version = "0.99.1", default-features = false, features = ["futures03"], optional = true }
 tokio = { version = "1", features = ["sync"], default-features = false, optional = true }
 blake3 = { version = "1.8" }
 serde = { version = "1", features = ["derive"], optional = true }
