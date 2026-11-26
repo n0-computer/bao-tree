@@ -15,8 +15,6 @@ updates:
     schedule:
       interval: weekly
       day: "saturday"
-      time: "08:00"
-      timezone: "America/New_York"
   - package-ecosystem: cargo
     directory: /
     cooldown:
@@ -25,8 +23,6 @@ updates:
     schedule:
       interval: weekly
       day: "saturday"
-      time: "08:00"
-      timezone: "America/New_York"
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-patch"]
