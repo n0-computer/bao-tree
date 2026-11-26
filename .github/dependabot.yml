@@ -11,14 +11,22 @@ updates:
     # version updates only -- security updates ignore the cooldown.
     cooldown:
       default-days: 7
+    rebase-strategy: disabled
     schedule:
       interval: weekly
+      day: "saturday"
+      time: "08:00"
+      timezone: "America/New_York"
   - package-ecosystem: cargo
     directory: /
     cooldown:
       default-days: 7
+    rebase-strategy: disabled
     schedule:
       interval: weekly
+      day: "saturday"
+      time: "08:00"
+      timezone: "America/New_York"
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-patch"]
